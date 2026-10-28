@@ -1,0 +1,45 @@
+#!/bin/sh
+set -e
+case "$1" in
+configure)
+    if command -v systemd-sysusers >/dev/null 2>&1; then
+        systemd-sysusers cellglide.conf || true
+    else
+        getent group cellglide >/dev/null || groupadd --system cellglide || true
+        getent passwd cellglide >/dev/null || useradd --system -g cellglide -d /var/lib/cellglide -s /usr/sbin/nologin -c "CellGlide service" cellglide || true
+    fi
+    # Settings written by a development build that ran as root.
+    if [ -d /var/lib/cellglide ]; then chown -R cellglide:cellglide /var/lib/cellglide || true; fi
+    # Containers and chroots have no running systemd; installing must still succeed there.
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        # A first install enables and starts the unit. An upgrade keeps the admin's choice:
+        # it starts the service again only if the unit is enabled.
+        start=0
+        if [ -z "$2" ]; then
+            systemctl enable cellglide.service >/dev/null 2>&1 || true
+            start=1
+        elif systemctl is-enabled --quiet cellglide.service 2>/dev/null; then
+            start=1
+        fi
+        rc=0
+        if [ -x /usr/sbin/policy-rc.d ]; then /usr/sbin/policy-rc.d cellglide start || rc=$?; fi
+        if [ "$start" = 1 ] && [ "$rc" != 101 ]; then
+            systemctl restart cellglide.service || echo "CellGlide: the service did not start; see journalctl -u cellglide" >&2
+        fi
+    fi
+    # Only a first install adds the user to the group.
+    if [ -z "$2" ]; then
+        user="${SUDO_USER:-}"
+        if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then user=$(id -nu "$PKEXEC_UID" 2>/dev/null || true); fi
+        if [ -n "$user" ] && [ "$user" != root ]; then
+            if usermod -aG cellglide "$user" 2>/dev/null; then
+                echo "CellGlide: added $user to the cellglide group; log out and back in to control CellGlide."
+            fi
+        else
+            echo "CellGlide: to control CellGlide, run: sudo usermod -aG cellglide <your user>"
+        fi
+    fi
+    ;;
+esac
+#DEBHELPER#

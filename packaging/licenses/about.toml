@@ -1,0 +1,19 @@
+# cargo-about configuration for the third-party licence list (scripts/update-licenses.sh).
+# Only what the Linux builds link: dev- and build-dependencies stay out, and so do this
+# repository's own crates.
+accepted = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+private = { ignore = true }

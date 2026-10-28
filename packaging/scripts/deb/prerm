@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+case "$1" in
+remove|deconfigure|upgrade)
+    # Stop only: the enable state survives remove, so a reinstall finds the unit enabled.
+    systemctl stop cellglide.service >/dev/null 2>&1 || true
+    ;;
+esac
+#DEBHELPER#

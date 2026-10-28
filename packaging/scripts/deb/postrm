@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+case "$1" in
+remove|purge)
+    # LAN bypass routes left by a crashed service; only CellGlide uses realm 198.
+    ip -4 route flush table main realm 198 2>/dev/null || true
+    ;;
+esac
+if [ "$1" = purge ]; then
+    # Clear the enable symlink kept by remove, so a later install counts as a first install.
+    rm -f /etc/systemd/system/multi-user.target.wants/cellglide.service
+    rm -rf /var/lib/cellglide
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+#DEBHELPER#

@@ -1,0 +1,10 @@
+/target
+*.swp
+.DS_Store
+/dist
+/target-pkg
+/repo
+/.rehearsal.*
+/signed.noindex
+/build.noindex/
+/.superpowers/

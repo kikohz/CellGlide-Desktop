@@ -1,0 +1,25 @@
+[Unit]
+Description=CellGlide: use the iPhone's cellular network over USB
+After=network.target systemd-resolved.service
+
+[Service]
+ExecStart=/usr/bin/cellglide-service
+User=cellglide
+Group=cellglide
+# Read-only access to the journal, so the diagnostics bundle can include CellGlide's own log.
+SupplementaryGroups=systemd-journal
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=cellglide
+RuntimeDirectoryMode=0755
+StateDirectory=cellglide
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

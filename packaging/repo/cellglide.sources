@@ -1,0 +1,5 @@
+Types: deb
+URIs: https://pkg.cellglide.com/apt
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/cellglide-archive-keyring.gpg

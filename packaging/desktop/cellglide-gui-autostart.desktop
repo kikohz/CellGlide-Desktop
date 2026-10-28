@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=CellGlide
+Comment=Use the iPhone's cellular network over USB
+Exec=cellglide-gui --background
+TryExec=cellglide-gui
+Icon=cellglide
+StartupWMClass=cellglide
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

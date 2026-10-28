@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+cg-protocol = { path = "crates/cg-protocol" }
+cg-ipc = { path = "crates/cg-ipc" }
+cg-core = { path = "crates/cg-core" }
+cg-platform = { path = "crates/cg-platform" }
+cg-i18n = { path = "crates/cg-i18n" }
+cg-diag = { path = "crates/cg-diag" }
+cg-tools = { path = "crates/cg-tools" }
+hev-sys = { path = "crates/hev-sys" }
+anyhow = "1.0"
+bytes = "1.12"
+cc = "1.8"
+clap = { version = "4.6", features = ["derive"] }
+fancy-regex = "0.19"
+futures = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1.12", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "image-without-codecs"] }
+jiff = { version = "0.2", features = ["serde"] }
+ksni = "0.3"
+libc = "0.2"
+nix = { version = "0.31", features = ["user", "fs", "hostname"] }
+plist = "1.10"
+rust-i18n = "4.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+socket2 = { version = "0.6", features = ["all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3"
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.28", features = ["v4", "serde"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio", "blocking-api"] }
+webpki-roots = "1"
+
+# Lints every crate inherits ([lints] workspace = true). Only lints with no hits today, so
+# adding this table changed nothing; CI still runs clippy with -D warnings.
+[workspace.lints.rust]
+# Already the default in edition 2024; stated so it stays on.
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

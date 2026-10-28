@@ -1,0 +1,12 @@
+// Lets the CellGlide service set DNS on its own tunnel interface through systemd-resolved.
+polkit.addRule(function (action, subject) {
+    var allowed = [
+        "org.freedesktop.resolve1.set-dns-servers",
+        "org.freedesktop.resolve1.set-domains",
+        "org.freedesktop.resolve1.set-default-route",
+        "org.freedesktop.resolve1.revert"
+    ];
+    if (subject.user === "cellglide" && allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});

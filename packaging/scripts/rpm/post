@@ -1,0 +1,32 @@
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers cellglide.conf || true
+else
+    getent group cellglide >/dev/null || groupadd --system cellglide || true
+    getent passwd cellglide >/dev/null || useradd --system -g cellglide -d /var/lib/cellglide -s /usr/sbin/nologin -c "CellGlide service" cellglide || true
+fi
+if [ -d /var/lib/cellglide ]; then chown -R cellglide:cellglide /var/lib/cellglide || true; fi
+# Containers and chroots have no running systemd; installing must still succeed there.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    # A first install enables and starts the unit. An upgrade keeps the admin's choice:
+    # it starts the service again only if the unit is enabled.
+    if [ "$1" -eq 1 ]; then
+        systemctl enable cellglide.service >/dev/null 2>&1 || true
+        systemctl restart cellglide.service || echo "CellGlide: the service did not start; see journalctl -u cellglide" >&2
+    elif systemctl is-enabled --quiet cellglide.service 2>/dev/null; then
+        systemctl restart cellglide.service || echo "CellGlide: the service did not start; see journalctl -u cellglide" >&2
+    fi
+fi
+# Only a first install adds the user to the group.
+if [ "$1" -eq 1 ]; then
+    user="${SUDO_USER:-}"
+    if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then user=$(id -nu "$PKEXEC_UID" 2>/dev/null || true); fi
+    if [ -n "$user" ] && [ "$user" != root ]; then
+        if usermod -aG cellglide "$user" 2>/dev/null; then
+            echo "CellGlide: added $user to the cellglide group; log out and back in to control CellGlide."
+        fi
+    else
+        echo "CellGlide: to control CellGlide, run: sudo usermod -aG cellglide <your user>"
+    fi
+fi
+exit 0

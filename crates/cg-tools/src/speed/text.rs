@@ -1,0 +1,175 @@
+//! The words for a speed test: failures, the comparison, progress and numbers. Shared by the
+//! terminal and the window.
+
+use super::{Progress, SpeedError, Stage, Verdict, verdict};
+use cg_i18n::tr;
+
+/// The text key of a failure; the details (`minutes`, `code`, `detail`) are filled in by
+/// [`error_text`].
+fn error_key(error: &SpeedError) -> &'static str {
+    match error {
+        SpeedError::NoInterface(_) => "speed.error.no_interface",
+        SpeedError::NotConnected => "speed.error.not_connected",
+        SpeedError::RateLimited { .. } => "speed.error.rate_limited",
+        SpeedError::Refused(_) => "speed.error.refused",
+        SpeedError::Timeout => "speed.error.timeout",
+        SpeedError::ClosedEarly => "speed.error.closed_early",
+        SpeedError::BadLength => "speed.error.bad_length",
+        SpeedError::Chunked => "speed.error.chunked",
+        SpeedError::BadReply => "speed.error.bad_reply",
+        SpeedError::Io(_) => "speed.error.io",
+    }
+}
+
+/// The user's words for a failure.
+pub fn error_text(error: &SpeedError) -> String {
+    let key = error_key(error);
+    match error {
+        SpeedError::RateLimited { minutes } => tr(key, &[("minutes", &minutes.to_string())]),
+        SpeedError::Refused(code) => tr(key, &[("code", &code.to_string())]),
+        SpeedError::Io(detail) => tr(key, &[("detail", detail)]),
+        _ => tr(key, &[]),
+    }
+}
+
+pub fn direction(uploading: bool) -> String {
+    tr(
+        if uploading {
+            "speed.upload"
+        } else {
+            "speed.download"
+        },
+        &[],
+    )
+}
+
+/// "Latency 40 ms · Download 20.0 Mbps · Upload 5.0 Mbps"; missing numbers are left out.
+pub fn numbers(latency: Option<f64>, download: Option<f64>, upload: Option<f64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(ms) = latency {
+        parts.push(format!("{} {ms:.0} ms", tr("speed.latency", &[])));
+    }
+    if let Some(mbps) = download {
+        parts.push(format!("{} {mbps:.1} Mbps", tr("speed.download", &[])));
+    }
+    if let Some(mbps) = upload {
+        parts.push(format!("{} {mbps:.1} Mbps", tr("speed.upload", &[])));
+    }
+    parts.join(" · ")
+}
+
+/// The comparison sentence, when both downloads are known.
+pub fn verdict_line(phone: Option<f64>, wifi: Option<f64>) -> Option<String> {
+    Some(match verdict(phone, wifi)? {
+        Verdict::WifiFaster { ratio } => {
+            tr("speed.wifi_faster", &[("ratio", &format!("{ratio:.1}"))])
+        }
+        Verdict::PhoneFaster { ratio } => {
+            tr("speed.phone_faster", &[("ratio", &format!("{ratio:.1}"))])
+        }
+        Verdict::Similar => tr("speed.similar", &[]),
+    })
+}
+
+/// The one line that is rewritten while a leg runs: the leg, its stage, progress and the
+/// current rate.
+pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
+    let (uploading, rate) = match progress.stage {
+        Stage::Latency => return Some(format!("{label}  {}", tr("speed.stage.latency", &[]))),
+        Stage::Download => (false, progress.result.download),
+        Stage::Upload => (true, progress.result.upload),
+        _ => return None,
+    };
+    let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, 10.0));
+    let mut line = format!(
+        "{label}  {}",
+        tr(
+            "speed.stage.transfer",
+            &[("direction", &direction(uploading)), ("seconds", &seconds)],
+        )
+    );
+    if let Some(mbps) = rate {
+        line.push_str(&format!("  {mbps:.1} Mbps"));
+    }
+    line.push_str(&format!(
+        "  {:.0}%",
+        progress.progress.clamp(0.0, 1.0) * 100.0
+    ));
+    Some(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::MutexGuard;
+
+    fn language(lang: cg_i18n::Lang) -> MutexGuard<'static, ()> {
+        let guard = cg_i18n::lock_for_tests();
+        cg_i18n::set(lang);
+        guard
+    }
+
+    #[test]
+    fn every_error_has_text_without_placeholders() {
+        let _lang = language(cg_i18n::Lang::En);
+        for error in SpeedError::all() {
+            assert!(
+                cg_i18n::KEYS.contains(&error_key(&error)),
+                "{error:?} key missing from KEYS"
+            );
+            for lang in [cg_i18n::Lang::ZhCn, cg_i18n::Lang::En] {
+                cg_i18n::set(lang);
+                let text = error_text(&error);
+                assert!(
+                    !text.is_empty() && !text.contains("%{") && !text.contains("speed."),
+                    "{error:?}: {text}"
+                );
+            }
+        }
+        cg_i18n::set(cg_i18n::Lang::En);
+        assert!(error_text(&SpeedError::RateLimited { minutes: 2 }).contains('2'));
+        assert!(error_text(&SpeedError::Refused(403)).contains("403"));
+        assert!(error_text(&SpeedError::Io("reset".into())).contains("reset"));
+    }
+
+    #[test]
+    fn verdict_sentences() {
+        let _lang = language(cg_i18n::Lang::En);
+        assert_eq!(
+            verdict_line(Some(20.0), Some(60.0)).unwrap(),
+            "Wi‑Fi download is 3.0x faster than the iPhone."
+        );
+        assert_eq!(
+            verdict_line(Some(60.0), Some(20.0)).unwrap(),
+            "iPhone download is 3.0x faster than Wi‑Fi."
+        );
+        assert_eq!(
+            verdict_line(Some(60.0), Some(55.0)).unwrap(),
+            "The two connections run at similar speeds."
+        );
+        assert_eq!(verdict_line(None, Some(55.0)), None);
+    }
+
+    #[test]
+    fn progress_line_shows_stage_seconds_rate_and_percent() {
+        let _lang = language(cg_i18n::Lang::En);
+        let mut p = Progress {
+            stage: Stage::Latency,
+            ..Progress::default()
+        };
+        assert_eq!(
+            progress_line("iPhone", &p).unwrap(),
+            "iPhone  Checking HTTPS latency…"
+        );
+        p.stage = Stage::Download;
+        p.elapsed = 4.4;
+        p.progress = 0.2;
+        p.result.download = Some(18.26);
+        assert_eq!(
+            progress_line("Wi‑Fi", &p).unwrap(),
+            "Wi‑Fi  Testing Download… 4 / 10 s  18.3 Mbps  20%"
+        );
+        p.stage = Stage::Done;
+        assert_eq!(progress_line("iPhone", &p), None);
+    }
+}

@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+# Stop a running engine (from a package or from scripts/install-dev.sh) before files are
+# replaced, and wait until its interface is gone (AGENTS.md).
+if systemctl is-active --quiet cellglide 2>/dev/null; then
+    systemctl stop cellglide || true
+fi
+i=0
+while ip link show cellglide0 >/dev/null 2>&1 && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+if ip link show cellglide0 >/dev/null 2>&1; then
+    echo "CellGlide: cellglide0 is still up; stop the old CellGlide and try again" >&2
+    exit 1
+fi
+# A development install keeps its own unit, binaries and polkit rule; packages own these paths from now on.
+if [ -f /etc/systemd/system/cellglide.service ] && grep -q /usr/local/bin/cellglide-service /etc/systemd/system/cellglide.service; then
+    systemctl disable cellglide 2>/dev/null || true
+    rm -f /etc/systemd/system/cellglide.service /usr/local/bin/cellglide-service /usr/local/bin/cellglide /usr/local/bin/cellglide-gui \
+        /etc/polkit-1/rules.d/50-cellglide.rules /etc/polkit-1/localauthority/50-local.d/cellglide.pkla
+    systemctl daemon-reload || true
+fi

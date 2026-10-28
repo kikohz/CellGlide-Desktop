@@ -1,0 +1,31 @@
+[package]
+name = "cg-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cellglide"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+cg-diag.workspace = true
+cg-i18n.workspace = true
+cg-ipc.workspace = true
+cg-tools.workspace = true
+clap.workspace = true
+jiff.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,7 @@
+# Versions already published to pkg.cellglide.com, one per line (deb/rpm spelling, as printed by
+# scripts/pkg-version.sh). scripts/sign-and-publish.sh rebuilds the whole repository from
+# dist/<version>/ for every version listed here plus the current one, so apt never sees a
+# package vanish. A completed real upload appends the current version; commit the change.
+1.0.0~beta.1
+1.0.0~beta.2
+1.0.0

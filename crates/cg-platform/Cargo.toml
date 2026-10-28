@@ -1,0 +1,23 @@
+[package]
+name = "cg-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cg-core.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hev-sys.workspace = true
+libc.workspace = true
+zbus.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tracing-subscriber.workspace = true

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=CellGlide
+Comment=Use the iPhone's cellular network over USB
+Comment[zh_CN]=经 iPhone 的蜂窝网络上网
+Exec=cellglide-gui
+TryExec=cellglide-gui
+Icon=cellglide
+StartupWMClass=cellglide
+Terminal=false
+Categories=Network;
+Keywords=iPhone;cellular;USB;tethering;

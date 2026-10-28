@@ -1,0 +1,4 @@
+if [ "$1" -eq 0 ]; then
+    ip -4 route flush table main realm 198 2>/dev/null || true
+fi
+systemctl daemon-reload || true

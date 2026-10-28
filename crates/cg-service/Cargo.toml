@@ -1,0 +1,111 @@
+[package]
+name = "cg-service"
+description = "Use the iPhone's cellular network over USB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cellglide-service"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+cg-core.workspace = true
+cg-diag.workspace = true
+cg-ipc.workspace = true
+cg-platform.workspace = true
+jiff.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+
+# nix does not build on Windows; the service is Unix-only.
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+cg-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
+[package.metadata.deb]
+name = "cellglide"
+maintainer = "CellGlide <support@cellglide.com>"
+copyright = "2026 CellGlide"
+section = "net"
+priority = "optional"
+depends = "$auto, usbmuxd, iproute2"
+recommends = "polkitd | policykit-1"
+suggests = "systemd-resolved"
+extended-description = """\
+CellGlide lets this computer use an iPhone's cellular network over a USB cable. \
+Install the CellGlide app on the iPhone, plug it in and start sharing."""
+maintainer-scripts = "../../packaging/scripts/deb"
+assets = [
+    ["target/release/cellglide-service", "usr/bin/", "755"],
+    ["target/release/cellglide", "usr/bin/", "755"],
+    ["target/release/cellglide-gui", "usr/bin/", "755"],
+    ["../../packaging/cellglide.service", "usr/lib/systemd/system/cellglide.service", "644"],
+    ["../../packaging/sysusers.conf", "usr/lib/sysusers.d/cellglide.conf", "644"],
+    ["../../packaging/system-sleep/cellglide", "usr/lib/systemd/system-sleep/cellglide", "755"],
+    ["../../packaging/desktop/cellglide.desktop", "usr/share/applications/cellglide.desktop", "644"],
+    ["../../packaging/desktop/cellglide-gui-autostart.desktop", "etc/xdg/autostart/cellglide-gui.desktop", "644"],
+    ["../../packaging/icons/64.png", "usr/share/icons/hicolor/64x64/apps/cellglide.png", "644"],
+    ["../../packaging/icons/128.png", "usr/share/icons/hicolor/128x128/apps/cellglide.png", "644"],
+    ["../../packaging/icons/256.png", "usr/share/icons/hicolor/256x256/apps/cellglide.png", "644"],
+    ["../../packaging/icons/tray/cellglide-tray-symbolic.svg", "usr/share/icons/hicolor/scalable/status/cellglide-tray-symbolic.svg", "644"],
+    ["../../packaging/icons/tray/cellglide-tray-active-symbolic.svg", "usr/share/icons/hicolor/scalable/status/cellglide-tray-active-symbolic.svg", "644"],
+    ["../../packaging/icons/tray/cellglide-tray-alert-symbolic.svg", "usr/share/icons/hicolor/scalable/status/cellglide-tray-alert-symbolic.svg", "644"],
+    ["../../packaging/icons/tray/cellglide-tray-active-alert-symbolic.svg", "usr/share/icons/hicolor/scalable/status/cellglide-tray-active-alert-symbolic.svg", "644"],
+    ["../../packaging/repo/cellglide.sources", "etc/apt/sources.list.d/cellglide.sources", "644"],
+    ["../../packaging/keys/cellglide-archive-keyring.gpg", "etc/apt/keyrings/cellglide-archive-keyring.gpg", "644"],
+    ["../../packaging/polkit/50-cellglide.rules", "usr/share/polkit-1/rules.d/50-cellglide.rules", "644"],
+    ["../cg-gui/assets/third-party-licenses.txt", "usr/share/doc/cellglide/THIRD-PARTY-LICENSES.txt", "644"],
+    ["../../packaging/polkit/cellglide.pkla", "var/lib/polkit-1/localauthority/10-vendor.d/cellglide.pkla", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "cellglide"
+summary = "Use the iPhone's cellular network over USB"
+pre_install_script = "../../packaging/scripts/rpm/pre"
+post_install_script = "../../packaging/scripts/rpm/post"
+pre_uninstall_script = "../../packaging/scripts/rpm/preun"
+post_uninstall_script = "../../packaging/scripts/rpm/postun"
+assets = [
+    { source = "target/release/cellglide-service", dest = "/usr/bin/cellglide-service", mode = "755" },
+    { source = "target/release/cellglide", dest = "/usr/bin/cellglide", mode = "755" },
+    { source = "target/release/cellglide-gui", dest = "/usr/bin/cellglide-gui", mode = "755" },
+    { source = "../../packaging/cellglide.service", dest = "/usr/lib/systemd/system/cellglide.service", mode = "644" },
+    { source = "../../packaging/sysusers.conf", dest = "/usr/lib/sysusers.d/cellglide.conf", mode = "644" },
+    { source = "../../packaging/system-sleep/cellglide", dest = "/usr/lib/systemd/system-sleep/cellglide", mode = "755" },
+    { source = "../../packaging/desktop/cellglide.desktop", dest = "/usr/share/applications/cellglide.desktop", mode = "644" },
+    { source = "../../packaging/desktop/cellglide-gui-autostart.desktop", dest = "/etc/xdg/autostart/cellglide-gui.desktop", mode = "644", config = "noreplace" },
+    { source = "../../packaging/icons/64.png", dest = "/usr/share/icons/hicolor/64x64/apps/cellglide.png", mode = "644" },
+    { source = "../../packaging/icons/128.png", dest = "/usr/share/icons/hicolor/128x128/apps/cellglide.png", mode = "644" },
+    { source = "../../packaging/icons/256.png", dest = "/usr/share/icons/hicolor/256x256/apps/cellglide.png", mode = "644" },
+    { source = "../../packaging/icons/tray/cellglide-tray-symbolic.svg", dest = "/usr/share/icons/hicolor/scalable/status/cellglide-tray-symbolic.svg", mode = "644" },
+    { source = "../../packaging/icons/tray/cellglide-tray-active-symbolic.svg", dest = "/usr/share/icons/hicolor/scalable/status/cellglide-tray-active-symbolic.svg", mode = "644" },
+    { source = "../../packaging/icons/tray/cellglide-tray-alert-symbolic.svg", dest = "/usr/share/icons/hicolor/scalable/status/cellglide-tray-alert-symbolic.svg", mode = "644" },
+    { source = "../../packaging/icons/tray/cellglide-tray-active-alert-symbolic.svg", dest = "/usr/share/icons/hicolor/scalable/status/cellglide-tray-active-alert-symbolic.svg", mode = "644" },
+    { source = "../../packaging/repo/cellglide.repo", dest = "/etc/yum.repos.d/cellglide.repo", mode = "644", config = "noreplace" },
+    { source = "../../packaging/keys/RPM-GPG-KEY-cellglide", dest = "/etc/pki/rpm-gpg/RPM-GPG-KEY-cellglide", mode = "644" },
+    { source = "../../packaging/polkit/50-cellglide.rules", dest = "/usr/share/polkit-1/rules.d/50-cellglide.rules", mode = "644" },
+    { source = "../cg-gui/assets/third-party-licenses.txt", dest = "/usr/share/doc/cellglide/THIRD-PARTY-LICENSES.txt", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+usbmuxd = "*"
+iproute = "*"
+
+[package.metadata.generate-rpm.recommends]
+polkit = "*"
+
+[package.metadata.generate-rpm.suggests]
+systemd-resolved = "*"

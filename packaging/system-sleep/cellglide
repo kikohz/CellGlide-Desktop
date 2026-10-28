@@ -1,0 +1,14 @@
+#!/bin/sh
+# systemd-sleep hook: after resume, make sure usbmuxd still sees the iPhone.
+# usbmuxd 1.1.1 can drop a phone the kernel only reset, and never re-add it.
+# The check runs detached so it never delays resume. It only reads sysfs, talks to
+# usbmuxd's socket and asks systemd (over D-Bus) to restart usbmuxd, so the unit is
+# sandboxed: no new privileges, read-only system, no home directories, private /tmp.
+case "$1" in
+    post)
+        systemd-run --no-block --quiet --collect --on-active=3 \
+            -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes \
+            /usr/bin/cellglide-service resume-check || true
+        ;;
+esac
+exit 0
