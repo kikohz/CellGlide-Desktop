@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::io;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows::Win32::Foundation::{HANDLE, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -144,8 +144,35 @@ pub fn blocked_ppp(if_type: u32, alias: &str, ras: Option<&[RasConnection]>) -> 
 pub struct StrictDns {
     /// Boxed so the address handed to `NotifyIpInterfaceChange` stays put. `None` only
     /// inside `Drop`.
-    rules: Option<Box<Mutex<Rules>>>,
+    shared: Option<Box<Shared>>,
     notify: HANDLE,
+}
+
+/// What the interface notification shares with `StrictDns`.
+struct Shared {
+    /// One sync at a time, so an older view of the adapters is never applied after a
+    /// newer one. Held while the adapters and RAS are asked; `rules` is not.
+    syncing: Mutex<()>,
+    rules: Mutex<Rules>,
+}
+
+impl Shared {
+    /// Brings the per-LUID filters in line with the adapters present now. The adapters
+    /// and RAS (an RPC to RasMan) are asked before `rules` is locked and outside any WFP
+    /// transaction: RasMan may itself be waiting on BFE, which holds its write lock for
+    /// as long as a transaction is open.
+    fn sync(&self) -> io::Result<()> {
+        let _one = self.syncing.lock().unwrap_or_else(PoisonError::into_inner);
+        let our_luid = {
+            let rules = lock(&self.rules);
+            if rules.engine.is_invalid() {
+                return Ok(());
+            }
+            rules.our_luid
+        };
+        let wanted = wanted(our_luid)?;
+        lock(&self.rules).apply(&wanted)
+    }
 }
 
 // SAFETY: a WFP engine handle and a notification handle may be used and closed from any
@@ -159,8 +186,12 @@ impl std::fmt::Debug for StrictDns {
 }
 
 impl StrictDns {
+    fn shared(&self) -> &Shared {
+        self.shared.as_deref().expect("rules present until drop")
+    }
+
     fn rules(&self) -> &Mutex<Rules> {
-        self.rules.as_deref().expect("rules present until drop")
+        &self.shared().rules
     }
 
     /// The LUIDs that currently have a permit as virtual adapters (for tests).
@@ -176,13 +207,13 @@ impl StrictDns {
 
 impl Drop for StrictDns {
     fn drop(&mut self) {
-        let Some(rules) = self.rules.take() else {
+        let Some(shared) = self.shared.take() else {
             return;
         };
         let mut cancelled = true;
         if !self.notify.is_invalid() {
             // SAFETY: the handle came from NotifyIpInterfaceChange and is cancelled once;
-            // the call waits for a running callback, so `rules` outlives every callback.
+            // the call waits for a running callback, so `shared` outlives every callback.
             let result = unsafe { CancelMibChangeNotify2(self.notify) };
             if result != NO_ERROR {
                 cancelled = false;
@@ -192,7 +223,10 @@ impl Drop for StrictDns {
                 );
             }
         }
-        let engine = lock(&rules).engine;
+        // Taken out first: a callback still to come (when cancelling failed) finds no
+        // engine and does nothing, rather than using a closed handle, whose value the next
+        // connection's engine may reuse.
+        let engine = std::mem::take(&mut lock(&shared.rules).engine);
         // SAFETY: the handle came from FwpmEngineOpen0 and is closed once. Closing a
         // dynamic session deletes the sublayer and filters it added.
         let result = unsafe { FwpmEngineClose0(engine) };
@@ -200,9 +234,8 @@ impl Drop for StrictDns {
             tracing::warn!("closing the strict DNS session: {}", wfp_error(result));
         }
         if !cancelled {
-            // A callback may still come: it must find the state alive (its WFP calls on the
-            // closed engine just fail).
-            Box::leak(rules);
+            // A callback may still come: it must find the state alive.
+            Box::leak(shared);
         }
     }
 }
@@ -228,11 +261,13 @@ enum Kind {
 }
 
 impl Rules {
-    /// Brings the per-LUID filters in line with the adapters present now: adds what is
-    /// missing (including a layer that failed last time), deletes what is no longer
-    /// wanted.
-    fn sync(&mut self) -> io::Result<()> {
-        let wanted = wanted(self.our_luid)?;
+    /// Brings the per-LUID filters in line with `wanted`: adds what is missing (including
+    /// a layer that failed last time), deletes what is no longer wanted. Nothing once the
+    /// engine is gone.
+    fn apply(&mut self, wanted: &Wanted) -> io::Result<()> {
+        if self.engine.is_invalid() {
+            return Ok(());
+        }
         let exempt = reconcile(
             self.engine,
             &mut self.exempt,
@@ -339,20 +374,25 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
     check(result, "FwpmEngineOpen0")?;
     // From here on an early return closes the engine, which also drops anything added.
     let mut strict = StrictDns {
-        rules: Some(Box::new(Mutex::new(Rules {
-            engine,
-            our_luid,
-            exempt: BTreeMap::new(),
-            ppp_blocked: BTreeMap::new(),
-        }))),
+        shared: Some(Box::new(Shared {
+            syncing: Mutex::new(()),
+            rules: Mutex::new(Rules {
+                engine,
+                our_luid,
+                exempt: BTreeMap::new(),
+                ppp_blocked: BTreeMap::new(),
+            }),
+        })),
         notify: HANDLE::default(),
     };
+    // Asked before the transaction: it may call RAS, which mustn't wait inside one.
+    let wanted = wanted(our_luid)?;
     // SAFETY: the engine handle is open.
     check(
         unsafe { FwpmTransactionBegin0(engine, 0) },
         "FwpmTransactionBegin0",
     )?;
-    let added = add_rules(engine, our_luid).and_then(|()| lock(strict.rules()).sync());
+    let added = add_rules(engine, our_luid).and_then(|()| lock(strict.rules()).apply(&wanted));
     if let Err(error) = added {
         // SAFETY: as above, inside the transaction we began.
         let _ = unsafe { FwpmTransactionAbort0(engine) };
@@ -364,7 +404,7 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
         "FwpmTransactionCommit0",
     )?;
 
-    let context: *const Mutex<Rules> = strict.rules();
+    let context: *const Shared = strict.shared();
     let mut notify = HANDLE::default();
     // SAFETY: the context points into the box, which outlives the registration (Drop
     // cancels it first, or leaks the box); the callback matches
@@ -386,8 +426,8 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
             io::Error::from_raw_os_error(result.0 as i32)
         );
     }
-    // An interface that came between the first sync and the registration.
-    if let Err(error) = lock(strict.rules()).sync() {
+    // An interface that came between the first look and the registration.
+    if let Err(error) = strict.shared().sync() {
         tracing::warn!("strict DNS: updating the per-interface filters: {error}");
     }
     Ok(strict)
@@ -400,9 +440,10 @@ unsafe extern "system" fn on_interface_change(
     _row: *const MIB_IPINTERFACE_ROW,
     _kind: MIB_NOTIFICATION_TYPE,
 ) {
-    // SAFETY: the context is the boxed mutex, alive until the registration is cancelled.
-    let rules = unsafe { &*context.cast::<Mutex<Rules>>() };
-    if let Err(error) = lock(rules).sync() {
+    // SAFETY: the context is the boxed `Shared`, alive until the registration is
+    // cancelled (or leaked when cancelling fails).
+    let shared = unsafe { &*context.cast::<Shared>() };
+    if let Err(error) = shared.sync() {
         tracing::warn!("strict DNS: updating the per-interface filters: {error}");
     }
 }
@@ -758,6 +799,32 @@ mod tests {
         assert!(blocked_ppp(23, "Mystery", Some(&[ras("Work VPN", false)])));
         assert!(blocked_ppp(23, "Mystery", Some(&[])));
         assert!(blocked_ppp(23, "Work VPN", None));
+    }
+
+    /// Once Drop has taken the engine (as on the leak path, where a callback can still
+    /// come), a sync touches nothing: no WFP call on a closed handle whose value the next
+    /// connection's engine may reuse, and no enumeration either.
+    #[test]
+    fn without_an_engine_nothing_is_applied() {
+        let mut rules = Rules {
+            engine: HANDLE::default(),
+            our_luid: 1,
+            exempt: BTreeMap::new(),
+            ppp_blocked: BTreeMap::from([(7, [Some(70), Some(71)])]),
+        };
+        let wanted = Wanted {
+            exempt: vec![2, 3],
+            ppp_blocked: Vec::new(),
+        };
+        rules.apply(&wanted).unwrap();
+        assert!(rules.exempt.is_empty());
+        assert_eq!(rules.ppp_blocked.len(), 1, "nothing deleted either");
+        let shared = Shared {
+            syncing: Mutex::new(()),
+            rules: Mutex::new(rules),
+        };
+        shared.sync().unwrap();
+        assert!(lock(&shared.rules).exempt.is_empty());
     }
 
     #[test]
