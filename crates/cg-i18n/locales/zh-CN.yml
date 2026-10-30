@@ -332,6 +332,7 @@ history:
     bypass_update_failed: "网络切换后局域网路由更新失败，下次变化时重试"
     dns_not_authorized: "系统没有让 CellGlide 设置 DNS"
     strict_dns_unavailable: "严格 DNS 没能开启，DNS 查询可能同时发往其他网络"
+    unknown: "其他事件"
   detail:
     cable_latency: "数据线延迟"
     phone_latency: "手机延迟"

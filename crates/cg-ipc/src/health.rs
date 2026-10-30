@@ -142,6 +142,10 @@ pub enum EventKind {
     DnsNotAuthorized,
     /// Windows: strict DNS couldn't be turned on for this connection.
     StrictDnsUnavailable,
+    /// A kind this build doesn't know, from a newer service. Never written: cg-core only
+    /// records the kinds above.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -160,6 +164,7 @@ impl EventKind {
             EventKind::BypassUpdateFailed,
             EventKind::DnsNotAuthorized,
             EventKind::StrictDnsUnavailable,
+            EventKind::Unknown,
         ];
         for kind in &all {
             match kind {
@@ -173,7 +178,8 @@ impl EventKind {
                 | EventKind::BypassUnavailable
                 | EventKind::BypassUpdateFailed
                 | EventKind::DnsNotAuthorized
-                | EventKind::StrictDnsUnavailable => {}
+                | EventKind::StrictDnsUnavailable
+                | EventKind::Unknown => {}
             }
         }
         all
@@ -467,6 +473,34 @@ mod tests {
         assert_eq!(strip_fraction(before, b, n), 0.0);
         let plain = day_bounds(jiff::civil::date(2026, 10, 19), &la).unwrap();
         assert_eq!(plain.1.duration_since(plain.0).as_hours(), 24);
+    }
+
+    /// A kind from a newer service reads as unknown rather than failing the whole record.
+    #[test]
+    fn unknown_event_kind_parses() {
+        let e: HealthEvent =
+            serde_json::from_str(r#"{"t":"2026-10-30T00:00:00Z","kind":"futureKind"}"#).unwrap();
+        assert_eq!(e.kind, EventKind::Unknown);
+    }
+
+    /// Unknown events paint nothing on the strip and change nothing about a day's start.
+    #[test]
+    fn unknown_events_are_ignored_by_the_strip() {
+        let events = [
+            HealthEvent::new(hm(9, 0), EventKind::TunnelStarted),
+            HealthEvent::new(hm(10, 0), EventKind::Unknown),
+            HealthEvent::new(hm(12, 0), EventKind::TunnelStopped),
+        ];
+        let without: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind != EventKind::Unknown)
+            .cloned()
+            .collect();
+        assert_eq!(
+            day_spans(&events, DayStart::default(), hm(0, 0), hm(18, 0)),
+            day_spans(&without, DayStart::default(), hm(0, 0), hm(18, 0))
+        );
+        assert_eq!(day_start(&events), day_start(&without));
     }
 
     #[test]

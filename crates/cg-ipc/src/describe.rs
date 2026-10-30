@@ -55,7 +55,7 @@ pub fn strict_dns_line(snapshot: &Snapshot) -> Option<String> {
         return None;
     }
     match snapshot.strict_dns {
-        StrictDns::NotApplicable => None,
+        StrictDns::NotApplicable | StrictDns::Unknown => None,
         StrictDns::On => Some(tr("state.strict_dns_on", &[])),
         StrictDns::Off { .. } => Some(tr("state.strict_dns_off", &[])),
     }
@@ -572,6 +572,7 @@ fn event_key(kind: EventKind) -> Option<&'static str> {
         EventKind::BypassUpdateFailed => "history.event.bypass_update_failed",
         EventKind::DnsNotAuthorized => "history.event.dns_not_authorized",
         EventKind::StrictDnsUnavailable => "history.event.strict_dns_unavailable",
+        EventKind::Unknown => "history.event.unknown",
     })
 }
 
@@ -603,7 +604,8 @@ pub fn event_title(e: &HealthEvent) -> String {
         | EventKind::BypassUnavailable
         | EventKind::BypassUpdateFailed
         | EventKind::DnsNotAuthorized
-        | EventKind::StrictDnsUnavailable => event_key(e.kind)
+        | EventKind::StrictDnsUnavailable
+        | EventKind::Unknown => event_key(e.kind)
             .map(|key| tr(key, &[]))
             .unwrap_or_default(),
     }
@@ -1005,6 +1007,20 @@ mod tests {
                 .unwrap()
                 .starts_with("Strict DNS: off")
         );
+    }
+
+    /// A state from a newer service: no line rather than a guess.
+    #[test]
+    fn unknown_strict_dns_shows_nothing() {
+        let s = Snapshot {
+            state: ConnState::Connected {
+                phone_version: "2.4.0".into(),
+                dns: DnsMode::Phone,
+            },
+            strict_dns: StrictDns::Unknown,
+            ..Snapshot::default()
+        };
+        assert_eq!(strict_dns_line(&s), None);
     }
 
     #[test]
@@ -2048,6 +2064,10 @@ mod tests {
         );
         assert_eq!(
             event_tone(&at(EventKind::UsbAttached, None, None)),
+            EventTone::Gray
+        );
+        assert_eq!(
+            event_tone(&at(EventKind::Unknown, None, None)),
             EventTone::Gray
         );
     }

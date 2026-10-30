@@ -42,9 +42,17 @@ async fn connect(endpoint: &Endpoint) -> Result<(Reader, Writer), ClientError> {
     }
 }
 
-/// Only the service's own pipe name is checked; tests serve pipes of their own.
+/// Only the service's own pipe name is checked; tests serve pipes of their own. Every
+/// spelling Windows opens as that pipe counts: `/` for `\`, `\\localhost\` for `\\.\`, any case.
 #[cfg(windows)]
 fn verifies(name: &str) -> bool {
+    let name = name.replace('/', "\\");
+    let name = match name.get(..12) {
+        Some(host) if host.eq_ignore_ascii_case(r"\\localhost\") => {
+            format!(r"\\.\{}", &name[12..])
+        }
+        _ => name,
+    };
     name.eq_ignore_ascii_case(crate::PIPE_NAME)
 }
 
@@ -471,6 +479,20 @@ mod tests {
     fn only_the_system_pipe_is_verified() {
         assert!(verifies(crate::PIPE_NAME));
         assert!(!verifies(r"\\.\pipe\cellglide-test"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verifies_every_spelling_of_the_service_pipe() {
+        for name in [
+            r"\\.\pipe\cellglide-control",
+            r"\\.\PIPE\CellGlide-Control",
+            r"\\localhost\pipe\cellglide-control",
+            "//./pipe/cellglide-control",
+        ] {
+            assert!(verifies(name), "{name}");
+        }
+        assert!(!verifies(r"\\.\pipe\other"));
     }
 
     /// The text for `key` in either language: other tests may switch the language meanwhile.

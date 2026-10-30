@@ -225,6 +225,7 @@ pub const KEYS: &[&str] = &[
     "history.event.bypass_update_failed",
     "history.event.dns_not_authorized",
     "history.event.strict_dns_unavailable",
+    "history.event.unknown",
     "history.detail.cable_latency",
     "history.detail.phone_latency",
     "history.detail.loss",

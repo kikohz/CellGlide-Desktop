@@ -332,6 +332,7 @@ history:
     bypass_update_failed: "Couldn't update the local network routes after a network change; retrying on the next change"
     dns_not_authorized: "The system didn't let CellGlide set DNS"
     strict_dns_unavailable: "Strict DNS couldn't be turned on; DNS queries may also go to other networks"
+    unknown: "Other event"
   detail:
     cable_latency: "Cable latency"
     phone_latency: "iPhone latency"

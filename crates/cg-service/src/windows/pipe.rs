@@ -21,6 +21,9 @@ pub struct PipeListener {
     next: Option<NamedPipeServer>,
     #[cfg(test)]
     pub(crate) faults: Faults,
+    /// Instances [`PipeListener::create`] made (the first, from `bind`, not counted).
+    #[cfg(test)]
+    pub(crate) created: u32,
 }
 
 /// Creates the first instance of the pipe. If the name is already taken (another program
@@ -47,6 +50,8 @@ pub(crate) fn bind_with(name: &str, sddl: &str) -> io::Result<PipeListener> {
         next: Some(first),
         #[cfg(test)]
         faults: Faults::default(),
+        #[cfg(test)]
+        created: 0,
     })
 }
 
@@ -96,11 +101,11 @@ impl Listener for PipeListener {
                 return Err(error);
             }
             // The next client finds an instance waiting before this one is handed over. If
-            // there can't be one, this client is let go and its instance listens instead.
+            // there can't be one, this client is let go and an instance listens in its place.
             match self.create() {
                 Ok(next) => self.next = Some(next),
                 Err(error) => {
-                    self.keep_listening(pipe);
+                    self.replace_after_connect(pipe);
                     return Err(error);
                 }
             }
@@ -123,9 +128,30 @@ impl Listener for PipeListener {
 }
 
 impl PipeListener {
-    /// Makes `pipe` (connected, or failed to connect) the instance the next client connects
-    /// to. If it can't be disconnected for reuse, a fresh instance replaces it, created before
-    /// the old one closes; failing that, the old one stays so the name remains ours.
+    /// `pipe` had a client connect, and that client is being let go. A fresh instance takes
+    /// its place, created before the old one closes: a connected instance reused after
+    /// `disconnect` can keep the last client's state (mio's pending read, or its error), so
+    /// the next client could read what was meant for the last one. Only if no fresh instance
+    /// can be made is the old one disconnected and reused, so the name remains ours.
+    fn replace_after_connect(&mut self, pipe: NamedPipeServer) {
+        match self.create() {
+            Ok(fresh) => {
+                self.next = Some(fresh);
+                drop(pipe);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "can't replace a used control pipe instance; reusing it");
+                if let Err(error) = pipe.disconnect() {
+                    tracing::warn!(%error, "can't disconnect a used control pipe instance");
+                }
+                self.next = Some(pipe);
+            }
+        }
+    }
+
+    /// Makes `pipe`, which failed to connect, the instance the next client connects to. If
+    /// it can't be disconnected for reuse, a fresh instance replaces it, created before the
+    /// old one closes; failing that, the old one stays so the name remains ours.
     fn keep_listening(&mut self, pipe: NamedPipeServer) {
         if pipe.disconnect().is_ok() {
             self.next = Some(pipe);
@@ -141,7 +167,12 @@ impl PipeListener {
             self.faults.creates -= 1;
             return Err(io::Error::other("injected create failure"));
         }
-        create(&self.name, &self.sddl, false)
+        let pipe = create(&self.name, &self.sddl, false)?;
+        #[cfg(test)]
+        {
+            self.created += 1;
+        }
+        Ok(pipe)
     }
 
     /// Waits for a client on `pipe`.
@@ -463,10 +494,10 @@ pub(crate) mod tests {
         served_at_once(&endpoint).await;
     }
 
-    /// When connecting fails, or creating the next instance does, the instance in hand
-    /// keeps listening (a connected client is let go rather than handed over with no
-    /// instance behind it), so the name is never free for a squatter, and the service
-    /// serves again once the failures stop.
+    /// When connecting fails, or creating the next instance does, an instance keeps
+    /// listening (the one in hand, or one made in its place; a connected client is let go
+    /// rather than handed over with no instance behind it), so the name is never free for a
+    /// squatter, and the service serves again once the failures stop.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failures_never_free_the_name() {
         let name = random_pipe_name();
@@ -484,6 +515,60 @@ pub(crate) mod tests {
         assert!(flooded.tries > 100, "tried {}", flooded.tries);
         assert_eq!(flooded.squatted, 0, "the name was free");
         served_at_once(&Endpoint::Pipe(name)).await;
+    }
+
+    /// Reads one request from `conn` and answers it with Hello.
+    async fn serve_one_hello(conn: NamedPipeServer) {
+        let mut conn = BufReader::new(conn);
+        let line = cg_ipc::read_line(&mut conn).await.unwrap().unwrap();
+        assert!(matches!(
+            cg_ipc::from_line::<Request>(&line).unwrap(),
+            Request::Hello
+        ));
+        let hello = Response::Hello {
+            protocol: cg_ipc::PROTOCOL_VERSION,
+            version: "test".into(),
+        };
+        conn.get_mut()
+            .write_all(&cg_ipc::to_line(&hello))
+            .await
+            .unwrap();
+    }
+
+    /// A client connected, then the next instance couldn't be made: the connected instance
+    /// is replaced by a fresh one rather than disconnected and reused, and that fresh one
+    /// serves the next client.
+    #[tokio::test]
+    async fn after_a_failed_next_instance_a_fresh_one_is_made() {
+        let name = random_pipe_name();
+        let mut listener = bind_with(&name, &test_sddl()).unwrap();
+        let before = listener.created;
+        let client = tokio::spawn({
+            let name = name.clone();
+            async move {
+                tokio::net::windows::named_pipe::ClientOptions::new()
+                    .open(&name)
+                    .unwrap()
+            }
+        });
+        listener.faults.creates = 1;
+        assert!(listener.accept().await.is_err());
+        drop(client.await.unwrap());
+        assert_eq!(
+            listener.created,
+            before + 1,
+            "the connected instance was reused instead of replaced"
+        );
+        let reply =
+            tokio::spawn(
+                async move { client::request(&Endpoint::Pipe(name), &Request::Hello).await },
+            );
+        let (conn, _) = listener.accept().await.unwrap();
+        serve_one_hello(conn).await;
+        assert!(matches!(
+            reply.await.unwrap().unwrap(),
+            Response::Hello { .. }
+        ));
     }
 
     #[tokio::test]

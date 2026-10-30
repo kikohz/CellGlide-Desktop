@@ -254,7 +254,7 @@ pub fn environment(snapshot: &Snapshot, checks: &[Check], root: &Path) -> BTreeM
     map.insert("CellGlide".into(), env!("CARGO_PKG_VERSION").into());
     map.insert("State".into(), state_text(&snapshot.state));
     match &snapshot.strict_dns {
-        StrictDns::NotApplicable => {}
+        StrictDns::NotApplicable | StrictDns::Unknown => {}
         StrictDns::On => {
             map.insert("StrictDns".into(), "on".into());
         }
@@ -942,6 +942,9 @@ mod tests {
             environment(&snapshot, &[], root.path())["StrictDns"],
             "off (BFE unavailable)"
         );
+        snapshot.strict_dns = StrictDns::Unknown;
+        let env = environment(&snapshot, &[], root.path());
+        assert!(!env.contains_key("StrictDns"), "{env:?}");
     }
 
     #[test]

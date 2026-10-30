@@ -251,6 +251,9 @@ pub enum StrictDns {
     Off {
         reason: String,
     },
+    /// A state this build doesn't know, from a newer service: shown as nothing.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -620,6 +623,13 @@ mod tests {
             from_line::<Snapshot>(old).unwrap().strict_dns,
             StrictDns::NotApplicable
         );
+    }
+
+    /// A state from a newer service reads as unknown rather than failing the whole snapshot.
+    #[test]
+    fn unknown_strict_dns_state_parses() {
+        let s: StrictDns = serde_json::from_str(r#"{"state":"something_new"}"#).unwrap();
+        assert_eq!(s, StrictDns::Unknown);
     }
 
     #[test]
