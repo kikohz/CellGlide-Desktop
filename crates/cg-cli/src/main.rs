@@ -133,6 +133,9 @@ mod cli {
 
     fn print_snapshot(snapshot: &cg_ipc::Snapshot) {
         outln!("{}", describe::state_line(snapshot));
+        if let Some(line) = describe::strict_dns_line(snapshot) {
+            outln!("{line}");
+        }
         if let Some(card) = &snapshot.phone {
             for line in describe::phone_lines(card) {
                 outln!("{line}");

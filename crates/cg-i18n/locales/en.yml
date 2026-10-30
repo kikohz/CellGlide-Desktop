@@ -10,6 +10,8 @@ state:
   connected_dns_unmanaged: "Connected. This computer is using the phone's network (CellGlide %{version} on the phone), but the system didn't let CellGlide set DNS, so lookups still use the original network and websites won't open without another network. Run cellglide doctor to see why and how to fix it"
   connected_public_dns: "Connected. This computer is using the phone's network (CellGlide %{version} on the phone; CellGlide DNS is off on the phone, so public DNS is used)"
   retrying: "Couldn't connect, retrying shortly: %{reason}"
+  strict_dns_on: "Strict DNS: on (DNS queries can only go through the phone)"
+  strict_dns_off: "Strict DNS: off, so Windows may also send DNS queries to your other networks' DNS servers. Run cellglide diagnostics for the reason"
 phone:
   card_title: "iPhone"
   detecting: "Detecting"
@@ -328,6 +330,7 @@ history:
     bypass_unavailable: "No original gateway found, so local network devices are reached through the phone for now"
     bypass_update_failed: "Couldn't update the local network routes after a network change; retrying on the next change"
     dns_not_authorized: "The system didn't let CellGlide set DNS"
+    strict_dns_unavailable: "Strict DNS couldn't be turned on; DNS queries may also go to other networks"
   detail:
     cable_latency: "Cable latency"
     phone_latency: "iPhone latency"

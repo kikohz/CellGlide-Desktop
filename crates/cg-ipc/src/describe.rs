@@ -6,7 +6,7 @@ use crate::health::{
     SpanKind, day_bounds, day_spans, hour_marks,
 };
 use crate::phone::{BatteryReading, Grade, PhoneCard, PhoneFrame, model_name};
-use crate::{Check, CheckId, ConnState, DnsMode, Reason, Request, Snapshot};
+use crate::{Check, CheckId, ConnState, DnsMode, Reason, Request, Snapshot, StrictDns};
 use cg_i18n::{tr, tr_os};
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
@@ -43,6 +43,19 @@ pub fn state_line(snapshot: &Snapshot) -> String {
             tr(key, &[("version", phone_version)])
         }
         ConnState::Retrying { reason } => tr("state.retrying", &[("reason", &reason_text(reason))]),
+    }
+}
+
+/// Windows' strict DNS for `status`, while connected; `None` where it doesn't apply (Linux,
+/// or not connected).
+pub fn strict_dns_line(snapshot: &Snapshot) -> Option<String> {
+    if !matches!(snapshot.state, ConnState::Connected { .. }) {
+        return None;
+    }
+    match snapshot.strict_dns {
+        StrictDns::NotApplicable => None,
+        StrictDns::On => Some(tr("state.strict_dns_on", &[])),
+        StrictDns::Off { .. } => Some(tr("state.strict_dns_off", &[])),
     }
 }
 
@@ -556,6 +569,7 @@ fn event_key(kind: EventKind) -> Option<&'static str> {
         EventKind::BypassUnavailable => "history.event.bypass_unavailable",
         EventKind::BypassUpdateFailed => "history.event.bypass_update_failed",
         EventKind::DnsNotAuthorized => "history.event.dns_not_authorized",
+        EventKind::StrictDnsUnavailable => "history.event.strict_dns_unavailable",
     })
 }
 
@@ -586,7 +600,8 @@ pub fn event_title(e: &HealthEvent) -> String {
         | EventKind::ServiceStarted
         | EventKind::BypassUnavailable
         | EventKind::BypassUpdateFailed
-        | EventKind::DnsNotAuthorized => event_key(e.kind)
+        | EventKind::DnsNotAuthorized
+        | EventKind::StrictDnsUnavailable => event_key(e.kind)
             .map(|key| tr(key, &[]))
             .unwrap_or_default(),
     }
@@ -943,6 +958,51 @@ mod tests {
             devices: vec!["00008110-001A".into()],
             ..Snapshot::default()
         }
+    }
+
+    #[test]
+    fn strict_dns_shows_only_where_it_applies() {
+        let _lang = language();
+        let connected = |strict_dns| Snapshot {
+            strict_dns,
+            ..snap(ConnState::Connected {
+                phone_version: "2.2.0".into(),
+                dns: DnsMode::Phone,
+            })
+        };
+        let off = StrictDns::Off {
+            reason: "BFE unavailable".into(),
+        };
+        // Linux, and anything not connected: no line at all.
+        assert_eq!(strict_dns_line(&connected(StrictDns::NotApplicable)), None);
+        assert_eq!(
+            strict_dns_line(&Snapshot {
+                strict_dns: StrictDns::On,
+                ..snap(ConnState::Idle)
+            }),
+            None
+        );
+        cg_i18n::set(Lang::ZhCn);
+        assert_eq!(
+            strict_dns_line(&connected(StrictDns::On)).unwrap(),
+            "严格 DNS：已开启（DNS 查询只经手机发出）"
+        );
+        assert!(
+            strict_dns_line(&connected(off.clone()))
+                .unwrap()
+                .starts_with("严格 DNS：未开启")
+        );
+        cg_i18n::set(Lang::En);
+        assert!(
+            strict_dns_line(&connected(StrictDns::On))
+                .unwrap()
+                .starts_with("Strict DNS: on")
+        );
+        assert!(
+            strict_dns_line(&connected(off))
+                .unwrap()
+                .starts_with("Strict DNS: off")
+        );
     }
 
     #[test]

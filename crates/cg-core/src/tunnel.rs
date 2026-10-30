@@ -4,6 +4,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+pub use cg_ipc::StrictDns;
+
 pub const INTERFACE_NAME: &str = "cellglide0";
 pub const ADDRESS_V4: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 pub const ADDRESS_V6: Ipv6Addr = Ipv6Addr::new(0xfd6c, 0x6779, 0x6465, 0, 0, 0, 0, 1);
@@ -129,9 +131,10 @@ pub trait RunningTunnel: Send + 'static {
         true
     }
     /// Whether port 53 is blocked off the tunnel interface while it runs (Windows'
-    /// strict DNS); false where the platform has no such rules.
-    fn strict_dns(&self) -> bool {
-        false
+    /// strict DNS), and why not if it isn't; `NotApplicable` where the platform has no
+    /// such rules (Linux).
+    fn strict_dns(&self) -> StrictDns {
+        StrictDns::NotApplicable
     }
     /// Notices since the last call, oldest first.
     fn take_notices(&self) -> Vec<TunnelNotice> {

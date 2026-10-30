@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use cg_core::tunnel::{
     ADDRESS_V4, ADDRESS_V6, DnsPlan, ENGINE, INTERFACE_NAME, IPV4_ROUTES, IPV6_ROUTES,
-    ResolverOrder, RunningTunnel, TunnelBackend, TunnelError, TunnelPlan, WINDOWS_ADAPTER_GUID,
-    WINDOWS_TUNNEL_TYPE,
+    ResolverOrder, RunningTunnel, StrictDns as StrictDnsState, TunnelBackend, TunnelError,
+    TunnelPlan, WINDOWS_ADAPTER_GUID, WINDOWS_TUNNEL_TYPE,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -96,6 +96,7 @@ impl TunnelBackend for WindowsBackend {
             socks: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), plan.socks_port),
             inner: Mutex::new(Inner {
                 strict_dns: None,
+                strict_dns_off: None,
                 engine: None,
                 session: None,
                 dns_managed: true,
@@ -136,6 +137,8 @@ struct Inner {
     /// `finish` has set the DNS and routes; `None` when it could not be set up. Teardown
     /// drops it first.
     strict_dns: Option<StrictDns>,
+    /// Why strict DNS is off, once `finish` tried to turn it on.
+    strict_dns_off: Option<String>,
     engine: Option<Engine>,
     /// Ends after the DNS, routes and addresses are gone, before the adapter closes.
     session: Option<Arc<Session>>,
@@ -251,6 +254,7 @@ impl Running {
     fn start_strict_dns(&self, inner: &mut Inner) {
         if !inner.dns_managed {
             tracing::warn!("strict DNS off: {INTERFACE_NAME}'s DNS servers aren't managed");
+            inner.strict_dns_off = Some(format!("{INTERFACE_NAME}'s DNS servers aren't managed"));
             return;
         }
         match strict_dns::start(self.luid) {
@@ -260,10 +264,14 @@ impl Running {
                     strict.exempt_luids().len()
                 );
                 inner.strict_dns = Some(strict);
+                inner.strict_dns_off = None;
             }
-            Err(error) => tracing::warn!(
-                "strict DNS off ({error}); DNS queries may also go to other adapters' servers"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    "strict DNS off ({error}); DNS queries may also go to other adapters' servers"
+                );
+                inner.strict_dns_off = Some(error.to_string());
+            }
         }
     }
 
@@ -347,12 +355,17 @@ impl RunningTunnel for Running {
             .dns_managed
     }
 
-    fn strict_dns(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .strict_dns
-            .is_some()
+    fn strict_dns(&self) -> StrictDnsState {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        match (&inner.strict_dns, &inner.strict_dns_off) {
+            (Some(_), _) => StrictDnsState::On,
+            (None, Some(reason)) => StrictDnsState::Off {
+                reason: reason.clone(),
+            },
+            (None, None) => StrictDnsState::Off {
+                reason: "not started".into(),
+            },
+        }
     }
 }
 

@@ -10,6 +10,8 @@ state:
   connected_dns_unmanaged: "已连接，电脑正在使用手机网络（手机 CellGlide %{version}）；但系统没有让 CellGlide 设置 DNS，域名查询仍走原来的网络，没有其他网络时网址会打不开。运行 cellglide doctor 查看原因和修复命令"
   connected_public_dns: "已连接，电脑正在使用手机网络（手机 CellGlide %{version}；手机上的 CellGlide DNS 已关闭，使用公共 DNS）"
   retrying: "连接未成功，稍后自动重试：%{reason}"
+  strict_dns_on: "严格 DNS：已开启（DNS 查询只经手机发出）"
+  strict_dns_off: "严格 DNS：未开启，Windows 可能同时把 DNS 查询发给其他网络的 DNS 服务器。原因见 cellglide diagnostics"
 phone:
   card_title: "iPhone"
   detecting: "检测中"
@@ -328,6 +330,7 @@ history:
     bypass_unavailable: "没有找到原来的网关，局域网设备暂时经手机访问"
     bypass_update_failed: "网络切换后局域网路由更新失败，下次变化时重试"
     dns_not_authorized: "系统没有让 CellGlide 设置 DNS"
+    strict_dns_unavailable: "严格 DNS 没能开启，DNS 查询可能同时发往其他网络"
   detail:
     cable_latency: "数据线延迟"
     phone_latency: "手机延迟"

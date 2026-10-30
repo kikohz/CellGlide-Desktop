@@ -140,6 +140,8 @@ pub enum EventKind {
     BypassUnavailable,
     BypassUpdateFailed,
     DnsNotAuthorized,
+    /// Windows: strict DNS couldn't be turned on for this connection.
+    StrictDnsUnavailable,
 }
 
 #[cfg(test)]
@@ -157,6 +159,7 @@ impl EventKind {
             EventKind::BypassUnavailable,
             EventKind::BypassUpdateFailed,
             EventKind::DnsNotAuthorized,
+            EventKind::StrictDnsUnavailable,
         ];
         for kind in &all {
             match kind {
@@ -169,7 +172,8 @@ impl EventKind {
                 | EventKind::ServiceStarted
                 | EventKind::BypassUnavailable
                 | EventKind::BypassUpdateFailed
-                | EventKind::DnsNotAuthorized => {}
+                | EventKind::DnsNotAuthorized
+                | EventKind::StrictDnsUnavailable => {}
             }
         }
         all
@@ -627,6 +631,7 @@ mod tests {
             EventKind::BypassUnavailable,
             EventKind::BypassUpdateFailed,
             EventKind::DnsNotAuthorized,
+            EventKind::StrictDnsUnavailable,
             EventKind::UsbAttached,
         ]
         .iter()
@@ -639,6 +644,7 @@ mod tests {
                 r#""bypassUnavailable""#,
                 r#""bypassUpdateFailed""#,
                 r#""dnsNotAuthorized""#,
+                r#""strictDnsUnavailable""#,
                 r#""usbAttached""#
             ]
         );

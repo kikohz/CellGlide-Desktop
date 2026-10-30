@@ -23,7 +23,7 @@ use crate::tunnel::{
 use crate::{CoreError, Result};
 use cg_ipc::health::{DayStart, EventKind, HistoryDay};
 use cg_ipc::phone::{PhoneLabel, UsbPhone};
-use cg_ipc::{ConnState, DnsMode, PhoneChoice, Reason, Snapshot};
+use cg_ipc::{ConnState, DnsMode, PhoneChoice, Reason, Snapshot, StrictDns};
 use cg_protocol::mux::{Device, MuxEvent};
 use cg_protocol::phone::{Hello, PhoneMetrics, capability};
 use jiff::civil::Date;
@@ -286,6 +286,8 @@ struct Active {
     device: Device,
     hello: Hello,
     dns: DnsMode,
+    /// As the tunnel reported it once finished.
+    strict_dns: StrictDns,
     tunnel: Option<Box<dyn RunningTunnel>>,
     forwarder: Forwarder,
     /// A second forwarder only the health checks use, like the Mac's checkForwarder.
@@ -956,6 +958,10 @@ impl Actor {
                 if active.dns == DnsMode::Unmanaged {
                     self.monitor.note(EventKind::DnsNotAuthorized, None, now);
                 }
+                if let StrictDns::Off { .. } = active.strict_dns {
+                    self.monitor
+                        .note(EventKind::StrictDnsUnavailable, None, now);
+                }
                 let stored = self.settings.get().last_versions.clone();
                 let previous = stored.computer.zip(stored.phone);
                 let (computer, phone) = self.monitor.versions(previous, &active.hello.version, now);
@@ -1083,6 +1089,7 @@ impl Actor {
         } else {
             DnsMode::Public
         };
+        let strict_dns = tunnel.strict_dns();
         let (usb_tx, usb_rx) = mpsc::channel(4);
         tasks
             .0
@@ -1108,6 +1115,7 @@ impl Actor {
             device,
             hello,
             dns,
+            strict_dns,
             tunnel: Some(tunnel),
             forwarder,
             checks,
@@ -1203,6 +1211,11 @@ impl Actor {
                 .as_ref()
                 .filter(|a| a.tunnel.is_some())
                 .map(|a| a.forwarder.port()),
+            strict_dns: self
+                .active
+                .as_ref()
+                .map(|a| a.strict_dns.clone())
+                .unwrap_or_default(),
             settings: cg_ipc::Settings {
                 auto_connect: stored.auto_connect,
                 chosen_serial: stored.chosen_serial.clone(),
@@ -3103,6 +3116,46 @@ mod tests {
                 .count(),
             1,
             "taken once"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_dns_off_is_published_and_logged() {
+        let (r, _dir) = rig_health().await;
+        let off = StrictDns::Off {
+            reason: "BFE unavailable".into(),
+        };
+        r.backend.set_strict_dns(off.clone());
+        connect_phone(&r).await;
+        assert_eq!(r.controller.snapshot().strict_dns, off);
+        let kinds = kinds(&r.controller);
+        let strict = kinds
+            .iter()
+            .position(|k| *k == (EventKind::StrictDnsUnavailable, None))
+            .expect("strictDnsUnavailable");
+        let started = kinds
+            .iter()
+            .position(|k| *k == (EventKind::TunnelStarted, None))
+            .unwrap();
+        assert!(started < strict, "{kinds:?}");
+        // Not connected: nothing to report.
+        r.controller.send(Command::Disconnect).await.unwrap();
+        wait_for(&r.controller, "idle", |s| s.state == ConnState::Idle).await;
+        assert_eq!(r.controller.snapshot().strict_dns, StrictDns::NotApplicable);
+    }
+
+    /// Where the platform has no strict DNS (Linux), a connection says so and logs nothing.
+    #[tokio::test]
+    async fn strict_dns_not_applicable_logs_nothing() {
+        let (r, _dir) = rig_health().await;
+        connect_phone(&r).await;
+        let snapshot = r.controller.snapshot();
+        assert!(matches!(snapshot.state, ConnState::Connected { .. }));
+        assert_eq!(snapshot.strict_dns, StrictDns::NotApplicable);
+        assert!(
+            !kinds(&r.controller)
+                .iter()
+                .any(|(kind, _)| *kind == EventKind::StrictDnsUnavailable)
         );
     }
 

@@ -328,7 +328,7 @@ fn start_finish_stop_leaves_nothing() {
     let started = Instant::now();
     tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
     assert!(tunnel.dns_managed());
-    assert!(tunnel.strict_dns());
+    assert_eq!(tunnel.strict_dns(), cg_ipc::StrictDns::On);
     let mut expected = vec!["0.0.0.0/1 0", "128.0.0.0/1 0"];
     if ipv6 {
         expected.extend(["8000::/1 0", "::/1 0"]);

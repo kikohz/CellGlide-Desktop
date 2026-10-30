@@ -229,6 +229,20 @@ pub enum DnsMode {
     Unmanaged,
 }
 
+/// Windows' strict DNS while connected: port 53 blocked on the other adapters so Windows
+/// can't also ask their servers. Not applicable on other platforms, or while not connected.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StrictDns {
+    #[default]
+    NotApplicable,
+    On,
+    /// It couldn't be turned on; DNS queries may also go to the other adapters' servers.
+    Off {
+        reason: String,
+    },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ConnState {
@@ -293,6 +307,9 @@ pub struct Snapshot {
     /// The local SOCKS port the tunnel uses, while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks_port: Option<u16>,
+    /// Strict DNS, while connected (`NotApplicable` otherwise and on Linux).
+    #[serde(default)]
+    pub strict_dns: StrictDns,
 }
 
 impl Snapshot {
@@ -561,6 +578,38 @@ mod tests {
         let back: Snapshot = from_line(&to_line(&snap)).unwrap();
         assert_eq!(back, snap);
         assert_eq!(Snapshot::default().state, ConnState::NoPhone);
+    }
+
+    /// Strict DNS joined protocol 6 as an optional field: a snapshot without it (from a
+    /// service before it, or Linux's default) reads as not applicable.
+    #[test]
+    fn strict_dns_on_the_wire() {
+        let off = Snapshot {
+            strict_dns: StrictDns::Off {
+                reason: "BFE unavailable".into(),
+            },
+            ..Snapshot::default()
+        };
+        let line = String::from_utf8(to_line(&off)).unwrap();
+        assert!(
+            line.contains(r#""strict_dns":{"state":"off","reason":"BFE unavailable"}"#),
+            "{line}"
+        );
+        assert_eq!(from_line::<Snapshot>(line.as_bytes()).unwrap(), off);
+        let on = Snapshot {
+            strict_dns: StrictDns::On,
+            ..Snapshot::default()
+        };
+        assert!(
+            String::from_utf8(to_line(&on))
+                .unwrap()
+                .contains(r#""strict_dns":{"state":"on"}"#)
+        );
+        let old = br#"{"state":{"state":"no_phone"},"devices":[],"selected":null,"wants_connection":false}"#;
+        assert_eq!(
+            from_line::<Snapshot>(old).unwrap().strict_dns,
+            StrictDns::NotApplicable
+        );
     }
 
     #[test]

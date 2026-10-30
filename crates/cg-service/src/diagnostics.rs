@@ -8,7 +8,7 @@ use crate::access::Requester;
 use cg_core::health::log::HealthLog;
 use cg_diag::bundle::{DiagnosticsBundle, MAX_LOG_LINES, PLATFORM, sessions};
 use cg_ipc::phone::{PhoneCard, model_name};
-use cg_ipc::{Check, ConnState, Contact, DiagRange, DnsMode, Reason, Snapshot};
+use cg_ipc::{Check, ConnState, Contact, DiagRange, DnsMode, Reason, Snapshot, StrictDns};
 use jiff::{SignedDuration, Timestamp};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -253,6 +253,15 @@ pub fn environment(snapshot: &Snapshot, checks: &[Check], root: &Path) -> BTreeM
     }
     map.insert("CellGlide".into(), env!("CARGO_PKG_VERSION").into());
     map.insert("State".into(), state_text(&snapshot.state));
+    match &snapshot.strict_dns {
+        StrictDns::NotApplicable => {}
+        StrictDns::On => {
+            map.insert("StrictDns".into(), "on".into());
+        }
+        StrictDns::Off { reason } => {
+            map.insert("StrictDns".into(), format!("off ({reason})"));
+        }
+    }
     let chosen = snapshot.settings.chosen_serial.as_deref().unwrap_or("auto");
     map.insert(
         "Settings".into(),
@@ -916,6 +925,25 @@ mod tests {
         assert_eq!(missing["Distribution"], "unknown");
     }
 
+    /// Strict DNS is a line only where it applies (Windows, while connected); Linux
+    /// reports it as not applicable and gets no line.
+    #[test]
+    fn environment_reports_strict_dns_where_it_applies() {
+        let root = fake_root();
+        let mut snapshot = connected_snapshot();
+        let env = environment(&snapshot, &[], root.path());
+        assert!(!env.contains_key("StrictDns"), "{env:?}");
+        snapshot.strict_dns = StrictDns::On;
+        assert_eq!(environment(&snapshot, &[], root.path())["StrictDns"], "on");
+        snapshot.strict_dns = StrictDns::Off {
+            reason: "BFE unavailable".into(),
+        };
+        assert_eq!(
+            environment(&snapshot, &[], root.path())["StrictDns"],
+            "off (BFE unavailable)"
+        );
+    }
+
     #[test]
     fn phone_row_without_frame_says_not_connected() {
         let root = fake_root();
@@ -1194,5 +1222,29 @@ mod windows_tests {
         let env = environment(&Snapshot::default(), &[], Path::new(""));
         assert!(env["Windows"].starts_with("Windows "), "{}", env["Windows"]);
         assert!(!env["Architecture"].is_empty());
+    }
+
+    #[test]
+    fn environment_reports_strict_dns_while_connected() {
+        let mut snapshot = Snapshot {
+            state: ConnState::Connected {
+                phone_version: "2.2.0".into(),
+                dns: DnsMode::Phone,
+            },
+            ..Snapshot::default()
+        };
+        assert!(!environment(&snapshot, &[], Path::new("")).contains_key("StrictDns"));
+        snapshot.strict_dns = StrictDns::On;
+        assert_eq!(
+            environment(&snapshot, &[], Path::new(""))["StrictDns"],
+            "on"
+        );
+        snapshot.strict_dns = StrictDns::Off {
+            reason: "BFE unavailable".into(),
+        };
+        assert_eq!(
+            environment(&snapshot, &[], Path::new(""))["StrictDns"],
+            "off (BFE unavailable)"
+        );
     }
 }
