@@ -7,6 +7,9 @@ Network snapshot / compare for CellGlide Desktop (Windows PowerShell 5.1).
 Compare exits 0 and prints "identical" when snapshots match, otherwise exits 1 and
 prints every difference. The cellglide0 adapter (alias or GUID) is always excluded.
 Volatile values (DHCP lease times, T1, T2, route lifetimes) are never compared.
+An interface's InterfaceMetric is compared only when its AutomaticMetric is Disabled:
+Windows recomputes automatic metrics from link speed (Wi-Fi changes them on its own).
+The AutomaticMetric flag itself is always compared.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Out')]
 param(
@@ -101,7 +104,13 @@ function Read-Flat([string]$path) {
         foreach ($e in $s.Value.PSObject.Properties) {
             if (Test-Excluded $e.Name) { continue }
             if ($s.Name -eq 'registry' -and (($e.Name -split '[\\]')[-1] -match $VolatileRegex)) { continue }
-            $flat["$($s.Name) :: $($e.Name)"] = [string]$e.Value
+            $value = [string]$e.Value
+            if ($s.Name -eq 'ipinterface') {
+                # "InterfaceMetric|AutomaticMetric|NlMtu": an automatic metric follows link speed.
+                $parts = $value -split '\|'
+                if ($parts.Count -eq 3 -and $parts[1] -eq 'Enabled') { $value = "auto|Enabled|$($parts[2])" }
+            }
+            $flat["$($s.Name) :: $($e.Name)"] = $value
         }
     }
     return $flat

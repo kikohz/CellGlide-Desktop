@@ -229,8 +229,10 @@ impl Running {
 
     /// Blocks port 53 off cellglide0 for as long as `inner.strict_dns` lives. A failure
     /// leaves DNS working through cellglide0, but Windows may also ask the physical
-    /// adapters' servers. Skipped when our DNS servers weren't applied: the blocked
-    /// servers would then be the only ones left.
+    /// adapters' servers. Skipped when our DNS servers weren't applied: Windows then uses
+    /// the physical adapters' servers, and while an off-link one goes over the /1 routes
+    /// through cellglide0 (permitted), an on-link one, typically the router, would be
+    /// blocked and resolution would stop.
     fn start_strict_dns(&self, inner: &mut Inner) {
         if !inner.dns_managed {
             tracing::warn!("strict DNS off: {INTERFACE_NAME}'s DNS servers aren't managed");

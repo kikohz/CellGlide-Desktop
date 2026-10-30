@@ -26,8 +26,8 @@ use windows::core::{GUID, PCWSTR, PWSTR};
 /// Our sublayer. Only ever added inside a dynamic session.
 pub const SUBLAYER_GUID: u128 = 0xc151ed32_5a98_401f_b5ca_06705db34eba;
 
-/// Sublayer weight: evaluated before the default sublayers. Arbitration across
-/// sublayers still lets any sublayer's block win, so this only orders evaluation.
+/// Sublayer weight: the highest, so ours is evaluated first. With our block hard
+/// (`CLEAR_ACTION_RIGHT`), no lower sublayer's permit, hard or soft, can override it.
 const SUBLAYER_WEIGHT: u16 = u16::MAX;
 /// Filter weights inside our sublayer (`FWP_UINT8`, 0-15): the highest matching wins.
 const WEIGHT_OUR_INTERFACE: u8 = 15;

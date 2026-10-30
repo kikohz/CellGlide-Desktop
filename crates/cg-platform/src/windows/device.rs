@@ -110,7 +110,7 @@ async fn receive_loop(
                 }
             }
             Err(error) => {
-                tracing::debug!("wintun receive ended: {error}");
+                tracing::warn!("wintun receive ended: {error}");
                 stop.cancel();
                 return;
             }
@@ -136,7 +136,7 @@ async fn send_loop(
         if let Err(error) = session.send(&buf[..n]) {
             let full = error.raw_os_error() == Some(ERROR_BUFFER_OVERFLOW.0 as i32);
             if !full && error.kind() != io::ErrorKind::InvalidInput {
-                tracing::debug!("wintun send ended: {error}");
+                tracing::warn!("wintun send ended: {error}");
                 stop.cancel();
                 return;
             }

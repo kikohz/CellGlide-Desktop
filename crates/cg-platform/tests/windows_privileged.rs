@@ -358,6 +358,21 @@ fn start_finish_stop_leaves_nothing() {
     assert_eq!(&echo, b"ping", "FakeSocks echoes");
     assert!(socks.connects().contains(&target), "{:?}", socks.connects());
     drop(stream);
+    // Port 53 off the machine through cellglide0 (FALLBACK_DNS, apps with 8.8.8.8 hard-
+    // coded) passes strict DNS only by the permit on our LUID: FakeSocks' UDP ASSOCIATE
+    // echoes the datagram.
+    let dns_target: SocketAddr = "1.1.1.1:53".parse().unwrap();
+    let udp = UdpSocket::bind("0.0.0.0:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    udp.send_to(&dns_query(7), dns_target).unwrap();
+    let mut buf = [0u8; 512];
+    let (n, from) = udp
+        .recv_from(&mut buf)
+        .expect("UDP to 1.1.1.1:53 through cellglide0 blocked with strict DNS on");
+    assert_eq!(from, dns_target);
+    assert_eq!(buf[..n], dns_query(7));
+    assert!(socks.associates() > 0, "no UDP ASSOCIATE reached FakeSocks");
+    drop(udp);
     assert!(!tunnel.has_exited());
 
     tunnel.stop().unwrap();

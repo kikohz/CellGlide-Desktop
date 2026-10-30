@@ -47,6 +47,26 @@ try {
     $r = Run-Script @('-Compare', $a, $d)
     Assert ($r.Code -eq 0) "case 3: expected exit 0, got $($r.Code): $($r.Output)"
 
+    # Cases 4-6: InterfaceMetric counts only when AutomaticMetric is Disabled; the flag always counts.
+    function Write-WithIf([string]$name, [string]$value) {
+        $s = Get-Content -Raw $a | ConvertFrom-Json
+        $s.sections.ipinterface | Add-Member -NotePropertyName 'TestIf|IPv4' -NotePropertyValue $value -Force
+        $p = Join-Path $tmp $name
+        $s | ConvertTo-Json -Depth 10 | Set-Content -Encoding ASCII $p
+        return $p
+    }
+    $e1 = Write-WithIf 'e1.json' '30|Enabled|1500'
+    $e2 = Write-WithIf 'e2.json' '55|Enabled|1500'
+    $r = Run-Script @('-Compare', $e1, $e2)
+    Assert ($r.Code -eq 0) "case 4: automatic metric change should be ignored, got $($r.Code): $($r.Output)"
+    $f1 = Write-WithIf 'f1.json' '5|Disabled|1500'
+    $f2 = Write-WithIf 'f2.json' '6|Disabled|1500'
+    $r = Run-Script @('-Compare', $f1, $f2)
+    Assert ($r.Code -eq 1) "case 5: manual metric change should be reported, got $($r.Code): $($r.Output)"
+    Assert ($r.Output.Contains('TestIf')) "case 5: output lacks 'TestIf': $($r.Output)"
+    $r = Run-Script @('-Compare', $e1, $f1)
+    Assert ($r.Code -eq 1) "case 6: AutomaticMetric flag change should be reported, got $($r.Code): $($r.Output)"
+
     Write-Host 'all passed'
 }
 finally {
