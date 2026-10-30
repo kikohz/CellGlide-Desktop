@@ -227,7 +227,10 @@ function Invoke-Install {
         'actions=', 'restart/2000/restart/5000/restart/30000') | Out-Null
     # NT SERVICE\CellGlide resolves only once the service has an unrestricted SID.
     Invoke-Native 'sc.exe' @('sidtype', $ServiceName, 'unrestricted') | Out-Null
-    # Privileges (sc.exe privs) are left at the default until the minimal set is measured.
+    # Minimal privilege set, measured on a real iPhone in Task 14 Step 3 (connect, strict DNS,
+    # disconnect, crash and SCM restart all work with only these).
+    Invoke-Native 'sc.exe' @('privs', $ServiceName,
+        'SeChangeNotifyPrivilege/SeImpersonatePrivilege/SeLoadDriverPrivilege/SeCreateGlobalPrivilege/SeAuditPrivilege') | Out-Null
 
     Set-DataDirAcl
     Write-Host "Prepared $DataDir"
