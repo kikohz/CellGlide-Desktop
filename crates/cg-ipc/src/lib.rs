@@ -83,6 +83,16 @@ pub const MAX_REPLY_LINE: usize = 4 * 1024 * 1024;
 /// Bumped whenever a message changes shape; clients check it with `Request::Hello`.
 pub const PROTOCOL_VERSION: u32 = 6;
 
+/// `CellGlide-Linux/<version>` (`CellGlide-Windows/<version>` on Windows), sent as the
+/// User-Agent of every request CellGlide makes, the service's probes included.
+pub fn user_agent() -> String {
+    #[cfg(windows)]
+    let platform = "Windows";
+    #[cfg(not(windows))]
+    let platform = "Linux";
+    format!("CellGlide-{platform}/{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// What a user typed into the diagnostics dialog: their own words, sent on purpose.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

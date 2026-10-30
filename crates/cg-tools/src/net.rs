@@ -5,13 +5,9 @@ use rustls::{ClientConfig, RootCertStore};
 use std::sync::{Arc, LazyLock};
 
 /// `CellGlide-Linux/<version>` (`CellGlide-Windows/<version>` on Windows), sent as the
-/// User-Agent of every request we make.
+/// User-Agent of every request we make; the same as the service's ([`cg_ipc::user_agent`]).
 pub fn user_agent() -> String {
-    #[cfg(windows)]
-    let platform = "Windows";
-    #[cfg(not(windows))]
-    let platform = "Linux";
-    format!("CellGlide-{platform}/{}", env!("CARGO_PKG_VERSION"))
+    cg_ipc::user_agent()
 }
 
 static DEFAULT: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {

@@ -77,10 +77,10 @@ impl HttpsProbe {
             .map_err(|_| CoreError::Tunnel("bad probe host".into()))?;
         let mut tls = self.tls.connect(name, tcp).await?;
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: CellGlide-Linux/{}\r\nConnection: close\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nConnection: close\r\n\r\n",
             self.path,
             self.host,
-            env!("CARGO_PKG_VERSION")
+            cg_ipc::user_agent()
         );
         tls.write_all(request.as_bytes()).await?;
         let mut status = [0u8; 12];
@@ -143,10 +143,10 @@ impl CaptiveProbe {
         let mut stream = TcpStream::connect((self.host.as_str(), self.port)).await?;
         // HTTP/1.0: no chunked body to unwrap before looking for the word.
         let request = format!(
-            "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: CellGlide-Linux/{}\r\nConnection: close\r\n\r\n",
+            "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: {}\r\nConnection: close\r\n\r\n",
             self.path,
             self.host,
-            env!("CARGO_PKG_VERSION")
+            cg_ipc::user_agent()
         );
         stream.write_all(request.as_bytes()).await?;
         let mut response = Vec::new();
@@ -290,6 +290,35 @@ mod tests {
         // `Success` only after the first 1024 bytes of the body.
         let late = format!("HTTP/1.1 200 OK\r\n\r\n{}{SUCCESS}", " ".repeat(1024));
         assert!(!http_once(late.into(), Duration::ZERO).await.check().await);
+    }
+
+    /// The probes name the platform they run on: CellGlide-Windows on Windows.
+    #[tokio::test]
+    async fn captive_probe_sends_the_platform_user_agent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let n = client.read(&mut request).await.unwrap();
+            let ok = format!("HTTP/1.0 200 OK\r\n\r\n{SUCCESS}");
+            let _ = client.write_all(ok.as_bytes()).await;
+            String::from_utf8_lossy(&request[..n]).into_owned()
+        });
+        let probe = CaptiveProbe::new(
+            "127.0.0.1",
+            port,
+            "/hotspot-detect.html",
+            Duration::from_millis(500),
+        );
+        assert!(probe.check().await);
+        let request = seen.await.unwrap();
+        let platform = if cfg!(windows) { "Windows" } else { "Linux" };
+        let expected = format!(
+            "User-Agent: CellGlide-{platform}/{}\r\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(request.contains(&expected), "{request}");
     }
 
     #[tokio::test]
