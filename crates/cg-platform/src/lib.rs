@@ -18,3 +18,6 @@ pub use backend::LinuxBackend;
 
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(windows)]
+pub use windows::{WindowsBackend, cleanup_leftovers};

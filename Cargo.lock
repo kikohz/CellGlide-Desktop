@@ -663,6 +663,7 @@ name = "cg-platform"
 version = "1.0.0"
 dependencies = [
  "cg-core",
+ "cg-ipc",
  "cg-netstack",
  "hev-sys",
  "libc",

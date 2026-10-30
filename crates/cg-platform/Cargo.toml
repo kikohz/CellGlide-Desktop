@@ -27,6 +27,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+cg-netstack.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
@@ -34,4 +37,12 @@ windows = { workspace = true, features = [
     "Win32_Networking_WinSock",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_System_Threading",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# tests/windows_privileged.rs: FakeSocks as the relay, the real controller on FakeMux/FakePhone.
+cg-netstack = { workspace = true, features = ["testkit"] }
+cg-core = { workspace = true, features = ["testing"] }
+cg-ipc.workspace = true
+tokio.workspace = true

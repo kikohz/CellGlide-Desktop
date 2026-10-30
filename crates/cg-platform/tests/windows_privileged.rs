@@ -5,13 +5,17 @@
 #![cfg(windows)]
 
 use cg_core::tunnel::{
-    ADDRESS_V4, ADDRESS_V6, FALLBACK_DNS, INTERFACE_NAME, IPV6_ROUTES, WINDOWS_ADAPTER_GUID,
-    WINDOWS_TUNNEL_TYPE,
+    ADDRESS_V4, ADDRESS_V6, DnsPlan, FALLBACK_DNS, INTERFACE_NAME, IPV6_ROUTES, ResolverOrder,
+    TunnelBackend, TunnelPlan, WINDOWS_ADAPTER_GUID, WINDOWS_RESOLVER, WINDOWS_TUNNEL_TYPE,
 };
-use cg_platform::windows::dns;
+use cg_netstack::testkit::FakeSocks;
 use cg_platform::windows::ip::{self, Family};
 use cg_platform::windows::wintun::{Adapter, SESSION_CAPACITY, Wintun};
-use std::process::Command;
+use cg_platform::windows::{WindowsBackend, cleanup_leftovers_with};
+use cg_platform::windows::{device, dns};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -257,6 +261,341 @@ fn routes_go_on_our_luid() {
     assert_eq!(routes(), ["8000::/1 :: 0", "::/1 :: 0"]);
     ip::flush(luid).unwrap();
     assert!(routes().is_empty(), "routes left after flush");
+    drop(adapter);
+    wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+}
+
+// ---- WindowsBackend (Task 11). The IPv4 /1 routes take this machine off the internet
+// while they exist: each test keeps that window short, and `Running`'s Drop removes
+// everything on every path, a failed assertion included.
+
+const CRASH_CHILD: &str = "CG_CRASH_CHILD";
+const CHILD_READY: &str = "cg-crash-child-ready";
+
+fn tunnel_plan(socks_port: u16) -> TunnelPlan {
+    TunnelPlan {
+        socks_port,
+        dns: DnsPlan::Resolver(WINDOWS_RESOLVER),
+        bypass: false,
+    }
+}
+
+/// Our NetMgmt routes on cellglide0 as sorted `prefix metric` lines.
+fn our_routes() -> Vec<String> {
+    let listed = ps(&format!(
+        "$routes = Get-NetRoute -InterfaceAlias {INTERFACE_NAME} -ErrorAction SilentlyContinue; $routes | Where-Object Protocol -eq NetMgmt | ForEach-Object {{ \"$($_.DestinationPrefix) $($_.RouteMetric)\" }}"
+    ));
+    let mut lines: Vec<String> = listed.lines().map(str::to_owned).collect();
+    lines.sort();
+    lines
+}
+
+/// The tunnel's /1 routes on any interface, as `prefix alias` lines.
+fn half_routes_anywhere() -> String {
+    ps(
+        "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/1','128.0.0.0/1','::/1','8000::/1' -ErrorAction SilentlyContinue; $r | ForEach-Object { \"$($_.DestinationPrefix) $($_.InterfaceAlias)\" }",
+    )
+}
+
+fn assert_absent(dll: &Arc<Wintun>) {
+    assert!(
+        Adapter::open(dll, INTERFACE_NAME).unwrap().is_none(),
+        "{INTERFACE_NAME} already exists; remove the leftover first"
+    );
+}
+
+#[test]
+#[ignore]
+fn start_finish_stop_leaves_nothing() {
+    let dll = dll();
+    assert_absent(&dll);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socks = runtime.block_on(FakeSocks::start());
+    let backend = WindowsBackend::new().unwrap();
+    assert_eq!(backend.resolver_order(), ResolverOrder::AfterInterface);
+
+    let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
+    // start: the interface and its addresses only.
+    assert!(adapter_listed(), "{INTERFACE_NAME} not listed after start");
+    let addresses = manual_addresses();
+    let ipv6 = addresses.contains("fd6c:6779:6465::1/128");
+    assert!(addresses.contains("198.18.0.1/32"), "{addresses}");
+    assert!(our_routes().is_empty(), "routes before finish");
+    assert_eq!(dns_servers("IPv4"), "");
+
+    // finish: DNS, routes, engine. From here until stop this machine is off the internet.
+    let started = Instant::now();
+    tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
+    assert!(tunnel.dns_managed());
+    let mut expected = vec!["0.0.0.0/1 0", "128.0.0.0/1 0"];
+    if ipv6 {
+        expected.extend(["8000::/1 0", "::/1 0"]);
+    }
+    expected.sort();
+    assert_eq!(our_routes(), expected);
+    let metric = ps(&format!(
+        "Get-NetIPInterface -InterfaceAlias {INTERFACE_NAME} -AddressFamily IPv4 | ForEach-Object {{ [int]$_.InterfaceMetric }}"
+    ));
+    assert_eq!(metric, "0");
+    assert_eq!(dns_servers("IPv4"), "198.18.0.1");
+
+    // A plain TCP connection (no IP_UNICAST_IF) goes through the tunnel to the relay.
+    let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
+    let mut stream = TcpStream::connect_timeout(&target, Duration::from_secs(5)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(b"ping").unwrap();
+    let mut echo = [0u8; 4];
+    stream.read_exact(&mut echo).unwrap();
+    assert_eq!(&echo, b"ping", "FakeSocks echoes");
+    assert!(socks.connects().contains(&target), "{:?}", socks.connects());
+    drop(stream);
+    assert!(!tunnel.has_exited());
+
+    tunnel.stop().unwrap();
+    eprintln!("routes were up for {:?}", started.elapsed());
+    let left = half_routes_anywhere();
+    assert!(left.is_empty(), "routes left after stop: {left}");
+    wait_for(|| !adapter_listed()).expect("adapter still listed after stop");
+    assert!(Adapter::open(&dll, INTERFACE_NAME).unwrap().is_none());
+}
+
+/// The controller's `finish` thread panicking drops the tunnel without `stop`.
+#[test]
+#[ignore]
+fn dropping_without_stop_cleans_up() {
+    let dll = dll();
+    assert_absent(&dll);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socks = runtime.block_on(FakeSocks::start());
+    let backend = WindowsBackend::new().unwrap();
+    let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
+    tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
+    drop(tunnel);
+    let left = half_routes_anywhere();
+    assert!(left.is_empty(), "routes left after drop: {left}");
+    assert!(Adapter::open(&dll, INTERFACE_NAME).unwrap().is_none());
+    wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+}
+
+/// Kills the child if the test fails before it does.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Hidden entry for `crash_leaves_nothing`: does nothing unless CG_CRASH_CHILD=1.
+#[test]
+#[ignore]
+fn crash_child_entry() {
+    if std::env::var_os(CRASH_CHILD).is_none_or(|v| v != "1") {
+        return;
+    }
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socks = runtime.block_on(FakeSocks::start());
+    let backend = WindowsBackend::new().unwrap();
+    let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
+    tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
+    // libtest prints "test crash_child_entry ... " before this on the same line.
+    println!("{CHILD_READY}");
+    std::io::stdout().flush().unwrap();
+    // The parent kills us long before this; if it doesn't, Drop cleans up.
+    std::thread::sleep(Duration::from_secs(30));
+    drop(tunnel);
+}
+
+#[test]
+#[ignore]
+fn crash_leaves_nothing() {
+    assert_absent(&dll());
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "crash_child_entry",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_CHILD, "1")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+    let stdout = child.0.stdout.take().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { return };
+            if line.contains(CHILD_READY) {
+                let _ = ready_tx.send(());
+            }
+        }
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("child never became ready");
+    let routes = half_routes_anywhere();
+    assert!(
+        routes.contains("0.0.0.0/1 cellglide0") && routes.contains("128.0.0.0/1 cellglide0"),
+        "routes while the child runs: {routes}"
+    );
+
+    // Child::kill is TerminateProcess.
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let took = wait_for(|| !adapter_listed() && half_routes_anywhere().is_empty())
+        .expect("adapter or routes still there after the child was killed");
+    eprintln!("adapter and routes gone {took:?} after TerminateProcess");
+    assert!(Adapter::open(&dll(), INTERFACE_NAME).unwrap().is_none());
+}
+
+/// Holds 0.0.0.0:53 (UDP) with SO_EXCLUSIVEADDRUSE, as a service like SharedAccess might.
+fn hold_port_53_exclusively() -> std::net::UdpSocket {
+    use std::os::windows::io::FromRawSocket;
+    use windows::Win32::Networking::WinSock::{
+        AF_INET, IPPROTO_UDP, SO_EXCLUSIVEADDRUSE, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN, SOL_SOCKET,
+        WSAGetLastError, bind, setsockopt, socket,
+    };
+    // Initializes Winsock for this process.
+    drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    // SAFETY: plain socket creation.
+    let s = unsafe { socket(AF_INET.0.into(), SOCK_DGRAM, IPPROTO_UDP.0) }.unwrap();
+    // SAFETY: we own the new socket; the UdpSocket closes it.
+    let owned = unsafe { std::net::UdpSocket::from_raw_socket(s.0 as u64) };
+    let on = 1u32.to_ne_bytes();
+    // SAFETY: the option takes a 4-byte BOOL.
+    let set = unsafe { setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, Some(&on)) };
+    // SAFETY: reads the thread's last Winsock error.
+    let error = unsafe { WSAGetLastError() }.0;
+    assert_eq!(set, 0, "setsockopt: WSA {error}");
+    let address = SOCKADDR_IN {
+        sin_family: AF_INET,
+        sin_port: 53u16.to_be(),
+        ..Default::default()
+    };
+    let length = std::mem::size_of::<SOCKADDR_IN>() as i32;
+    // SAFETY: address is a SOCKADDR_IN of `length` bytes.
+    let bound = unsafe { bind(s, (&raw const address).cast::<SOCKADDR>(), length) };
+    // SAFETY: as above.
+    let error = unsafe { WSAGetLastError() }.0;
+    assert_eq!(bound, 0, "bind 0.0.0.0:53: WSA {error}");
+    owned
+}
+
+#[test]
+#[ignore]
+fn resolver_port_taken_rolls_back() {
+    use cg_core::controller::{
+        Command as ControllerCommand, Controller, ControllerConfig, SettingsSource,
+    };
+    use cg_core::settings::Stored;
+    use cg_core::testing::{
+        FakeMux, FakePhone, FakePhoneOptions, FakeProbe, FakeTunnelProbe, SharedProbe, device,
+    };
+    use cg_ipc::{ConnState, Reason, Snapshot};
+
+    let dll = dll();
+    assert_absent(&dll);
+    let _held = hold_port_53_exclusively();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (state, gone) = runtime.block_on(async {
+        let mux = FakeMux::start().await;
+        let _phone = FakePhone::start(&mux, FakePhoneOptions::default()).await;
+        let mut config =
+            ControllerConfig::new(mux.endpoint(), Arc::new(WindowsBackend::new().unwrap()));
+        config.resolver_addr = WINDOWS_RESOLVER;
+        config.bypass = false;
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: false,
+            ..Stored::default()
+        });
+        config.exit_probe = Arc::new(SharedProbe(FakeProbe::new()));
+        config.tunnel_probe = FakeTunnelProbe::new();
+        let controller = Controller::spawn(config);
+
+        async fn wait(
+            controller: &Controller,
+            what: &str,
+            pred: impl Fn(&Snapshot) -> bool,
+        ) -> Snapshot {
+            let mut rx = controller.subscribe();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let snap = rx.borrow_and_update().clone();
+                    if pred(&snap) {
+                        return snap;
+                    }
+                    rx.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+        }
+        mux.attach(device("aaaa", 1));
+        wait(&controller, "idle", |s| s.state == ConnState::Idle).await;
+        controller
+            .send(ControllerCommand::Connect { serial: None })
+            .await
+            .unwrap();
+        let snap = wait(&controller, "retrying", |s| {
+            matches!(s.state, ConnState::Retrying { .. })
+        })
+        .await;
+        // Rolled back before the error was reported (and so before any retry).
+        let gone = Adapter::open(&dll, INTERFACE_NAME).unwrap().is_none();
+        controller
+            .send(ControllerCommand::Disconnect)
+            .await
+            .unwrap();
+        controller.shutdown().await;
+        (snap.state, gone)
+    });
+    assert_eq!(
+        state,
+        ConnState::Retrying {
+            reason: Reason::ResolverPortBusy { port: 53 }
+        }
+    );
+    assert!(
+        gone,
+        "{INTERFACE_NAME} still there when Retrying was reported"
+    );
+    wait_for(|| !adapter_listed()).expect("adapter still listed after shutdown");
+}
+
+#[test]
+#[ignore]
+fn cleanup_leftovers_with_nothing_left_is_ok() {
+    let dll = dll();
+    assert_absent(&dll);
+    cleanup_leftovers_with(&dll).unwrap();
+    assert!(Adapter::open(&dll, INTERFACE_NAME).unwrap().is_none());
+}
+
+/// No routes: the session and the two bridge threads only.
+#[test]
+#[ignore]
+fn bridge_threads_exit_within_a_second_of_stop() {
+    let dll = dll();
+    let adapter = create(&dll);
+    let session = Arc::new(adapter.start_session(SESSION_CAPACITY).unwrap());
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (engine_end, threads) = device::bridge(Arc::clone(&session), stop.clone()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!threads.is_finished());
+    let start = Instant::now();
+    stop.cancel();
+    threads.join();
+    let took = start.elapsed();
+    eprintln!("bridge threads exited {took:?} after stop");
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    drop(engine_end);
+    drop(session);
     drop(adapter);
     wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
 }

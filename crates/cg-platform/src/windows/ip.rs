@@ -1,18 +1,20 @@
-//! IP Helper calls on cellglide0, never netsh. Every function takes our adapter's LUID and
+//! IP Helper calls on cellglide0, never netsh. Every function takes our adapter's LUID, refuses
+//! any LUID whose GUID is not cellglide0's before calling anything, and
 //! touches nothing else: `flush` enumerates the system tables and deletes only rows whose
 //! `InterfaceLuid` is ours, and no table-wide flush API is ever called.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use cg_core::tunnel::MTU;
+use cg_core::tunnel::{MTU, WINDOWS_ADAPTER_GUID};
 use windows::Win32::Foundation::{ERROR_NOT_FOUND, NO_ERROR, WIN32_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2,
-    DeleteUnicastIpAddressEntry, FreeMibTable, GetIpForwardTable2, GetIpInterfaceEntry,
-    GetUnicastIpAddressTable, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
-    InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
-    MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
+    ConvertInterfaceLuidToGuid, CreateIpForwardEntry2, CreateUnicastIpAddressEntry,
+    DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable, GetIpForwardTable2,
+    GetIpInterfaceEntry, GetUnicastIpAddressTable, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+    MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
@@ -20,6 +22,7 @@ use windows::Win32::Networking::WinSock::{
     IpDadStatePreferred, IpPrefixOriginManual, MIB_IPPROTO_NETMGMT, RouterDiscoveryDisabled,
     SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
 };
+use windows::core::GUID;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -46,7 +49,12 @@ pub fn configure_interface(luid: u64, family: Family) -> io::Result<()> {
     row.InterfaceLuid = NET_LUID_LH { Value: luid };
     // SAFETY: as above; Family and InterfaceLuid identify the row to read.
     win32(unsafe { GetIpInterfaceEntry(&mut row) })?;
-    assert_eq!(row_luid(row.InterfaceLuid), luid);
+    if row_luid(row.InterfaceLuid) != luid {
+        return Err(io::Error::other(format!(
+            "GetIpInterfaceEntry returned LUID {:#x} for {luid:#x}",
+            row_luid(row.InterfaceLuid)
+        )));
+    }
     row.NlMtu = MTU;
     row.UseAutomaticMetric = false;
     row.Metric = 0;
@@ -62,10 +70,10 @@ pub fn configure_interface(luid: u64, family: Family) -> io::Result<()> {
 
 /// A manual unicast address, usable at once (DAD is off on our interface).
 pub fn add_address(luid: u64, address: IpAddr, prefix: u8) -> io::Result<()> {
-    check_luid(luid)?;
     if prefix > max_prefix(address) {
         return Err(invalid(format!("prefix /{prefix} too long for {address}")));
     }
+    check_luid(luid)?;
     let mut row = MIB_UNICASTIPADDRESS_ROW::default();
     // SAFETY: the row is a valid, writable MIB_UNICASTIPADDRESS_ROW.
     unsafe { InitializeUnicastIpAddressEntry(&mut row) };
@@ -79,8 +87,8 @@ pub fn add_address(luid: u64, address: IpAddr, prefix: u8) -> io::Result<()> {
 
 /// A route to `cidr` on our interface: on-link (unspecified next hop), metric 0.
 pub fn add_route(luid: u64, cidr: &str) -> io::Result<()> {
-    check_luid(luid)?;
     let (prefix, length) = parse_cidr(cidr).ok_or_else(|| invalid(format!("bad route {cidr}")))?;
+    check_luid(luid)?;
     let next_hop = match prefix {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
@@ -99,18 +107,40 @@ pub fn add_route(luid: u64, cidr: &str) -> io::Result<()> {
 
 /// Deletes the routes and addresses we added on our LUID: routes with protocol NetMgmt
 /// and addresses with a manual prefix origin. The stack's own routes and link-local
-/// addresses on our interface go with the adapter. Keeps going past a failed delete and
-/// returns the first error.
+/// addresses on our interface go with the adapter. Keeps going past a failed delete (and
+/// past a failed route step, to the addresses) and returns the first error.
 pub fn flush(luid: u64) -> io::Result<()> {
     check_luid(luid)?;
-    let mut first_error = None;
-    let mut note = |result: WIN32_ERROR| {
-        // ERROR_NOT_FOUND: already gone (deleting one row can take others with it).
-        if result != NO_ERROR && result != ERROR_NOT_FOUND && first_error.is_none() {
-            first_error = Some(io::Error::from_raw_os_error(result.0 as i32));
-        }
-    };
+    let routes = delete_routes(luid);
+    let addresses = delete_addresses(luid);
+    routes.and(addresses)
+}
 
+/// Deletes only the routes we added on our LUID (protocol NetMgmt), keeping the addresses.
+pub fn flush_routes(luid: u64) -> io::Result<()> {
+    check_luid(luid)?;
+    delete_routes(luid)
+}
+
+/// Collects the first failure of a run of deletes. ERROR_NOT_FOUND means already gone
+/// (deleting one row can take others with it).
+#[derive(Default)]
+struct FirstError(Option<io::Error>);
+
+impl FirstError {
+    fn note(&mut self, result: WIN32_ERROR) {
+        if result != NO_ERROR && result != ERROR_NOT_FOUND && self.0.is_none() {
+            self.0 = Some(io::Error::from_raw_os_error(result.0 as i32));
+        }
+    }
+
+    fn into_result(self) -> io::Result<()> {
+        self.0.map_or(Ok(()), Err)
+    }
+}
+
+/// Only after `check_luid`.
+fn delete_routes(luid: u64) -> io::Result<()> {
     let mut routes: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
     // SAFETY: on success the function stores a table we free with FreeMibTable.
     win32(unsafe { GetIpForwardTable2(AF_UNSPEC, &mut routes) })?;
@@ -119,37 +149,39 @@ pub fn flush(luid: u64) -> io::Result<()> {
     let rows = unsafe {
         std::slice::from_raw_parts((*routes.0).Table.as_ptr(), (*routes.0).NumEntries as usize)
     };
+    let mut first = FirstError::default();
     for row in rows {
         if row_luid(row.InterfaceLuid) != luid || row.Protocol != MIB_IPPROTO_NETMGMT {
             continue;
         }
-        assert_eq!(row_luid(row.InterfaceLuid), luid);
         // SAFETY: the row came from the system's table and names our LUID.
-        note(unsafe { DeleteIpForwardEntry2(row) });
+        first.note(unsafe { DeleteIpForwardEntry2(row) });
     }
-    drop(routes);
+    first.into_result()
+}
 
+/// Only after `check_luid`.
+fn delete_addresses(luid: u64) -> io::Result<()> {
     let mut addresses: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-    // SAFETY: as above.
+    // SAFETY: on success the function stores a table we free with FreeMibTable.
     win32(unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut addresses) })?;
     let addresses = MibTable(addresses);
-    // SAFETY: as above.
+    // SAFETY: the table holds NumEntries rows and lives until `addresses` drops.
     let rows = unsafe {
         std::slice::from_raw_parts(
             (*addresses.0).Table.as_ptr(),
             (*addresses.0).NumEntries as usize,
         )
     };
+    let mut first = FirstError::default();
     for row in rows {
         if row_luid(row.InterfaceLuid) != luid || row.PrefixOrigin != IpPrefixOriginManual {
             continue;
         }
-        assert_eq!(row_luid(row.InterfaceLuid), luid);
         // SAFETY: the row came from the system's table and names our LUID.
-        note(unsafe { DeleteUnicastIpAddressEntry(row) });
+        first.note(unsafe { DeleteUnicastIpAddressEntry(row) });
     }
-
-    first_error.map_or(Ok(()), Err)
+    first.into_result()
 }
 
 /// `"a.b.c.d/n"` or `"x::/n"` into an address and a prefix length within range.
@@ -167,10 +199,25 @@ fn max_prefix(address: IpAddr) -> u8 {
     }
 }
 
-/// A zero LUID is never an adapter; refuse it before any call that could act on it.
+/// Refuses, before any call that could act on it, every LUID that is not cellglide0's:
+/// zero, one that names no interface, and any interface whose GUID is not our fixed one.
 fn check_luid(luid: u64) -> io::Result<()> {
     if luid == 0 {
         return Err(invalid("zero interface LUID".to_owned()));
+    }
+    let mut guid = GUID::zeroed();
+    // SAFETY: both pointers are valid for the call.
+    let found = unsafe { ConvertInterfaceLuidToGuid(&NET_LUID_LH { Value: luid }, &mut guid) };
+    if found != NO_ERROR {
+        return Err(invalid(format!(
+            "LUID {luid:#x} names no interface ({})",
+            io::Error::from_raw_os_error(found.0 as i32)
+        )));
+    }
+    if guid.to_u128() != WINDOWS_ADAPTER_GUID {
+        return Err(invalid(format!(
+            "LUID {luid:#x} is not cellglide0 (GUID {guid:?})"
+        )));
     }
     Ok(())
 }
@@ -233,6 +280,7 @@ fn invalid(message: String) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
 
     #[test]
     fn parses_the_tunnel_routes() {
@@ -269,6 +317,20 @@ mod tests {
         );
         assert_eq!(kind(add_route(0, "::/1")), io::ErrorKind::InvalidInput);
         assert_eq!(kind(flush(0)), io::ErrorKind::InvalidInput);
+    }
+
+    /// The loopback interface (index 1) is real but not ours: refused, by the check alone
+    /// (this test never calls a function that could change the loopback interface).
+    #[test]
+    fn refuses_another_interfaces_luid() {
+        let mut loopback = NET_LUID_LH::default();
+        // SAFETY: `loopback` is writable.
+        win32(unsafe { ConvertInterfaceIndexToLuid(1, &mut loopback) }).unwrap();
+        let loopback = row_luid(loopback);
+        assert_ne!(loopback, 0);
+        let error = check_luid(loopback).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(error.to_string().contains("not cellglide0"), "{error}");
     }
 
     #[test]
