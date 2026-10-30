@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $CgAlias = 'cellglide0'
 $CgGuid = '{E490EEF2-2CB0-4A80-B341-BF929C2E56B3}'
 # Registry values that change on their own (DHCP lease bookkeeping).
-$VolatileRegex = '^(Lease.*|T1|T2)$'
+$VolatileRegex = '^(Lease.*|T1|T2|Dhcpv6.*(Time|T1|T2|Leases).*)$'
 
 function Test-Excluded([string]$key) {
     return ($key.IndexOf($CgAlias, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
