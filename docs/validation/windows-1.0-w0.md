@@ -90,3 +90,95 @@ cg-service 的测试编译失败同样来自 fake_mux.rs 的前两项（经 cg-c
 
 - 本机另有一个不属于我们的 wintun 设备 `SWD\Wintun\{37217669-42DA-4657-A55B-0D995D328250}`（`Tailscale Tunnel`，正在运行，Present=True），全程未触碰。
 - 所有快照对比（特权测试、两次崩溃实测、清理）均为 `identical`。
+
+## Task 5：DNS 与绑定实测
+
+示例：`crates/cg-platform/examples/dns_probe.rs`、`unicast_if_probe.rs`。全部在管理员 PowerShell 里运行，每次运行前后都做了 `scripts\network-snapshot.ps1` 快照对比，**全部为 `identical`**（共 14 次）。pktmon 过滤器用完即 `pktmon filter remove`，.etl/.txt 只在 `target\w0dns\`。
+
+测试机网络：物理网卡只有 Wi-Fi（ifIndex 10，pktmon 组件 13 `Intel(R) Wi-Fi 6 AX201 160MHz`），IPv4 DNS `10.10.10.1`，IPv6 DNS `fd1e:f1ee:8b51::1`（ULA，同链路），**没有 IPv6 默认路由**。另有 Tailscale（未开出口节点；其 NRPT 只覆盖 ts.net 和 100.x 反向域）。系统没有 SMHNR 相关策略（`DisableSmartNameResolution` 等均未设置，即默认值）。
+
+### DNS
+
+#### 做法
+
+`dns_probe` 建 cellglide0（地址 `198.18.0.1/32`、`fd6c:6779:6465::1/128`，两个协议族接口跃点 0），`set_dns([198.18.0.1])`，在 `198.18.0.1:53` 上起 UDP 假 DNS（同时绑 TCP）。**不加任何路由。** 只有 `probe-*` 名字按模式处理；系统自己的后台查询原样转发给 Wi-Fi 的 `10.10.10.1`，避免假应答进系统缓存。每个模式：
+
+```powershell
+pktmon filter remove; pktmon filter add -p 53
+pktmon start --capture --comp nics --pkt-size 0 -f target\w0dns\pktmon-<模式>.etl
+Resolve-DnsName "probe-$(Get-Random).example.com" -DnsOnly -QuickTimeout   # 5 次，名字每次不同
+pktmon stop; pktmon etl2txt ... -o target\w0dns\pktmon-<模式>.txt
+```
+
+计数口径：pktmon 文本里组件 13（Wi-Fi 网卡）上 `Direction Tx`、内容含 `? probe-` 的包（每个 A / AAAA 查询各算一个）。
+
+#### 结果
+
+| 模式 | Wi-Fi 上的 probe 查询包 | `Resolve-DnsName` 结果与耗时 |
+| --- | --- | --- |
+| `--answer` | 8（5 个名字；有 2 个名字只发了 A） | 我们的 A `192.0.2.1`，1–39 ms |
+| `--answer` 且 cellglide0 另设 IPv6 DNS `fd6c:6779:6465::1`（`--v6-dns`） | 9 | 我们的 A，0–29 ms |
+| `--delay 500` | 10 | 我们的 A，约 505 ms |
+| `--delay 800` | 10 | 我们的 A，约 805 ms |
+| `--delay 1000` | 10 | 我们的 A，约 1005 ms |
+| `--delay 1500` | 10 | 我们的 A，约 1505 ms |
+| `--delay 3000` | 10 | 我们的 A，约 3005 ms |
+| `--servfail` | 10 | **SOA**（即 Wi-Fi 上游回的 NXDOMAIN），39–92 ms |
+| `--silent` | 10 | SOA（Wi-Fi 的 NXDOMAIN），约 7.0 s |
+| `--silent`，不加 `-QuickTimeout`（2 个名字） | 4 | SOA，约 12.0 s |
+| `--silent`，`--comp all`（2 个名字） | 4（网卡组件上） | SOA，约 7.0 s |
+
+摘录（`--servfail`，一个名字，时间为本地时间）：
+
+```text
+00:00:31.261994 Tx Component 13 | fd1e:f1ee:8b51:0:9958:67c2:8e12:9521.61861 > fd1e:f1ee:8b51::1.53: 3877+ A? probe-1118483121.example.com. (46)
+00:00:31.262097 Tx Component 13 | fd1e:f1ee:8b51:0:9958:67c2:8e12:9521.57183 > fd1e:f1ee:8b51::1.53: 24394+ AAAA? probe-1118483121.example.com. (46)
+00:00:31.317072 Rx Component 13 | fd1e:f1ee:8b51::1.53 > ...57183: 24394 0/1/0 (108)
+00:00:31.317073 Rx Component 13 | fd1e:f1ee:8b51::1.53 > ...61861: 3877 0/1/0 (108)
+```
+
+`--answer` 模式（立即回应）里同样每个名字都出现在 Wi-Fi 上，例如 `A? probe-1434172869.example.com.` 发往 `fd1e:f1ee:8b51::1.53`。
+
+观察到的规律：
+
+1. **每个查询在发给 cellglide0 的同时（0.1 ms 内）就并行发往 Wi-Fi 的 DNS 服务器**，不是超时之后才发。与我们怎么回（立即应答、延迟、SERVFAIL、不回）无关。这就是 Windows 的「智能多宿主名称解析」（SMHNR）并行查询。
+2. Windows 对每块网卡只问一个服务器：Wi-Fi 上问的是 IPv6 的 `fd1e:f1ee:8b51::1`，`10.10.10.1` 从没收到 probe 查询；给 cellglide0 再设 IPv6 服务器后，我们的 IPv4 地址也不再收到查询，全部发到 `[fd6c:6779:6465::1]:53`。
+3. Wi-Fi 的查询每个名字只发一次，之后的重试只发给我们：`-QuickTimeout` 时我们在 +1 s、+3 s 收到重发，7 s 放弃；不加时在 +1、+2、+4、+8 s 重发，12 s 放弃。重试阶段物理网卡上没有新增 probe 查询。
+4. Windows **优先采用 cellglide0 的应答**：Wi-Fi 的 NXDOMAIN 几十毫秒就到了，但只要我们在等待期内回应（测到 3000 ms），结果就是我们的 A 记录。
+5. **我们回 SERVFAIL 时，Windows 立即改用 Wi-Fi 的应答**；我们不回时，超时后也用 Wi-Fi 的应答。也就是说「期限到了先回 SERVFAIL」会让应用拿到物理网卡上游的结果。
+
+注意：本测试按要求不加路由（加 /1 路由会断网）。实际隧道下 cellglide0 有四条 /1 路由，但同样没有 `0.0.0.0/0`；这一差别是否改变 SMHNR 行为没有实测。上面的现象与 research-net §3.1 引用的 Tailscale 注释（「Windows 8.1 及以后会并行向所有网卡的 DNS 服务器发请求」）一致。
+
+#### 结论
+
+- **SERVFAIL 后 Windows 会不会问别的网卡**：不需要等 SERVFAIL，**连立即回应的查询都已经并行发到物理网卡**；SERVFAIL 只会让 Windows 改用那份物理网卡的应答。
+- **默认做法会泄漏，按 spec §7.3 需要回头问用户严格 DNS。**
+- **`resolver_deadline`**：按「物理网卡上不出现 53 端口包的最大延迟减 200 ms」取值时，**没有任何延迟满足条件**（0 ms 也有包），公式无解。退一步按「除首发并行查询外，物理网卡上不再新增 probe 包的最大延迟减 200 ms」：测到的最大延迟 3000 ms 内都没有新增包，得 **2800 ms**（暂定）。期限对泄漏本身没有影响；它决定的只是 Windows 用谁的应答：期限内回应就用我们的，期限到了回 SERVFAIL 就用物理网卡的。
+- `fec0:0:0:ffff::1-3`：本任务 12 次 `dns_probe` 测量运行中，cellglide0 的 IPv6 DNS 列表都是**空**（`Get-DnsClientServerAddress` 的 IPv6 项无地址），没有出现 Task 4 见过的 fec0 占位；所有抓包（含 `--comp all`）里 fec0 出现 0 次。建议：**无害，不需要处理**。显式设 IPv6 服务器 `fd6c:6779:6465::1` 也挡不住泄漏（上表 9 个包），反而要求解析器同时监听 `[fd6c:6779:6465::1]:53`，所以维持「网卡 DNS 只设 `198.18.0.1`」。
+- cellglide0 的 `Get-NetAdapterBinding`（已启用）：`ms_lldp`、`ms_tcpip`、`ms_server`、`ms_lltdio`、`ms_tcpip6`、`ms_rspndr`、`ms_msclient`。与 Tailscale 网卡的已启用项完全相同，是 Windows 对新网卡的默认绑定，没有第三方过滤驱动等意外绑定。
+
+### 绑定
+
+| 场景 | 结果 |
+| --- | --- |
+| 无人占用 53 端口时绑 `198.18.0.1:53`（UDP、TCP） | 都成功（每次 `dns_probe` 运行都成功，共 14 次） |
+| 另一进程先以 `SO_EXCLUSIVEADDRUSE` 绑 `0.0.0.0:53`（UDP、TCP 都绑并 listen），再绑 `198.18.0.1:53` | UDP、TCP **都失败，`WSAEACCES` 10013**（"An attempt was made to access a socket in a way forbidden by its access permissions"） |
+| 我们先占 `198.18.0.1:53`，另一进程再以 `SO_EXCLUSIVEADDRUSE` 绑 `0.0.0.0:53` | 对方 UDP、TCP 都失败，`WSAEADDRINUSE` 10048；我们不受影响 |
+
+本机 `SharedAccess`（ICS）和 `hns` 服务都是 Stopped / Manual，没有进程占用 53 端口。解析器绑定失败且错误码为 10013 时，可以判定为「有程序独占了 0.0.0.0:53」（典型是 ICS / Hyper-V 默认交换机），据此给出明确的原因。
+
+### IP_UNICAST_IF
+
+`unicast_if_probe`：先解析 `speed.cloudflare.com`（`162.159.140.220`、`2a06:98c1:58::da`），建 cellglide0，加 `0.0.0.0/1`、`128.0.0.0/1`、`::/1`、`8000::/1`，然后连 443。物理网卡按 `GetIpForwardTable2` 里排除 cellglide0 后（路由跃点 + 接口跃点）最小的默认路由选出：IPv4 为 ifIndex 10 `Wi-Fi`，IPv6 没有默认路由。
+
+```text
+[v4] plain connect 162.159.140.220:443: TIMED OUT after 3002 ms; packets to it in the tunnel: 2
+[v4] UNICAST_IF=10 (Wi-Fi) connect 162.159.140.220:443: CONNECTED in 33 ms from 10.10.10.215
+[v6] no physical default route: skipped
+teardown: flush Ok(()), adapter closed, 3.8 s total
+```
+
+- 普通连接的 SYN（含一次重传）进了隧道，3 s 超时；设 `IP_UNICAST_IF`（ifIndex 的网络字节序）后 33 ms 连上，源地址是 Wi-Fi 的 `10.10.10.215`。**结论：`IP_UNICAST_IF` 能绕过 /1 路由。**
+- `IPV6_UNICAST_IF`：本机没有 IPv6 上网，**未测**（代码路径已写好，值为主机字节序）。
+- 断网约 3.5 s；结束后 `Test-NetConnection 1.1.1.1 -Port 443` 成功（经 Wi-Fi），cellglide0 和 /1 路由都已消失，快照对比 `identical`。
+- 示例在每条退出路径上都会撤路由：正常结束和出错时先 `flush` 再关网卡；panic 钩子里 `flush` 后退出；看门狗 20 s 强制 `flush` 并退出；进程被杀时网卡随句柄关闭消失（Task 3 已测）。
