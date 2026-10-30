@@ -110,6 +110,49 @@ impl Listener for PipeListener {
     }
 }
 
+/// Enables SeRestorePrivilege in this process's token, which setting SYSTEM as the pipe's
+/// owner takes outside the service (`--console` as an administrator, the tests); false if
+/// the token lacks it.
+pub fn enable_restore_privilege() -> bool {
+    use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        SE_RESTORE_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo handle needs no closing; `token` is closed by `Owned`.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+    let token = auth::Owned(token);
+    let mut luid = LUID::default();
+    // SAFETY: plain out-parameter.
+    if unsafe { LookupPrivilegeValueW(None, SE_RESTORE_NAME, &mut luid) }.is_err() {
+        return false;
+    }
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: valid token and a TOKEN_PRIVILEGES of one entry.
+    let adjusted =
+        unsafe { AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None) };
+    // SAFETY: reads this thread's last error, set by the call above.
+    adjusted.is_ok() && unsafe { GetLastError() } != ERROR_NOT_ALL_ASSIGNED
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,47 +319,5 @@ mod tests {
         }
         .unwrap();
         session
-    }
-
-    /// Enables SeRestorePrivilege in this process's token; false if the token lacks it.
-    fn enable_restore_privilege() -> bool {
-        use windows::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID};
-        use windows::Win32::Security::{
-            AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
-            SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
-            TOKEN_QUERY,
-        };
-        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        let mut token = HANDLE::default();
-        // SAFETY: the pseudo handle needs no closing; `token` is closed by `Owned`.
-        if unsafe {
-            OpenProcessToken(
-                GetCurrentProcess(),
-                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-                &mut token,
-            )
-        }
-        .is_err()
-        {
-            return false;
-        }
-        let token = auth::Owned(token);
-        let mut luid = LUID::default();
-        // SAFETY: plain out-parameter.
-        if unsafe { LookupPrivilegeValueW(None, SE_RESTORE_NAME, &mut luid) }.is_err() {
-            return false;
-        }
-        let privileges = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        // SAFETY: valid token and a TOKEN_PRIVILEGES of one entry.
-        let adjusted =
-            unsafe { AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None) };
-        // SAFETY: reads this thread's last error, set by the call above.
-        adjusted.is_ok() && unsafe { GetLastError() } != ERROR_NOT_ALL_ASSIGNED
     }
 }

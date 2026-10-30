@@ -798,8 +798,21 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         })
         .collect();
     let line = tr_args(&format!("check.{name}.{state}"), &args);
-    let fix = (!check.ok).then(|| tr_os(&format!("check.{name}.fix"), &[]));
+    let fix = (!check.ok).then(|| tr_os(&fix_key(check), &[]));
     (line, fix)
+}
+
+/// The fix for a failed check: usually one per check, but an unreachable service is fixed
+/// differently when it refused us or isn't ours (`cause`) than when it isn't running.
+fn fix_key(check: &Check) -> String {
+    let name = check_name(check.id);
+    if let Some(cause) = check.args.get("cause") {
+        let key = format!("check.{name}.fix_{cause}");
+        if cg_i18n::KEYS.contains(&key.as_str()) {
+            return key;
+        }
+    }
+    format!("check.{name}.fix")
 }
 
 pub fn checks(checks: &[Check]) -> String {
@@ -836,14 +849,16 @@ pub fn service_check(error: &crate::client::ClientError) -> Check {
         }
         // Windows: the pipe lets in administrators and interactive users only.
         #[cfg(windows)]
-        ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            service.with("error", tr("reason.not_allowed", &[]))
-        }
+        ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => service
+            .with("error", tr("reason.not_allowed", &[]))
+            .with("cause", "not_allowed"),
         // Only the OS-level cause: the sentence around it comes from the locale file.
         ClientError::Io(e) => service.with("error", e.to_string()),
         ClientError::Json(e) => service.with("error", e.to_string()),
         ClientError::Closed => service.with("error", "closed"),
-        ClientError::NotService => service.with("error", tr("check.service.impostor", &[])),
+        ClientError::NotService => service
+            .with("error", tr("check.service.impostor", &[]))
+            .with("cause", "impostor"),
     }
 }
 
@@ -1073,20 +1088,26 @@ mod tests {
             let denied = ClientError::Io(std::io::ErrorKind::PermissionDenied.into());
             assert_eq!(
                 unreachable(&denied),
-                "✗ Can't reach the CellGlide service (Only an administrator or the user currently using this computer can do this)\n  Fix: in PowerShell run as administrator: Start-Service CellGlide"
+                "✗ Can't reach the CellGlide service (Only an administrator or the user currently using this computer can do this)\n  Fix: use the account that is signed in at this computer, or ask an administrator"
             );
             assert_eq!(
                 service_check(&denied),
-                Check::new(CheckId::Service, false).with(
-                    "error",
-                    "Only an administrator or the user currently using this computer can do this"
-                )
+                Check::new(CheckId::Service, false)
+                    .with(
+                        "error",
+                        "Only an administrator or the user currently using this computer can do this"
+                    )
+                    .with("cause", "not_allowed")
             );
+            // Starting the service fixes neither of these: it is running, or someone else
+            // holds its pipe.
             let impostor = unreachable(&ClientError::NotService);
-            assert!(
-                impostor.starts_with("✗ Can't reach the CellGlide service (another program has taken its control pipe)"),
-                "{impostor}"
+            assert_eq!(
+                impostor,
+                "✗ Can't reach the CellGlide service (another program has taken its control pipe)\n  Fix: another program is using CellGlide's control channel; restart the computer or reinstall CellGlide"
             );
+            let stopped = unreachable(&ClientError::Io(std::io::ErrorKind::NotFound.into()));
+            assert!(stopped.ends_with("Start-Service CellGlide"), "{stopped}");
             let (line, fix) = check_lines(&Check::new(CheckId::Usbmuxd, false));
             assert!(line.contains("27015"), "{line}");
             assert!(

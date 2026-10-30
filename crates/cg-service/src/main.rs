@@ -1,13 +1,11 @@
-// The modules are written for Linux (and, under windows/, Windows); macOS only compiles them
-// for development, and the Windows entry point is still to come.
+// The modules are written for Linux and Windows (under windows/); macOS only compiles them
+// for development. Linux-only helpers are unused on Windows and the other way round.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod access;
 #[cfg(unix)]
 mod auth;
-#[cfg(unix)]
 mod diagnostics;
-#[cfg(unix)]
 mod doctor;
 #[cfg(unix)]
 mod resume_check;
@@ -102,7 +100,25 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Started by the service control manager with no arguments; `--console` runs the same
+/// service in the foreground for development.
+#[cfg(windows)]
 fn main() -> anyhow::Result<()> {
-    anyhow::bail!("cellglide-service only runs on Linux")
+    match std::env::args().nth(1).as_deref() {
+        None => windows::scm::start().map_err(|error| {
+            anyhow::anyhow!(
+                "{error}; cellglide-service runs as the {} service (or with --console)",
+                windows::scm::SERVICE_NAME
+            )
+        }),
+        Some("--console") => windows::console(),
+        Some(other) => {
+            anyhow::bail!("unknown argument {other}; usage: cellglide-service [--console]")
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("cellglide-service runs on Linux and Windows")
 }

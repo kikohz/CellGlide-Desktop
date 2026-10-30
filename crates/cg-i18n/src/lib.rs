@@ -241,6 +241,8 @@ pub const KEYS: &[&str] = &[
     "check.service.impostor",
     "check.service.fix",
     "check.service.fix_windows",
+    "check.service.fix_not_allowed",
+    "check.service.fix_impostor",
     "check.group.ok",
     "check.group.fail",
     "check.group.fix",

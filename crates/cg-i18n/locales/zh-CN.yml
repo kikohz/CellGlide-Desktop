@@ -66,6 +66,8 @@ check:
     impostor: "另一个程序占用了它的控制管道"
     fix: "sudo systemctl enable --now cellglide"
     fix_windows: "以管理员身份打开 PowerShell，运行 Start-Service CellGlide"
+    fix_not_allowed: "请使用正在这台电脑上登录的账户，或请管理员来操作"
+    fix_impostor: "另一个程序占用了 CellGlide 的控制通道；请重新启动电脑，或重新安装 CellGlide"
   group:
     ok: "当前用户可以控制 CellGlide"
     fail: "当前用户不在 cellglide 组，不能控制服务"

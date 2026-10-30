@@ -1,5 +1,6 @@
 //! What a user sends us: state, the timeline and CellGlide's own log, redacted and kept
-//! under 1 MB. The same format as the Mac app's `DiagnosticsBundle`, with platform "linux".
+//! under 1 MB. The same format as the Mac app's `DiagnosticsBundle`, with platform "linux"
+//! or "windows".
 
 use crate::redact::redact;
 pub use cg_ipc::Contact;
@@ -18,6 +19,11 @@ pub const MAX_LINE: usize = 2000;
 pub const MAX_NOTE: usize = 2000;
 pub const MAX_EMAIL: usize = 200;
 pub const FORMAT: u32 = 1;
+/// The `platform` this build's bundles name.
+#[cfg(windows)]
+pub const PLATFORM: &str = "windows";
+#[cfg(not(windows))]
+pub const PLATFORM: &str = "linux";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

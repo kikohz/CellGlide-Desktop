@@ -1,12 +1,9 @@
 //! cellglide: control the CellGlide service from a terminal.
 
-#[cfg(unix)]
 mod out;
-#[cfg(unix)]
 mod speedtest;
 
-#[cfg(unix)]
-mod unix_main {
+mod cli {
     use crate::out::{out, outln};
     use anyhow::{Result, bail};
     use cg_i18n::tr;
@@ -68,7 +65,7 @@ mod unix_main {
             /// Cover the last 7 days instead of the last 24 hours
             #[arg(long)]
             week: bool,
-            /// Write the bundle to this file (mode 0600) instead of printing it
+            /// Write the bundle to this file (on Linux, mode 0600) instead of printing it
             #[arg(long, value_name = "FILE")]
             save: Option<PathBuf>,
             /// Upload the bundle after showing it and asking for confirmation
@@ -193,6 +190,7 @@ mod unix_main {
     }
 
     /// Writes `text` to `path`, readable only by the owner.
+    #[cfg(unix)]
     fn save_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -205,6 +203,22 @@ mod unix_main {
         // An existing file keeps its old mode when opened; make it private too.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(text.as_bytes())
+    }
+
+    /// Writes `text` to `path`. Windows has no mode bits: the file inherits its folder's
+    /// permissions (a user's own folders are private to them).
+    #[cfg(not(unix))]
+    fn save_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+        std::fs::write(path, text)
+    }
+
+    /// Makes the console show what we print as UTF-8 (Chinese text, ✓ and ✗), whatever
+    /// code page it was set to.
+    #[cfg(windows)]
+    fn utf8_console() {
+        use windows::Win32::System::Console::SetConsoleOutputCP;
+        // SAFETY: no preconditions; without a console it fails, which changes nothing.
+        let _ = unsafe { SetConsoleOutputCP(65001) };
     }
 
     /// Asks `question` on stderr and reads one line; only `y` or `Y` is a yes.
@@ -346,6 +360,8 @@ mod unix_main {
 
     #[tokio::main]
     pub async fn main() -> Result<()> {
+        #[cfg(windows)]
+        utf8_console();
         cg_i18n::init();
         let cli = Cli::parse();
         // Doctor must work without a service, and the saved speed results are a local file.
@@ -399,11 +415,13 @@ mod unix_main {
             }
             Cmd::Doctor => {
                 let checks = match client::request(&cli.endpoint(), &Request::Doctor).await {
+                    // Windows has no cellglide group (design §6.4).
                     Ok(Response::Doctor { checks }) => [
-                        Check::new(CheckId::Service, true),
-                        Check::new(CheckId::Group, true),
+                        Some(Check::new(CheckId::Service, true)),
+                        cfg!(unix).then(|| Check::new(CheckId::Group, true)),
                     ]
                     .into_iter()
+                    .flatten()
                     .chain(checks)
                     .collect(),
                     Ok(Response::Error {
@@ -577,7 +595,10 @@ mod unix_main {
         fn socket_defaults_to_the_system_endpoint() {
             let cli = Cli::try_parse_from(["cellglide", "status"]).unwrap();
             assert_eq!(cli.endpoint(), Endpoint::system());
+            #[cfg(unix)]
             assert_eq!(cli.socket, cg_ipc::SOCKET_PATH);
+            #[cfg(windows)]
+            assert_eq!(cli.socket, cg_ipc::PIPE_NAME);
             let cli =
                 Cli::try_parse_from(["cellglide", "--socket", "/tmp/c.sock", "status"]).unwrap();
             assert_eq!(cli.endpoint(), Endpoint::parse("/tmp/c.sock"));
@@ -604,17 +625,10 @@ mod unix_main {
     }
 }
 
-#[cfg(unix)]
 fn main() {
     // Print the error as is: no English "Error:" prefix in front of translated text.
-    if let Err(error) = unix_main::main() {
+    if let Err(error) = cli::main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
-}
-
-#[cfg(not(unix))]
-fn main() {
-    eprintln!("cellglide only runs on Linux");
-    std::process::exit(1);
 }

@@ -4,9 +4,14 @@
 use rustls::{ClientConfig, RootCertStore};
 use std::sync::{Arc, LazyLock};
 
-/// `CellGlide-Linux/<version>`, sent as the User-Agent of every request we make.
+/// `CellGlide-Linux/<version>` (`CellGlide-Windows/<version>` on Windows), sent as the
+/// User-Agent of every request we make.
 pub fn user_agent() -> String {
-    format!("CellGlide-Linux/{}", env!("CARGO_PKG_VERSION"))
+    #[cfg(windows)]
+    let platform = "Windows";
+    #[cfg(not(windows))]
+    let platform = "Linux";
+    format!("CellGlide-{platform}/{}", env!("CARGO_PKG_VERSION"))
 }
 
 static DEFAULT: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
@@ -39,11 +44,12 @@ mod tests {
 
     #[test]
     fn user_agent_names_the_platform_and_version() {
+        let platform = if cfg!(windows) { "Windows" } else { "Linux" };
         assert_eq!(
             user_agent(),
-            format!("CellGlide-Linux/{}", env!("CARGO_PKG_VERSION"))
+            format!("CellGlide-{platform}/{}", env!("CARGO_PKG_VERSION"))
         );
-        assert!(user_agent().starts_with("CellGlide-Linux/1."));
+        assert!(user_agent().starts_with(&format!("CellGlide-{platform}/1.")));
     }
 
     #[test]

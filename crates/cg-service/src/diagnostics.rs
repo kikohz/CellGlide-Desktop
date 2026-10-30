@@ -1,10 +1,12 @@
 //! The diagnostics bundle, built by the service: the environment summary, the connection
-//! timeline and CellGlide's own journald lines, redacted for the person who asked.
-//! The service reads the journal (it is in the `systemd-journal` group) so the user's own
-//! account needs no extra access; the client only shows and uploads what comes back.
+//! timeline and CellGlide's own log lines, redacted for the person who asked.
+//! On Linux the service reads the journal (it is in the `systemd-journal` group) so the
+//! user's own account needs no extra access; on Windows it reads its own log files. The
+//! client only shows and uploads what comes back.
 
+use crate::access::Requester;
 use cg_core::health::log::HealthLog;
-use cg_diag::bundle::{DiagnosticsBundle, MAX_LOG_LINES, sessions};
+use cg_diag::bundle::{DiagnosticsBundle, MAX_LOG_LINES, PLATFORM, sessions};
 use cg_ipc::phone::{PhoneCard, model_name};
 use cg_ipc::{Check, ConnState, Contact, DiagRange, DnsMode, Reason, Snapshot};
 use jiff::{SignedDuration, Timestamp};
@@ -21,35 +23,56 @@ const JOURNAL_LINE_BYTES: usize = 8 * 1024;
 const STDERR_BYTES: u64 = 2048;
 const COMPUTER: &str = "computer";
 const USER: &str = "User";
+/// The environment row that says how reading the log went.
+#[cfg(not(windows))]
+const LOG_KEY: &str = "Journal";
+#[cfg(windows)]
+const LOG_KEY: &str = "Log";
+#[cfg(not(windows))]
+const EMPTY_LOG: &str = "ok, no lines (or the service may not be allowed to read the journal)";
+#[cfg(windows)]
+const EMPTY_LOG: &str = "ok, no lines";
+
+/// Where the service's own log lines come from.
+pub enum LogSource {
+    /// The journal command and its leading arguments; the range start is appended.
+    #[cfg_attr(windows, allow(dead_code))]
+    Journal(Vec<String>),
+    /// The directory of the service's daily log files (Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Files(PathBuf),
+}
 
 /// Where the bundle's facts come from; tests point these at fakes.
 pub struct Sources {
-    /// The journal command and its leading arguments; the range start is appended.
-    pub journal: Vec<String>,
-    /// The file system root for `etc/os-release`, `proc/…` and `sys/…`.
+    pub log: LogSource,
+    /// The file system root for `etc/os-release`, `proc/…` and `sys/…` (Linux).
     pub root: PathBuf,
     pub health: Option<HealthLog>,
     pub hostname: Option<String>,
 }
 
 impl Sources {
+    #[cfg(unix)]
     pub fn system() -> Sources {
         Sources {
-            journal: [
-                "journalctl",
-                "-u",
-                "cellglide.service",
-                "-o",
-                "short-iso",
-                "--no-pager",
-                "-q",
-                // journalctl reads only what the bundle keeps, however busy the range was.
-                "-n",
-                "2000",
-                "--since",
-            ]
-            .map(String::from)
-            .to_vec(),
+            log: LogSource::Journal(
+                [
+                    "journalctl",
+                    "-u",
+                    "cellglide.service",
+                    "-o",
+                    "short-iso",
+                    "--no-pager",
+                    "-q",
+                    // journalctl reads only what the bundle keeps, however busy the range was.
+                    "-n",
+                    "2000",
+                    "--since",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             root: "/".into(),
             health: None,
             hostname: nix::unistd::gethostname()
@@ -59,20 +82,60 @@ impl Sources {
     }
 }
 
+/// The account of whoever asked for the bundle, as far as redaction needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub login: String,
+    pub full_name: Option<String>,
+}
+
+/// The requester's account: from the uid on Linux, from the SID on Windows.
+fn account(requester: &Requester) -> Option<Account> {
+    match requester {
+        #[cfg(unix)]
+        Requester::Uid(uid) => nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(*uid))
+            .ok()
+            .flatten()
+            .map(|user| unix_account(&user)),
+        #[cfg(windows)]
+        Requester::Sid(sid) => crate::windows::system::account_name(sid).map(|login| Account {
+            login,
+            full_name: None,
+        }),
+        _ => None,
+    }
+}
+
+/// A Unix account's login and the full name from its comment (GECOS) field.
+#[cfg(unix)]
+fn unix_account(user: &nix::unistd::User) -> Account {
+    let full_name = user
+        .gecos
+        .to_str()
+        .ok()
+        .and_then(|g| g.split(',').next())
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty());
+    Account {
+        login: user.name.clone(),
+        full_name,
+    }
+}
+
 /// One bundle at a time for the whole service: each reads up to a week of journal and
 /// redacts it. A second request waits for the first.
 static BUILDING: Semaphore = Semaphore::const_new(1);
 
-/// The whole bundle as the JSON text the client shows and uploads. `requester` is the uid
-/// of the process on the other end of the control socket: that user's login and full name
-/// are replaced, along with the machine's host name.
+/// The whole bundle as the JSON text the client shows and uploads. `requester` is whoever
+/// is on the other end of the control socket or pipe: that user's login and full name are
+/// replaced, along with the machine's host name.
 pub async fn build(
     src: &Sources,
     range: DiagRange,
     contact: Option<Contact>,
     snapshot: &Snapshot,
     checks: &[Check],
-    requester: Option<u32>,
+    requester: &Requester,
     now: Timestamp,
 ) -> Result<String, Reason> {
     // Never closed, so acquiring only waits.
@@ -96,31 +159,26 @@ pub async fn build(
         .collect();
     let found = sessions(&events);
 
-    let log = match read_journal(&src.journal, from).await {
+    let log = match read_log(&src.log, from).await {
         Ok(lines) => {
             let note = if lines.is_empty() {
-                "ok, no lines (or the service may not be allowed to read the journal)".to_string()
+                EMPTY_LOG.to_string()
             } else {
                 format!("ok, {} lines", lines.len())
             };
-            environment.insert("Journal".into(), note);
+            environment.insert(LOG_KEY.into(), note);
             lines
         }
         Err(error) => {
-            environment.insert("Journal".into(), format!("unavailable: {error}"));
+            environment.insert(LOG_KEY.into(), format!("unavailable: {error}"));
             Vec::new()
         }
     };
 
-    let user = requester.and_then(|uid| {
-        nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-            .ok()
-            .flatten()
-    });
-    let (names, user_name) = names(src.hostname.as_deref(), user.as_ref());
+    let (names, user_name) = names(src.hostname.as_deref(), account(requester).as_ref());
 
     let mut bundle = DiagnosticsBundle::new(
-        "linux",
+        PLATFORM,
         now,
         env!("CARGO_PKG_VERSION").to_string(),
         os_line(&src.root),
@@ -152,11 +210,12 @@ fn internal(error: impl std::fmt::Display) -> Reason {
 }
 
 /// What to replace and with what: the host name (short and as given) becomes `computer`,
-/// the requester's full name from the account's comment field becomes `User`, and the
-/// requester's login name is passed on separately for `/home/<name>` and plain mentions.
+/// the requester's full name (Linux: the account's comment field) becomes `User`, and the
+/// requester's login name is passed on separately for `/home/<name>`, `C:\Users\<name>`
+/// and plain mentions.
 pub fn names(
     hostname: Option<&str>,
-    requester: Option<&nix::unistd::User>,
+    requester: Option<&Account>,
 ) -> (BTreeMap<String, String>, Option<String>) {
     let mut names = BTreeMap::new();
     if let Some(host) = hostname.map(str::trim).filter(|h| !h.is_empty()) {
@@ -168,13 +227,12 @@ pub fn names(
     }
     let mut user_name = None;
     if let Some(user) = requester {
-        if let Some(full) = user.gecos.to_str().ok().and_then(|g| g.split(',').next()) {
-            let full = full.trim();
-            if !full.is_empty() {
-                names.insert(full.to_string(), USER.to_string());
-            }
+        if let Some(full) = user.full_name.as_deref().map(str::trim)
+            && !full.is_empty()
+        {
+            names.insert(full.to_string(), USER.to_string());
         }
-        user_name = Some(user.name.clone()).filter(|n| !n.is_empty());
+        user_name = Some(user.login.clone()).filter(|n| !n.is_empty());
     }
     (names, user_name)
 }
@@ -182,8 +240,17 @@ pub fn names(
 /// The facts about this machine and the service's state, as English support data.
 pub fn environment(snapshot: &Snapshot, checks: &[Check], root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    map.insert("Distribution".into(), distribution(root));
-    map.insert("Kernel".into(), kernel(root));
+    #[cfg(not(windows))]
+    {
+        map.insert("Distribution".into(), distribution(root));
+        map.insert("Kernel".into(), kernel(root));
+    }
+    #[cfg(windows)]
+    {
+        let _ = root;
+        map.insert("Windows".into(), os_line(root));
+        map.insert("Architecture".into(), windows_facts::architecture());
+    }
     map.insert("CellGlide".into(), env!("CARGO_PKG_VERSION").into());
     map.insert("State".into(), state_text(&snapshot.state));
     let chosen = snapshot.settings.chosen_serial.as_deref().unwrap_or("auto");
@@ -358,12 +425,94 @@ fn kernel(root: &Path) -> String {
     read_trimmed(root.join("proc/sys/kernel/osrelease")).unwrap_or_else(|| "unknown".into())
 }
 
+#[cfg(not(windows))]
 fn os_line(root: &Path) -> String {
     format!("{} (Linux {})", distribution(root), kernel(root))
 }
 
+#[cfg(not(windows))]
 fn device(root: &Path) -> String {
     read_trimmed(root.join("sys/class/dmi/id/product_name")).unwrap_or_else(|| "unknown".into())
+}
+
+#[cfg(windows)]
+fn os_line(_root: &Path) -> String {
+    windows_facts::os_line()
+}
+
+#[cfg(windows)]
+fn device(_root: &Path) -> String {
+    windows_facts::device()
+}
+
+/// The Windows version and the machine, from the registry and the environment.
+#[cfg(windows)]
+mod windows_facts {
+    use crate::windows::system::{HKEY_LOCAL_MACHINE, reg_string};
+
+    const VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    const BIOS: &str = r"HARDWARE\DESCRIPTION\System\BIOS";
+
+    /// `Windows 11 Pro 23H2 (build 22631)`.
+    pub fn os_line() -> String {
+        let read = |value| reg_string(HKEY_LOCAL_MACHINE, VERSION, value);
+        let build = read("CurrentBuild").unwrap_or_default();
+        let product = read("ProductName").unwrap_or_else(|| "Windows".into());
+        let mut line = product_name(&product, build.parse().unwrap_or(0));
+        if let Some(display) = read("DisplayVersion").filter(|d| !d.is_empty()) {
+            line.push(' ');
+            line.push_str(&display);
+        }
+        if !build.is_empty() {
+            line.push_str(&format!(" (build {build})"));
+        }
+        line
+    }
+
+    /// Windows 11 still calls itself "Windows 10 …" in ProductName; the build tells.
+    pub fn product_name(product: &str, build: u32) -> String {
+        match product.strip_prefix("Windows 10") {
+            Some(rest) if build >= 22000 => format!("Windows 11{rest}"),
+            _ => product.to_string(),
+        }
+    }
+
+    /// `AMD64` or `ARM64`, as Windows names the processor this process runs on.
+    pub fn architecture() -> String {
+        std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| "unknown".into())
+    }
+
+    /// The firmware's product name (as Linux reads from DMI) and the architecture.
+    pub fn device() -> String {
+        let product = reg_string(HKEY_LOCAL_MACHINE, BIOS, "SystemProductName")
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+        match product {
+            Some(product) => format!("{product} ({})", architecture()),
+            None => architecture(),
+        }
+    }
+}
+
+/// The service's own log lines since `from`, the newest `MAX_LOG_LINES`.
+async fn read_log(source: &LogSource, from: Timestamp) -> Result<Vec<String>, String> {
+    match source {
+        LogSource::Journal(command) => read_journal(command, from).await,
+        #[cfg(windows)]
+        LogSource::Files(dir) => {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::windows::logs::read_since(&dir, from, MAX_LOG_LINES)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+        #[cfg(not(windows))]
+        LogSource::Files(dir) => Err(format!(
+            "{}: log files are read on Windows only",
+            dir.display()
+        )),
+    }
 }
 
 /// The journal lines since `from`, the newest `MAX_LOG_LINES`. An error says why none came.
@@ -433,7 +582,7 @@ async fn head_text(stream: impl AsyncRead + Unpin) -> String {
     String::from_utf8_lossy(&text).into_owned()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use cg_ipc::CheckId;
@@ -474,7 +623,7 @@ mod tests {
 
     fn sources(root: &Path, health: Option<HealthLog>) -> Sources {
         Sources {
-            journal: journal_line(),
+            log: LogSource::Journal(journal_line()),
             root: root.to_path_buf(),
             health,
             hostname: Some("alice-thinkpad".into()),
@@ -517,7 +666,7 @@ mod tests {
             Some(contact),
             &connected_snapshot(),
             &checks(),
-            None,
+            &Requester::Unknown,
             now(),
         )
         .await
@@ -553,14 +702,14 @@ mod tests {
     async fn missing_journal_is_noted_not_fatal() {
         let root = fake_root();
         let mut src = sources(root.path(), None);
-        src.journal = vec!["/nonexistent/journalctl".into()];
+        src.log = LogSource::Journal(vec!["/nonexistent/journalctl".into()]);
         let json = build(
             &src,
             DiagRange::Day,
             None,
             &connected_snapshot(),
             &checks(),
-            None,
+            &Requester::Unknown,
             now(),
         )
         .await
@@ -580,16 +729,18 @@ mod tests {
     async fn failing_journal_reports_its_exit() {
         let root = fake_root();
         let mut src = sources(root.path(), None);
-        src.journal = ["sh", "-c", "echo denied >&2; exit 1", "sh"]
-            .map(String::from)
-            .to_vec();
+        src.log = LogSource::Journal(
+            ["sh", "-c", "echo denied >&2; exit 1", "sh"]
+                .map(String::from)
+                .to_vec(),
+        );
         let json = build(
             &src,
             DiagRange::Day,
             None,
             &connected_snapshot(),
             &[],
-            None,
+            &Requester::Unknown,
             now(),
         )
         .await
@@ -604,7 +755,9 @@ mod tests {
 
     #[test]
     fn the_journal_is_asked_for_the_newest_lines_only() {
-        let journal = Sources::system().journal;
+        let LogSource::Journal(journal) = Sources::system().log else {
+            panic!("the journal on Linux");
+        };
         let n = journal.iter().position(|a| a == "-n").expect("-n");
         assert_eq!(journal[n + 1], MAX_LOG_LINES.to_string());
         // The range start is appended right after `--since`.
@@ -623,7 +776,7 @@ mod tests {
             lock.display()
         );
         let mut src = sources(root.path(), None);
-        src.journal = ["sh", "-c", &script, "sh"].map(String::from).to_vec();
+        src.log = LogSource::Journal(["sh", "-c", &script, "sh"].map(String::from).to_vec());
         let src = std::sync::Arc::new(src);
         let one = |src: std::sync::Arc<Sources>| async move {
             let json = build(
@@ -632,7 +785,7 @@ mod tests {
                 None,
                 &connected_snapshot(),
                 &[],
-                None,
+                &Requester::Unknown,
                 now(),
             )
             .await
@@ -663,8 +816,11 @@ mod tests {
     async fn only_the_newest_lines_are_kept() {
         let root = fake_root();
         let mut src = sources(root.path(), None);
-        src.journal = ["sh", "-c", "seq 1 5000", "sh"].map(String::from).to_vec();
-        let lines = read_journal(&src.journal, now()).await.unwrap();
+        src.log = LogSource::Journal(["sh", "-c", "seq 1 5000", "sh"].map(String::from).to_vec());
+        let LogSource::Journal(command) = &src.log else {
+            unreachable!()
+        };
+        let lines = read_journal(command, now()).await.unwrap();
         assert_eq!(lines.len(), MAX_LOG_LINES);
         assert_eq!(lines.last().map(String::as_str), Some("5000"));
         assert_eq!(lines[0], "3001");
@@ -685,9 +841,17 @@ mod tests {
         let timeline_of = |range| {
             let src = &src;
             async move {
-                let json = build(src, range, None, &connected_snapshot(), &[], None, now())
-                    .await
-                    .unwrap();
+                let json = build(
+                    src,
+                    range,
+                    None,
+                    &connected_snapshot(),
+                    &[],
+                    &Requester::Unknown,
+                    now(),
+                )
+                .await
+                .unwrap();
                 serde_json::from_str::<serde_json::Value>(&json).unwrap()
             }
         };
@@ -854,7 +1018,7 @@ mod tests {
         let me = nix::unistd::User::from_uid(nix::unistd::getuid())
             .unwrap()
             .expect("the test user has an account");
-        let (names, user) = super::names(Some("box"), Some(&me));
+        let (names, user) = super::names(Some("box"), Some(&unix_account(&me)));
         assert_eq!(user.as_deref(), Some(me.name.as_str()));
         assert_eq!(names["box"], "computer");
         if let Some(full) = me.gecos.to_str().unwrap().split(',').next()
@@ -874,7 +1038,7 @@ mod tests {
         }
         let root = fake_root();
         let mut src = sources(root.path(), None);
-        src.journal = vec![
+        src.log = LogSource::Journal(vec![
             "sh".into(),
             "-c".into(),
             format!(
@@ -882,14 +1046,14 @@ mod tests {
                 me.name, me.name
             ),
             "sh".into(),
-        ];
+        ]);
         let json = build(
             &src,
             DiagRange::Day,
             None,
             &connected_snapshot(),
             &[],
-            Some(me.uid.as_raw()),
+            &Requester::Uid(me.uid.as_raw()),
             now(),
         )
         .await
@@ -898,5 +1062,137 @@ mod tests {
         let line = v["log"][0].as_str().unwrap();
         assert!(!line.contains(&me.name), "{line}");
         assert!(line.contains("/home/~/x"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::windows::auth::testing::my_sid;
+
+    fn now() -> Timestamp {
+        Timestamp::now()
+    }
+
+    /// A log directory holding one line from an hour ago that names this user's profile
+    /// folder, their login and the (fake) host name.
+    fn log_dir(login: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let at = now() - SignedDuration::from_hours(1);
+        let day = at.to_zoned(jiff::tz::TimeZone::UTC).date();
+        let line = format!(
+            "{at}  INFO cellglide_service: opened C:\\Users\\{login}\\AppData\\x.log on alice-thinkpad for {login}, peer 203.0.113.212\n"
+        );
+        std::fs::write(dir.path().join(format!("service.log.{day}")), line).unwrap();
+        dir
+    }
+
+    fn sources(log: &Path) -> Sources {
+        Sources {
+            log: LogSource::Files(log.to_path_buf()),
+            root: PathBuf::new(),
+            health: None,
+            hostname: Some("alice-thinkpad".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_is_windows_with_its_own_log_redacted() {
+        let login = std::env::var("USERNAME").unwrap();
+        let dir = log_dir(&login);
+        let json = build(
+            &sources(dir.path()),
+            DiagRange::Day,
+            None,
+            &Snapshot::default(),
+            &[Check::new(cg_ipc::CheckId::Wintun, true)],
+            &Requester::Sid(my_sid()),
+            now(),
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["platform"], "windows");
+        assert!(
+            v["os"].as_str().unwrap().starts_with("Windows "),
+            "{}",
+            v["os"]
+        );
+        assert!(v["os"].as_str().unwrap().contains("(build "), "{}", v["os"]);
+        assert!(!v["device"].as_str().unwrap().is_empty());
+        assert_eq!(v["environment"]["Log"], "ok, 1 lines");
+        assert!(v["environment"].get("Journal").is_none());
+        assert!(v["environment"].get("Distribution").is_none());
+        assert_eq!(v["environment"]["Checks"], "wintun ok");
+        let line = v["log"][0].as_str().unwrap();
+        // As `C:\Users\User`, or as `%USERPROFILE%` when the test runs as that same user.
+        assert!(
+            line.contains(r"C:\Users\User\AppData\x.log")
+                || line.contains(r"%USERPROFILE%\AppData\x.log"),
+            "{line}"
+        );
+        assert!(
+            line.contains("computer") && line.contains("203.x.x.x"),
+            "{line}"
+        );
+        if login.chars().count() >= 3 && !["user", "admin"].contains(&login.to_lowercase().as_str())
+        {
+            assert!(
+                !line.to_lowercase().contains(&login.to_lowercase()),
+                "{line}"
+            );
+        }
+        assert!(!json.contains("alice-thinkpad"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_log_directory_is_noted_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = build(
+            &sources(&dir.path().join("logs")),
+            DiagRange::Week,
+            None,
+            &Snapshot::default(),
+            &[],
+            &Requester::Unknown,
+            now(),
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["log"].as_array().unwrap().len(), 0);
+        let note = v["environment"]["Log"].as_str().unwrap();
+        assert!(note.starts_with("unavailable"), "{note}");
+    }
+
+    #[test]
+    fn names_come_from_the_requesters_sid() {
+        let me = account(&Requester::Sid(my_sid())).unwrap();
+        assert!(
+            me.login
+                .eq_ignore_ascii_case(&std::env::var("USERNAME").unwrap())
+        );
+        let (names, user) = names(Some("box.example.com"), Some(&me));
+        assert_eq!(user.as_deref(), Some(me.login.as_str()));
+        assert_eq!(names["box"], "computer");
+        assert_eq!(
+            account(&Requester::Sid("S-1-5-21-0-0-0-424242".into())),
+            None
+        );
+        assert_eq!(account(&Requester::Unknown), None);
+    }
+
+    #[test]
+    fn windows_11_is_named_by_its_build() {
+        use super::windows_facts::product_name;
+        assert_eq!(product_name("Windows 10 Pro", 22631), "Windows 11 Pro");
+        assert_eq!(product_name("Windows 10 Pro", 19045), "Windows 10 Pro");
+        assert_eq!(
+            product_name("Windows Server 2022", 20348),
+            "Windows Server 2022"
+        );
+        let env = environment(&Snapshot::default(), &[], Path::new(""));
+        assert!(env["Windows"].starts_with("Windows "), "{}", env["Windows"]);
+        assert!(!env["Architecture"].is_empty());
     }
 }

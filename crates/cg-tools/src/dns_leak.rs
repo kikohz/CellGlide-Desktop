@@ -632,7 +632,8 @@ mod tests {
         }
         let head = server.await.unwrap().to_ascii_lowercase();
         assert!(head.starts_with(&format!("get /v1/{token} http/1.1")));
-        assert!(head.contains("user-agent: cellglide-linux/"));
+        let agent = format!("user-agent: {}", crate::net::user_agent()).to_ascii_lowercase();
+        assert!(head.contains(&agent), "{head}");
     }
 
     #[tokio::test]

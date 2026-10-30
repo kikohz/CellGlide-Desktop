@@ -75,6 +75,12 @@ const FILE_SUFFIXES: &[&str] = &[
     "toml",
     "yml",
     "jsonl",
+    // Windows
+    "dll",
+    "exe",
+    "ps1",
+    "sys",
+    "msi",
 ];
 
 /// The phone report's network line label as localized: English, Chinese, Spanish.
@@ -142,6 +148,11 @@ static SSID_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
 });
 static SSID_BARE: LazyLock<Regex> = LazyLock::new(|| re(r#"(?i)\bssid[ \t]*[=:][ \t]*[^\s,;'"]+"#));
 static HOME: LazyLock<Regex> = LazyLock::new(|| re(r#"/home/[^/\s"'<>]+"#));
+// A Windows profile folder, `C:\Users\<name>`, with either slash (or escaped backslashes).
+static WINDOWS_PROFILE: LazyLock<Regex> =
+    LazyLock::new(|| re(r#"(?i)(?<![A-Za-z0-9])[a-z]:(?:\\+|/)users(?:\\+|/)[^\\/\s"'<>:|*?]+"#));
+/// Folders under `C:\Users` that belong to no one.
+const SHARED_PROFILES: &[&str] = &["public", "default", "user"];
 static LOCATION_CITY: LazyLock<Regex> = LazyLock::new(|| re(r"· [^·\n]+, [A-Z]{2}(?= ·|\s*$)"));
 static LOCATION_COLO: LazyLock<Regex> = LazyLock::new(|| re(r"· [A-Z]{3}\s*$"));
 // journald line start: "Oct 16 12:00:00[.123456] host unit[pid]:" or an ISO time, then the host.
@@ -170,12 +181,44 @@ fn replace(regex: &Regex, text: &str, mut transform: impl FnMut(&str) -> String)
 }
 
 pub fn redact(text: &str, names: &BTreeMap<String, String>, user_name: Option<&str>) -> String {
+    redact_with_profile(text, names, user_name, own_profile().as_deref())
+}
+
+/// This process's profile folder (`%USERPROFILE%`) on Windows; none elsewhere.
+fn own_profile() -> Option<String> {
+    #[cfg(windows)]
+    return std::env::var("USERPROFILE").ok().filter(|p| !p.is_empty());
+    #[cfg(not(windows))]
+    return None;
+}
+
+/// `redact`, with the profile folder to hide as `%USERPROFILE%` given explicitly.
+fn redact_with_profile(
+    text: &str,
+    names: &BTreeMap<String, String>,
+    user_name: Option<&str>,
+    profile: Option<&str>,
+) -> String {
     let mut result = redact_names(text, names);
     if let Some(user) = user_name.filter(|u| !u.is_empty()) {
         result = result.replace(&format!("/home/{user}"), "/home/~");
     }
     // Whoever the user is, the folder name under /home says who.
     result = replace(&HOME, &result, |_| "/home/~".to_string());
+    if let Some(regex) = profile.and_then(profile_regex) {
+        result = replace(&regex, &result, |_| "%USERPROFILE%".to_string());
+    }
+    // The same for Windows profile folders, `C:\Users\<name>`: first the requester's own,
+    // whose name may hold spaces, then any other.
+    if let Some(user) = user_name.filter(|u| !u.is_empty())
+        && let Ok(regex) = Regex::new(&format!(
+            r#"(?i)(?<![A-Za-z0-9])([a-z]:(?:\\+|/)users(?:\\+|/)){}(?=[\\/\s"'<>]|$)"#,
+            fancy_regex::escape(user)
+        ))
+    {
+        result = replace_profile_name(&regex, &result);
+    }
+    result = replace_profile_name(&WINDOWS_PROFILE, &result);
     // The login name shows up outside paths too (sudo, PAM and logind lines).
     if let Some(user) = user_name.filter(|u| login_name_is_redactable(u))
         && let Ok(regex) = Regex::new(&format!(
@@ -251,6 +294,36 @@ pub fn redact(text: &str, names: &BTreeMap<String, String>, user_name: Option<&s
         }
         "<域名>".to_string()
     })
+}
+
+/// Replaces the folder name at the end of each `C:\Users\<name>` match with `User`,
+/// leaving the shared folders alone.
+fn replace_profile_name(regex: &Regex, text: &str) -> String {
+    replace(regex, text, |m| {
+        let name = m.rsplit(['\\', '/']).next().unwrap_or_default();
+        if SHARED_PROFILES.contains(&name.to_lowercase().as_str()) {
+            return m.to_string();
+        }
+        format!("{}User", &m[..m.len() - name.len()])
+    })
+}
+
+/// A pattern for `profile` (`E:\Profiles\carol`) written with either slash and in any
+/// case, ending where the folder name does; none for a path with fewer than two parts.
+fn profile_regex(profile: &str) -> Option<Regex> {
+    let parts: Vec<String> = profile
+        .split(['\\', '/'])
+        .filter(|p| !p.is_empty())
+        .map(|p| fancy_regex::escape(p).into_owned())
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    Regex::new(&format!(
+        r#"(?i)(?<![A-Za-z0-9]){}(?=[\\/\s"'<>]|$)"#,
+        parts.join(r"(?:\\+|/)")
+    ))
+    .ok()
 }
 
 /// A login name worth replacing everywhere: long enough and not a common word.
@@ -694,6 +767,62 @@ mod tests {
         assert_eq!(
             r("a /usr/lib/x.so and /etc/cellglide/c.conf and /run/cellglide/control.sock"),
             "a /usr/lib/x.so and /etc/cellglide/c.conf and /run/cellglide/control.sock"
+        );
+    }
+
+    #[test]
+    fn windows_profile_paths_are_hidden() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(r"C:\Users\Alice\AppData\x.log", &names, Some("Alice")),
+            r"C:\Users\User\AppData\x.log"
+        );
+        assert_eq!(
+            redact("c:/users/alice/x", &names, Some("Alice")),
+            "c:/users/User/x"
+        );
+    }
+
+    #[test]
+    fn any_windows_profile_folder_is_hidden() {
+        let names = BTreeMap::new();
+        // Without knowing who asked, as /home/<name> is.
+        assert_eq!(
+            redact(r"open D:\USERS\bob\Desktop\a.txt", &names, None),
+            r"open D:\USERS\User\Desktop\a.txt"
+        );
+        // Escaped (Debug or JSON) backslashes, and a folder name with a space when the
+        // login is known.
+        assert_eq!(
+            redact(
+                r#"path: "C:\\Users\\Mary Ann\\x""#,
+                &names,
+                Some("Mary Ann")
+            ),
+            r#"path: "C:\\Users\\User\\x""#
+        );
+        // System paths and the shared folders stay.
+        let kept =
+            r"C:\Windows\System32\drivers C:\Program Files\CellGlide\wintun.dll C:\Users\Public\x";
+        assert_eq!(redact(kept, &names, None), kept);
+    }
+
+    #[test]
+    fn the_profile_path_is_hidden_wherever_it_is() {
+        let names = BTreeMap::new();
+        let profile = Some(r"E:\Profiles\carol");
+        assert_eq!(
+            redact_with_profile(r"E:\Profiles\carol\AppData\x.log", &names, None, profile),
+            r"%USERPROFILE%\AppData\x.log"
+        );
+        assert_eq!(
+            redact_with_profile("e:/profiles/CAROL/x", &names, None, profile),
+            "%USERPROFILE%/x"
+        );
+        // A longer folder name that merely starts the same is not the profile.
+        assert_eq!(
+            redact_with_profile(r"E:\Profiles\caroline\x", &names, None, profile),
+            r"E:\Profiles\caroline\x"
         );
     }
 

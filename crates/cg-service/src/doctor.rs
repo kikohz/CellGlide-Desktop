@@ -15,26 +15,11 @@ pub async fn checks(endpoint: &MuxEndpoint, root: &Path) -> Vec<Check> {
         Err(_) => Check::new(CheckId::Usbmuxd, false),
     };
     let mut result = vec![usbmuxd];
-    match &listed {
-        Ok(devices) if !devices.is_empty() => {
-            result.push(Check::new(CheckId::Phone, true).with("count", devices.len().to_string()));
-            let mut untrusted = Vec::new();
-            for device in devices {
-                if !mux::has_pair_record(endpoint, &device.serial)
-                    .await
-                    .unwrap_or(false)
-                {
-                    untrusted.push(device.serial.clone());
-                }
-            }
-            result.push(if untrusted.is_empty() {
-                Check::new(CheckId::Trust, true)
-            } else {
-                Check::new(CheckId::Trust, false).with("serials", untrusted.join(", "))
-            });
-        }
-        _ => result.push(Check::new(CheckId::Phone, false)),
-    }
+    let serials = listed
+        .as_ref()
+        .ok()
+        .map(|devices| devices.iter().map(|d| d.serial.clone()).collect::<Vec<_>>());
+    result.extend(phone_and_trust(endpoint, serials.as_deref()).await);
     result.push(Check::new(
         CheckId::Resolved,
         root.join("run/systemd/resolve/stub-resolv.conf").exists(),
@@ -54,6 +39,34 @@ pub async fn checks(endpoint: &MuxEndpoint, root: &Path) -> Vec<Check> {
     ];
     result.push(Check::new(CheckId::PolkitRule, any_present(root, &rule)));
     result.push(Check::new(CheckId::Tun, root.join("dev/net/tun").exists()));
+    result
+}
+
+/// `Phone` (how many are plugged in) and, with one or more, `Trust` (which serials have no
+/// pair record yet), from the serials usbmuxd listed (`None`: it couldn't be asked).
+/// Shared with the Windows doctor.
+pub async fn phone_and_trust(endpoint: &MuxEndpoint, listed: Option<&[String]>) -> Vec<Check> {
+    let mut result = Vec::new();
+    match listed {
+        Some(devices) if !devices.is_empty() => {
+            result.push(Check::new(CheckId::Phone, true).with("count", devices.len().to_string()));
+            let mut untrusted = Vec::new();
+            for serial in devices {
+                if !mux::has_pair_record(endpoint, serial)
+                    .await
+                    .unwrap_or(false)
+                {
+                    untrusted.push(serial.clone());
+                }
+            }
+            result.push(if untrusted.is_empty() {
+                Check::new(CheckId::Trust, true)
+            } else {
+                Check::new(CheckId::Trust, false).with("serials", untrusted.join(", "))
+            });
+        }
+        _ => result.push(Check::new(CheckId::Phone, false)),
+    }
     result
 }
 
@@ -135,10 +148,12 @@ mod tests {
         assert_eq!(failed[0].args["serials"], "aaaa");
     }
 
+    #[cfg(unix)]
     fn check(checks: &[Check], id: CheckId) -> &Check {
         checks.iter().find(|c| c.id == id).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn polkit_and_rule_are_found_in_every_known_place() {
         let gone = MuxEndpoint::Unix("/nonexistent/usbmuxd".into());
@@ -181,6 +196,7 @@ mod tests {
         assert!(check(&checks, CheckId::PolkitRule).ok, "{checks:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn no_phone_plugged_is_not_a_usbmuxd_failure() {
         let gone = MuxEndpoint::Unix("/nonexistent/usbmuxd".into());

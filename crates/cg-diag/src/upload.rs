@@ -156,6 +156,15 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
+    /// The User-Agent each platform's build sends, written out independently of the code.
+    fn expected_agent() -> String {
+        #[cfg(windows)]
+        let platform = "Windows";
+        #[cfg(not(windows))]
+        let platform = "Linux";
+        format!("CellGlide-{platform}/{}", env!("CARGO_PKG_VERSION"))
+    }
+
     const CERT: &str = include_str!("../tests/fixtures/server-cert.pem");
     // Throwaway test key generated for these tests only; it protects nothing.
     const KEY: &str = include_str!("../tests/fixtures/server-key.pem");
@@ -233,10 +242,7 @@ mod tests {
             "{request}"
         );
         assert!(
-            lower.contains(
-                &format!("user-agent: cellglide-linux/{}", env!("CARGO_PKG_VERSION"))
-                    .to_ascii_lowercase()
-            ),
+            lower.contains(&format!("user-agent: {}", expected_agent()).to_ascii_lowercase()),
             "{request}"
         );
         assert!(
@@ -299,10 +305,7 @@ mod tests {
         let t = Target::production();
         assert_eq!(format!("https://{}{}", t.host, t.path), ENDPOINT,);
         assert!(t.tls && t.port == 443);
-        assert_eq!(
-            user_agent(),
-            format!("CellGlide-Linux/{}", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(user_agent(), expected_agent());
     }
 
     fn server_cert() -> CertificateDer<'static> {
@@ -355,7 +358,7 @@ mod tests {
             task.await
                 .unwrap()
                 .to_ascii_lowercase()
-                .contains("user-agent: cellglide-linux/")
+                .contains(&format!("user-agent: {}", expected_agent()).to_ascii_lowercase())
         );
         // The normal public roots do not trust it: the upload refuses, as offline.
         let (target, task) = fake_https(r#"200 OK|{"code":"CG-TLS02"}"#).await;

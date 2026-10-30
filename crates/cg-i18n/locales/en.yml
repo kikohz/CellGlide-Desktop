@@ -66,6 +66,8 @@ check:
     impostor: "another program has taken its control pipe"
     fix: "sudo systemctl enable --now cellglide"
     fix_windows: "in PowerShell run as administrator: Start-Service CellGlide"
+    fix_not_allowed: "use the account that is signed in at this computer, or ask an administrator"
+    fix_impostor: "another program is using CellGlide's control channel; restart the computer or reinstall CellGlide"
   group:
     ok: "The current user can control CellGlide"
     fail: "The current user isn't in the cellglide group and can't control the service"

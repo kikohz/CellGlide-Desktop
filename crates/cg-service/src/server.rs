@@ -2,13 +2,12 @@
 //! cellglide and cellglide-gui. The transport says who connected ([`Listener`]); the server
 //! decides per request what that peer may do.
 
-use crate::access::{Access, Peer, Requester, needs_full};
+#[cfg(any(unix, test))]
+use crate::access::Requester;
+use crate::access::{Access, Peer, needs_full};
 #[cfg(unix)]
 use crate::auth::Policy;
-#[cfg(unix)]
 use crate::diagnostics::{self, Sources};
-#[cfg(windows)]
-use crate::windows::diagnostics::{self, Sources};
 use cg_core::controller::{Command, Controller};
 pub use cg_core::resolver::BoxFuture;
 use cg_ipc::{Check, Reason, Request, Response, from_line, read_line, to_line};
@@ -139,14 +138,6 @@ async fn turn_away<C: AsyncRead + AsyncWrite + Unpin>(conn: C) {
     let _ = w.write_all(&to_line(&reply)).await;
 }
 
-/// The uid diagnostics use to hide the requester's names (Windows: Task 13).
-fn requester_uid(requester: &Requester) -> Option<u32> {
-    match requester {
-        Requester::Uid(uid) => Some(*uid),
-        Requester::Sid(_) | Requester::Unknown => None,
-    }
-}
-
 async fn client<C: AsyncRead + AsyncWrite + Unpin>(
     conn: C,
     peer: Peer,
@@ -196,7 +187,7 @@ async fn client<C: AsyncRead + AsyncWrite + Unpin>(
                     contact,
                     &controller.snapshot(),
                     &checks,
-                    requester_uid(&peer.requester),
+                    &peer.requester,
                     jiff::Timestamp::now(),
                 )
                 .await
@@ -324,12 +315,12 @@ pub(crate) mod test_support {
     pub fn test_sources(root: &Path) -> Sources {
         let word_line = "zzzzz ".repeat(100);
         Sources {
-            journal: vec![
+            log: diagnostics::LogSource::Journal(vec![
                 "sh".into(),
                 "-c".into(),
                 format!("yes '{word_line}' | head -n 2000"),
                 "sh".into(),
-            ],
+            ]),
             root: root.to_path_buf(),
             health: None,
             hostname: Some("tester-host".into()),
@@ -337,8 +328,13 @@ pub(crate) mod test_support {
     }
 
     #[cfg(windows)]
-    pub fn test_sources(_root: &Path) -> Sources {
-        Sources
+    pub fn test_sources(root: &Path) -> Sources {
+        Sources {
+            log: diagnostics::LogSource::Files(root.join("logs")),
+            root: root.to_path_buf(),
+            health: None,
+            hostname: Some("tester-host".into()),
+        }
     }
 
     /// Serves `listener` with a controller whose state lives under `dir`; keep the mux alive.
