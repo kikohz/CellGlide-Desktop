@@ -21,3 +21,6 @@ zbus.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

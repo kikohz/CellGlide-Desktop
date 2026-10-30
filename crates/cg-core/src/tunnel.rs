@@ -22,6 +22,14 @@ pub const FALLBACK_DNS: [IpAddr; 4] = [
     IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
 ];
 
+/// Windows: the wintun adapter's fixed GUID, so the NLA profile and the
+/// `Tcpip\Parameters\Interfaces\{GUID}` key exist once instead of piling up.
+pub const WINDOWS_ADAPTER_GUID: u128 = 0xE490EEF2_2CB0_4A80_B341_BF929C2E56B3;
+/// Windows: the wintun tunnel type (the adapter's driver description).
+pub const WINDOWS_TUNNEL_TYPE: &str = "CellGlide";
+/// Windows: our resolver listens on the tunnel's own address (UDP and TCP).
+pub const WINDOWS_RESOLVER: SocketAddr = SocketAddr::new(IpAddr::V4(ADDRESS_V4), 53);
+
 /// hev-socks5-tunnel settings. Idle UDP sessions each hold a SOCKS connection on the
 /// phone, so they are released after 30 s rather than hev's default 60 s.
 pub fn hev_config(socks_port: u16) -> String {
@@ -108,5 +116,11 @@ mod tests {
                 "8.8.8.8"
             ]
         );
+    }
+
+    #[test]
+    fn windows_constants() {
+        assert_eq!(WINDOWS_TUNNEL_TYPE, "CellGlide");
+        assert_eq!(WINDOWS_RESOLVER.to_string(), "198.18.0.1:53");
     }
 }

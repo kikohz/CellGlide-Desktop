@@ -48,6 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.28", features = ["v4", "serde"] }
 zbus = { version = "5.19", default-features = false, features = ["tokio", "blocking-api"] }
 webpki-roots = "1"
+windows = "0.62"
 
 # Lints every crate inherits ([lints] workspace = true). Only lints with no hits today, so
 # adding this table changed nothing; CI still runs clippy with -D warnings.

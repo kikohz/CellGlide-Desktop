@@ -1,4 +1,4 @@
-//! Platform tunnel backends. Only Linux is implemented.
+//! Platform tunnel backends: Linux, and the Windows pieces as they are built.
 
 pub mod bypass;
 pub mod ip;
@@ -13,3 +13,6 @@ mod tun;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
+
+#[cfg(windows)]
+pub mod windows;
