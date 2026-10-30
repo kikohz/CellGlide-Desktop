@@ -1,7 +1,7 @@
 //! End-to-end flows through the engine: a PacketDriver plays the client on one end of a
 //! PacketChannel, `run` owns the other end, and FakeSocks stands in for the forwarder.
 
-use cg_netstack::testkit::{FakeSocks, PacketDriver};
+use cg_netstack::testkit::{FakeSocks, PacketDriver, flood_byte};
 use cg_netstack::{Config, PacketChannel, run};
 use std::io;
 use std::net::SocketAddr;
@@ -30,9 +30,13 @@ struct Engine {
 }
 
 fn start(fake: &FakeSocks) -> Engine {
+    start_with(config(fake.addr()))
+}
+
+fn start_with(config: Config) -> Engine {
     let (ours, theirs) = PacketChannel::pair(256);
     let stop = CancellationToken::new();
-    let task = tokio::spawn(run(theirs, config(fake.addr()), stop.clone()));
+    let task = tokio::spawn(run(theirs, config, stop.clone()));
     Engine {
         driver: PacketDriver::new(ours),
         stop,
@@ -190,4 +194,141 @@ async fn stop_ends_run() {
         .await
         .expect("run returns within 1 s");
     ended.unwrap().unwrap();
+}
+
+/// The SOCKS server stops reading: client data piles up in the engine, yet the other
+/// direction (a 4 MiB download) keeps flowing, and the held data arrives in full once
+/// the server reads again.
+#[tokio::test]
+async fn a_stalled_socks_reader_does_not_stop_the_other_direction() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let target = addr("93.184.216.34:8080");
+    fake.hold(target);
+    fake.flood_later(target);
+    let mut flow = engine
+        .driver
+        .tcp_connect(addr("10.0.0.2:40030"), target)
+        .await;
+    let sent = flow.send_until_stalled().await;
+    // Only now, with the upload stuck in the engine, does the download start.
+    const DOWNLOAD: usize = 4 << 20;
+    fake.start_flood(target, DOWNLOAD);
+    let download = flow.recv_to_end().await;
+    assert_eq!(download.len(), DOWNLOAD);
+    assert!(
+        download
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b == flood_byte(i))
+    );
+    fake.release(target);
+    fake.wait_received(target, sent).await;
+}
+
+/// Nothing moves either way (the server does not read and has nothing to say): after
+/// `tcp_timeout` the flow is torn down and its SOCKS connection reset.
+#[tokio::test]
+async fn a_fully_stalled_flow_is_closed_after_tcp_timeout() {
+    let fake = FakeSocks::start().await;
+    let tcp_timeout = Duration::from_millis(500);
+    let engine = start_with(Config {
+        tcp_timeout,
+        ..config(fake.addr())
+    });
+    let target = addr("93.184.216.34:8081");
+    fake.hold(target);
+    let mut flow = engine
+        .driver
+        .tcp_connect(addr("10.0.0.2:40031"), target)
+        .await;
+    flow.send_until_stalled().await;
+    let stalled_at = tokio::time::Instant::now();
+    let closed_at = fake.wait_closed(target).await;
+    let waited = closed_at - stalled_at;
+    assert!(
+        waited >= tcp_timeout - Duration::from_millis(100),
+        "{waited:?}"
+    );
+}
+
+/// The client half-closes, then resets while the server is silent: the flow must notice
+/// at once, not after `tcp_timeout`.
+#[tokio::test]
+async fn client_reset_after_fin_closes_the_socks_side() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let target = addr("93.184.216.34:8082");
+    fake.probe_after_eof(target);
+    let mut flow = engine
+        .driver
+        .tcp_connect(addr("10.0.0.2:40032"), target)
+        .await;
+    flow.send(b"request").await;
+    flow.shutdown_write().await;
+    fake.wait_eof(target).await;
+    let reset_at = tokio::time::Instant::now();
+    flow.reset();
+    let closed_at = fake.wait_closed(target).await;
+    assert!(closed_at - reset_at < Duration::from_secs(1));
+}
+
+/// The client sends data and FIN while the server is not reading; the server then closes
+/// its side and the connection completes (LAST-ACK). The unread data must still reach
+/// the server, followed by EOF.
+#[tokio::test]
+async fn client_data_survives_the_close_handshake() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let target = addr("93.184.216.34:8083");
+    fake.hold(target);
+    let mut flow = engine
+        .driver
+        .tcp_connect(addr("10.0.0.2:40033"), target)
+        .await;
+    let sent = flow.send_until_stalled().await;
+    flow.shutdown_write().await;
+    fake.release(target);
+    assert_eq!(flow.recv_to_end().await, b"");
+    fake.wait_received(target, sent).await;
+    fake.wait_eof(target).await;
+}
+
+/// No SOCKS CONNECT for a connection that never completes its handshake.
+#[tokio::test]
+async fn socks_connect_waits_for_the_handshake() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let target = addr("93.184.216.34:8084");
+    let mut flow = engine.driver.tcp_syn(addr("10.0.0.2:40034"), target).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(fake.connects().is_empty(), "connected before the handshake");
+    flow.complete();
+    flow.send(b"now").await;
+    assert_eq!(flow.recv_exact(3).await, b"now");
+    assert_eq!(fake.connects(), vec![target]);
+}
+
+/// Multicast, broadcast and link-local traffic is not ours to forward.
+#[tokio::test]
+async fn local_scope_traffic_gets_no_sessions() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let mdns = [
+        (addr("10.0.0.2:5353"), addr("224.0.0.251:5353")),
+        (addr("[fe80::2]:5353"), addr("[ff02::fb]:5353")),
+        (addr("10.0.0.2:68"), addr("255.255.255.255:67")),
+        (addr("169.254.1.2:5000"), addr("169.254.1.1:5000")),
+        (addr("[fd00::2]:5000"), addr("[fe80::1]:5000")),
+    ];
+    for (src, dst) in mdns {
+        engine.driver.udp_send(src, dst, b"local").await;
+    }
+    // An ordinary flow behind them, processed after them, does get its session.
+    let (client, server) = (addr("10.0.0.2:5353"), addr("1.1.1.1:53"));
+    engine.driver.udp_send(client, server, DNS_QUERY).await;
+    assert_eq!(engine.driver.udp_recv().await, (server, DNS_QUERY.to_vec()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.associates(), 1);
+    assert!(fake.connects().is_empty());
 }

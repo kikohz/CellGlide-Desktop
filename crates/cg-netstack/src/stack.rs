@@ -39,6 +39,28 @@ enum Inbound<'a> {
     Udp { key: Key, payload: &'a [u8] },
 }
 
+/// Whether traffic to `dst` can mean anything on the phone's network. Multicast,
+/// broadcast, link-local, loopback and unspecified destinations belong to the local link
+/// (mDNS, SSDP, DHCP...) and never get a SOCKS session. Subnet-directed broadcast cannot
+/// be recognised without the client's prefix; the routes only send 0/1 and 128/1 here.
+fn forwardable(dst: IpAddr) -> bool {
+    match dst {
+        IpAddr::V4(ip) => {
+            !(ip.is_multicast()
+                || ip.is_broadcast()
+                || ip.is_link_local()
+                || ip.is_loopback()
+                || ip.is_unspecified())
+        }
+        IpAddr::V6(ip) => {
+            !(ip.is_multicast()
+                || ip.is_unicast_link_local()
+                || ip.is_loopback()
+                || ip.is_unspecified())
+        }
+    }
+}
+
 /// What a packet from the device is, if we carry it at all.
 fn classify(packet: &[u8]) -> Option<Inbound<'_>> {
     let caps = ChecksumCapabilities::default();
@@ -60,6 +82,9 @@ fn classify(packet: &[u8]) -> Option<Inbound<'_>> {
         }
         _ => return None,
     };
+    if !forwardable(dst) {
+        return None;
+    }
     match protocol {
         IpProtocol::Tcp => {
             let tcp = TcpPacket::new_checked(payload).ok()?;
@@ -184,6 +209,10 @@ impl Stack {
         if self.listeners.iter().any(|(_, pending)| *pending == key) {
             return;
         }
+        if self.sessions.len() + self.listeners.len() >= tcp::MAX_SESSIONS {
+            tracing::debug!(client = %key.0, target = %key.1, "too many tcp sessions");
+            return; // No socket takes the SYN: smoltcp answers with RST.
+        }
         let mut socket = tcp::new_socket(self.config.tcp_timeout);
         let endpoint = IpListenEndpoint {
             addr: Some(key.1.ip().into()),
@@ -251,7 +280,7 @@ impl Stack {
                 kick: self.kick.clone(),
                 cancel: self.cancel.clone(),
             };
-            self.sessions.insert(handle, Session::spawn(client, flow));
+            self.sessions.insert(handle, Session::new(client, flow));
             self.keys.insert((client, target), handle);
         }
     }
@@ -262,7 +291,7 @@ impl Stack {
         for (&handle, session) in &mut self.sessions {
             let socket = self.sockets.get_mut::<TcpSocket>(handle);
             progress |= session.pump(socket);
-            if Session::finished(socket) {
+            if session.finished(socket) {
                 finished.push(handle);
             }
         }
@@ -300,6 +329,34 @@ impl Stack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_scope_destinations_are_not_forwarded() {
+        for local in [
+            "224.0.0.251",
+            "239.255.255.250",
+            "255.255.255.255",
+            "169.254.1.1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "ff02::fb",
+            "ff05::c",
+            "fe80::1",
+            "::1",
+            "::",
+        ] {
+            assert!(!forwardable(local.parse().unwrap()), "{local}");
+        }
+        for remote in [
+            "1.1.1.1",
+            "10.0.0.1",
+            "198.18.0.1",
+            "2606:4700::1111",
+            "fd00::1",
+        ] {
+            assert!(forwardable(remote.parse().unwrap()), "{remote}");
+        }
+    }
 
     #[test]
     fn classify_finds_syns_and_udp_payloads() {
