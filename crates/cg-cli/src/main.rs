@@ -169,15 +169,22 @@ mod cli {
 
     /// Refuse to talk to a service that speaks another protocol version.
     async fn ensure_protocol(cli: &Cli) -> Result<()> {
-        match client::request(&cli.endpoint(), &Request::Hello).await {
+        hello_verdict(client::request(&cli.endpoint(), &Request::Hello).await)
+    }
+
+    fn hello_verdict(reply: std::result::Result<Response, ClientError>) -> Result<()> {
+        match reply {
             Ok(Response::Hello { protocol, .. }) if protocol == cg_ipc::PROTOCOL_VERSION => Ok(()),
             Ok(Response::Hello { protocol, .. }) => Err(version_mismatch(&protocol.to_string())),
+            // Turned away (Linux: not in the cellglide group; Windows: not an administrator
+            // or the active session's user): the same words as when the OS refuses the
+            // connection itself, fix included.
             Ok(Response::Error {
-                reason: Reason::NotInGroup,
-            }) => bail!(
-                "{}",
-                describe::checks(&[Check::new(CheckId::Group, false)]).trim_end()
-            ),
+                reason: Reason::NotInGroup | Reason::NotAllowed,
+            }) => Err(unreachable(&ClientError::Io(
+                std::io::ErrorKind::PermissionDenied.into(),
+            ))),
+            Ok(Response::Error { reason }) => bail!("{}", describe::reason_text(&reason)),
             // A v1 reply this client can parse but doesn't expect; unparsable ones are covered by `unreachable`.
             Ok(_) => Err(version_mismatch("1")),
             Err(error) => Err(unreachable(&error)),
@@ -586,6 +593,37 @@ mod cli {
     mod tests {
         use super::*;
         use clap::CommandFactory;
+
+        /// A client the service turns away is told why, not that the service speaks
+        /// protocol 1.
+        #[test]
+        fn a_refused_hello_is_not_a_version_mismatch() {
+            let _lang = cg_i18n::lock_for_tests();
+            cg_i18n::set(cg_i18n::Lang::En);
+            let mismatch = version_mismatch("1").to_string();
+            for reason in [Reason::NotAllowed, Reason::NotInGroup] {
+                let refused = hello_verdict(Ok(Response::Error { reason })).unwrap_err();
+                let text = refused.to_string();
+                assert_ne!(text, mismatch);
+                #[cfg(windows)]
+                assert!(
+                    text.contains("Only an administrator")
+                        && text.contains("use the account that is signed in"),
+                    "{text}"
+                );
+                #[cfg(unix)]
+                assert!(text.contains("cellglide group"), "{text}");
+            }
+            let other = hello_verdict(Ok(Response::Error {
+                reason: Reason::ShuttingDown,
+            }))
+            .unwrap_err();
+            assert_eq!(
+                other.to_string(),
+                describe::reason_text(&Reason::ShuttingDown)
+            );
+            assert!(hello_verdict(Ok(Response::Ok)).is_err());
+        }
 
         #[test]
         fn sudo_hint_only_for_sudo() {
