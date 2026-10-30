@@ -204,7 +204,7 @@ teardown: flush Ok(()), adapter closed, 3.8 s total
 
 ## Task 6：iPhone（Apple Mobile Device）
 
-**状态：端点部分已测；手机部分未测。** 测试时 Windows 的 PnP 里没有任何 Apple USB 设备（没有 `VID_05AC`），usbmuxd 的 `ListDevices` 返回空列表，所以 `ReadPairRecord`、lockdown、TLS、电量都没法测。需要用户确认手机已插好、屏幕已解锁后重测。
+**状态：已完成（2026-10-30 手机重测）。** 首次测试时 PnP 里没有任何 Apple USB 设备（没有 `VID_05AC`），`ListDevices` 为空；用户插好并信任后重测全部通过，见「手机在线重测」。
 
 ### 27015 是谁提供的
 
@@ -230,8 +230,28 @@ usbmuxd: no matching USB iPhone
 
 我又用原始 plist 报文直接发了一次 `ListDevices`，回复是 `DeviceList` 为空数组（`<array/>`），说明 27015 协议层正常，只是没有设备。
 
-### 信任与配对结论（暂定，待手机在线后确认）
+### 手机在线重测（2026-10-30）
 
-没有测到「信任」弹窗由谁触发。现在能确定的只有：Windows 上 usbmuxd 端点由商店版 Apple 设备应用的用户态进程提供，配对记录目录是 `C:\ProgramData\Apple\Lockdown\<UDID>.plist`，与 macOS/Linux 的做法同形（Task 7 之后的代码已按 `ReadPairRecord` 走 mux 协议）。
+- PnP：`USB\VID_05AC&PID_12A8\00008140000178D81ED3401C`，类 `WPD`，名称 `Apple iPhone`，状态 OK。27015 仍由 `AppleMobileDeviceProcess.exe` 监听。
+- 用户插线、解锁并在手机上点了「信任」后，`C:\ProgramData\Apple\Lockdown\00008140-000178D81ED3401C.plist` 生成（08:33:41）。当时 Apple 设备的后台进程在运行；弹窗是在「不开应用窗口」还是「开着应用」时出现的没有单独区分，按 brief 不重置手机去复现。
+- `phone_probe`（未改动）输出：
+
+```text
+pair record: ok
+label model: iPhone17,5
+session: ok
+tls: on
+info: model=iPhone17,5 ios=26.6 ...
+relay: ok (tls on)
+battery: level=75 charging=true external_connected=true ...
+```
+
+即 `ReadPairRecord`、lockdown 会话、TLS、diagnostics relay、电量全部成功，与 macOS/Linux 同一套代码路径。
+
+### 信任与配对结论
+
+定稿：沿用「只读配对记录」（经 mux 的 `ReadPairRecord`），CellGlide 自己不发起配对。记录不存在时，界面和 doctor 引导用户「用数据线连接 iPhone、解锁，在手机上点信任；如果没有弹出，打开一次 Apple 设备」。Apple 设备的后台进程在用户登录后才有，服务要在 27015 不可达时重试。
+
+以下是首次（手机离线时）的记录：没有测到「信任」弹窗由谁触发。现在能确定的只有：Windows 上 usbmuxd 端点由商店版 Apple 设备应用的用户态进程提供，配对记录目录是 `C:\ProgramData\Apple\Lockdown\<UDID>.plist`，与 macOS/Linux 的做法同形（Task 7 之后的代码已按 `ReadPairRecord` 走 mux 协议）。
 
 暂定方案：沿用「只读配对记录」（经 mux 的 `ReadPairRecord`），CellGlide 自己不发起配对；记录不存在时，界面和 doctor 引导用户「连接 iPhone、解锁，在手机上点信任；必要时打开 Apple 设备」。该方案需要用手机重测后再定稿：重测要覆盖「不开应用窗口拔插线是否弹信任」「打开 Apple 设备后是否弹」「`ReadPairRecord` 是否成功」「lockdown/TLS/diagnostics/电量」。
