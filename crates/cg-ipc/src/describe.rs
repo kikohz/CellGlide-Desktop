@@ -7,14 +7,14 @@ use crate::health::{
 };
 use crate::phone::{BatteryReading, Grade, PhoneCard, PhoneFrame, model_name};
 use crate::{Check, CheckId, ConnState, DnsMode, Reason, Request, Snapshot};
-use cg_i18n::tr;
+use cg_i18n::{tr, tr_os};
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use std::fmt::Write as _;
 
 fn tr_args(key: &str, args: &[(&str, String)]) -> String {
     let borrowed: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    tr(key, &borrowed)
+    tr_os(key, &borrowed)
 }
 
 pub fn reason_text(reason: &Reason) -> String {
@@ -23,7 +23,7 @@ pub fn reason_text(reason: &Reason) -> String {
 
 pub fn state_line(snapshot: &Snapshot) -> String {
     match &snapshot.state {
-        ConnState::NoUsbService => tr("state.no_usb_service", &[]),
+        ConnState::NoUsbService => tr_os("state.no_usb_service", &[]),
         ConnState::NoPhone => tr("state.no_phone", &[]),
         ConnState::ChoosePhone => tr(
             "state.choose_phone",
@@ -61,7 +61,7 @@ pub fn gui_state(snapshot: &Snapshot) -> StateText {
     match &snapshot.state {
         ConnState::NoUsbService => StateText {
             title: tr("gui.state.waiting_usb.title", &[]),
-            detail: tr("state.no_usb_service", &[]),
+            detail: tr_os("state.no_usb_service", &[]),
         },
         ConnState::NoPhone => pair("waiting_usb"),
         ConnState::ChoosePhone => pair("choose_phone"),
@@ -758,6 +758,9 @@ fn check_name(id: CheckId) -> &'static str {
         CheckId::Polkit => "polkit",
         CheckId::PolkitRule => "polkit_rule",
         CheckId::Tun => "tun",
+        CheckId::AppleService => "apple_service",
+        CheckId::Wintun => "wintun",
+        CheckId::Dns => "dns",
     }
 }
 
@@ -778,8 +781,24 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         (true, _) => "ok",
         (false, _) => "fail",
     };
+    let args: Vec<(&str, String)> = args
+        .into_iter()
+        .map(|(k, v)| match (check.id, k) {
+            // Which Apple package provides the service, as words.
+            (CheckId::AppleService, "kind") => {
+                let key = format!("check.apple_service.kind_{v}");
+                let text = if cg_i18n::KEYS.contains(&key.as_str()) {
+                    tr(&key, &[])
+                } else {
+                    v
+                };
+                (k, text)
+            }
+            _ => (k, v),
+        })
+        .collect();
     let line = tr_args(&format!("check.{name}.{state}"), &args);
-    let fix = (!check.ok).then(|| tr(&format!("check.{name}.fix"), &[]));
+    let fix = (!check.ok).then(|| tr_os(&format!("check.{name}.fix"), &[]));
     (line, fix)
 }
 
@@ -806,22 +825,29 @@ pub fn version_mismatch(service: &str) -> String {
 }
 
 /// The check that explains why the service couldn't be reached.
-#[cfg(unix)]
 pub fn service_check(error: &crate::client::ClientError) -> Check {
     use crate::client::ClientError;
+    let service = Check::new(CheckId::Service, false);
     match error {
+        // Linux: the socket is for the cellglide group.
+        #[cfg(unix)]
         ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Check::new(CheckId::Group, false)
         }
+        // Windows: the pipe lets in administrators and interactive users only.
+        #[cfg(windows)]
+        ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            service.with("error", tr("reason.not_allowed", &[]))
+        }
         // Only the OS-level cause: the sentence around it comes from the locale file.
-        ClientError::Io(e) => Check::new(CheckId::Service, false).with("error", e.to_string()),
-        ClientError::Json(e) => Check::new(CheckId::Service, false).with("error", e.to_string()),
-        ClientError::Closed => Check::new(CheckId::Service, false).with("error", "closed"),
+        ClientError::Io(e) => service.with("error", e.to_string()),
+        ClientError::Json(e) => service.with("error", e.to_string()),
+        ClientError::Closed => service.with("error", "closed"),
+        ClientError::NotService => service.with("error", tr("check.service.impostor", &[])),
     }
 }
 
 /// Text for a failed request: an unparsable reply means a service from another version.
-#[cfg(unix)]
 pub fn unreachable(error: &crate::client::ClientError) -> String {
     match error {
         crate::client::ClientError::Json(_) => version_mismatch("1"),
@@ -943,14 +969,45 @@ mod tests {
             Check::new(CheckId::Tun, true),
             Check::new(CheckId::Trust, false).with("serials", "abcd"),
         ]);
-        assert_eq!(
-            text,
-            "✓ 内核支持 TUN 虚拟网卡\n✗ iPhone 还没有信任这台电脑：abcd\n  修复：解锁 iPhone，在弹窗中点「信任」；没有弹窗时重新插拔数据线\n"
-        );
-        assert_eq!(
-            check_lines(&Check::new(CheckId::Usbmuxd, true).with("running", "false")).0,
-            "USB 服务已安装，插上 iPhone 时会自动启动"
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                text,
+                "✓ 内核支持 TUN 虚拟网卡\n✗ iPhone 还没有信任这台电脑：abcd\n  修复：解锁 iPhone，在弹窗中点「信任」；没有弹窗时重新插拔数据线\n"
+            );
+            assert_eq!(
+                check_lines(&Check::new(CheckId::Usbmuxd, true).with("running", "false")).0,
+                "USB 服务已安装，插上 iPhone 时会自动启动"
+            );
+            assert_eq!(
+                state_line(&snap(ConnState::NoUsbService)),
+                "没有检测到 iPhone（USB 服务 usbmuxd 未运行，插上 iPhone 后会自动启动）"
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                text,
+                "✓ 内核支持 TUN 虚拟网卡\n✗ iPhone 还没有信任这台电脑：abcd\n  修复：解锁 iPhone，在弹窗中点「信任」；没有弹窗时打开「Apple 设备」应用，再重新插拔数据线\n"
+            );
+            assert_eq!(
+                check_lines(&Check::new(CheckId::Usbmuxd, true).with("running", "false")).0,
+                "Apple 设备服务已安装，登录 Windows 后会自动运行（端口 27015 暂时没有响应）"
+            );
+            assert!(
+                state_line(&snap(ConnState::NoUsbService)).contains("「Apple 设备」应用"),
+                "{}",
+                state_line(&snap(ConnState::NoUsbService))
+            );
+            assert_eq!(
+                check_lines(&Check::new(CheckId::AppleService, true).with("kind", "store")).0,
+                "Apple 设备服务已安装（「Apple 设备」应用）"
+            );
+            let (line, fix) =
+                check_lines(&Check::new(CheckId::Dns, false).with("owner", "svchost.exe"));
+            assert_eq!(line, "DNS 端口 53 被其他程序占用：svchost.exe");
+            assert!(fix.unwrap().contains("Internet 连接共享"));
+        }
 
         cg_i18n::set(Lang::En);
         assert_eq!(state_line(&snap(ConnState::NoPhone)), "No iPhone connected");
@@ -1010,6 +1067,41 @@ mod tests {
             assert!(text.contains("no such socket"), "{text}");
             assert!(!text.contains("can't reach"), "{text}");
         }
+        #[cfg(windows)]
+        {
+            use crate::client::ClientError;
+            let denied = ClientError::Io(std::io::ErrorKind::PermissionDenied.into());
+            assert_eq!(
+                unreachable(&denied),
+                "✗ Can't reach the CellGlide service (Only an administrator or the user currently using this computer can do this)\n  Fix: in PowerShell run as administrator: Start-Service CellGlide"
+            );
+            assert_eq!(
+                service_check(&denied),
+                Check::new(CheckId::Service, false).with(
+                    "error",
+                    "Only an administrator or the user currently using this computer can do this"
+                )
+            );
+            let impostor = unreachable(&ClientError::NotService);
+            assert!(
+                impostor.starts_with("✗ Can't reach the CellGlide service (another program has taken its control pipe)"),
+                "{impostor}"
+            );
+            let (line, fix) = check_lines(&Check::new(CheckId::Usbmuxd, false));
+            assert!(line.contains("27015"), "{line}");
+            assert!(
+                fix.unwrap()
+                    .contains("winget install --id 9NP83LWLPZ9K --source msstore")
+            );
+            assert_eq!(
+                check_lines(&Check::new(CheckId::AppleService, true).with("kind", "itunes")).0,
+                "Apple's device service is installed (iTunes / Apple Mobile Device Support)"
+            );
+            assert_eq!(
+                reason_text(&Reason::NoUsbService),
+                "Apple's device service (from the Apple Devices app) can't be found"
+            );
+        }
         assert_eq!(speed(512.0), "0.5 KB/s");
         assert_eq!(speed(0.0), "0.0 KB/s");
         assert_eq!(speed(999_999.0), "1000.0 KB/s");
@@ -1017,6 +1109,70 @@ mod tests {
         assert_eq!(amount(123_000), "123 KB");
         assert_eq!(amount(5_500_000), "5.5 MB");
         assert_eq!(amount(1_234_567_890), "1.23 GB");
+    }
+
+    #[test]
+    fn every_check_renders_in_both_languages() {
+        let _lang = language();
+        let all = [
+            CheckId::Service,
+            CheckId::Group,
+            CheckId::Usbmuxd,
+            CheckId::Phone,
+            CheckId::Trust,
+            CheckId::Resolved,
+            CheckId::Polkit,
+            CheckId::PolkitRule,
+            CheckId::Tun,
+            CheckId::AppleService,
+            CheckId::Wintun,
+            CheckId::Dns,
+        ];
+        for id in all {
+            // Adding a CheckId fails to compile here until the list above names it.
+            match id {
+                CheckId::Service
+                | CheckId::Group
+                | CheckId::Usbmuxd
+                | CheckId::Phone
+                | CheckId::Trust
+                | CheckId::Resolved
+                | CheckId::Polkit
+                | CheckId::PolkitRule
+                | CheckId::Tun
+                | CheckId::AppleService
+                | CheckId::Wintun
+                | CheckId::Dns => {}
+            }
+            let name = check_name(id);
+            for state in ["ok", "fail", "fix"] {
+                let key = format!("check.{name}.{state}");
+                assert!(cg_i18n::KEYS.contains(&key.as_str()), "{key} missing");
+            }
+            for lang in [Lang::ZhCn, Lang::En] {
+                cg_i18n::set(lang);
+                for ok in [true, false] {
+                    let check = Check::new(id, ok)
+                        .with("count", "1")
+                        .with("serials", "ab")
+                        .with("error", "e")
+                        .with("kind", "store")
+                        .with("owner", "x.exe");
+                    let (line, fix) = check_lines(&check);
+                    for text in std::iter::once(&line).chain(fix.as_ref()) {
+                        assert!(
+                            !text.is_empty() && !text.contains("check.") && !text.contains("%{"),
+                            "{id:?} {lang:?}: {text}"
+                        );
+                    }
+                    assert_eq!(fix.is_some(), !ok);
+                }
+            }
+        }
+        for kind in ["store", "itunes"] {
+            let key = format!("check.apple_service.kind_{kind}");
+            assert!(cg_i18n::KEYS.contains(&key.as_str()), "{key} missing");
+        }
     }
 
     fn full_card() -> PhoneCard {

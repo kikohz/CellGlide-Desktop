@@ -4,10 +4,9 @@
 
 use crate::app::Message;
 use cg_i18n::tr;
-use cg_ipc::{Check, CheckId, Reason, Request, Response, Snapshot, client, describe};
+use cg_ipc::{Check, CheckId, Endpoint, Reason, Request, Response, Snapshot, client, describe};
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream};
-use std::path::Path;
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::{
@@ -196,8 +195,8 @@ impl ServiceDown {
 }
 
 /// Whether the service speaks our protocol; otherwise why not.
-async fn handshake(path: &Path) -> Result<(), ServiceDown> {
-    match client::request(path, &Request::Hello).await {
+async fn handshake(endpoint: &Endpoint) -> Result<(), ServiceDown> {
+    match client::request(endpoint, &Request::Hello).await {
         Ok(Response::Hello { protocol, .. }) if protocol == cg_ipc::PROTOCOL_VERSION => Ok(()),
         Ok(Response::Hello { protocol, .. }) => Err(ServiceDown::other(
             describe::version_mismatch(&protocol.to_string()),
@@ -317,10 +316,10 @@ pub fn events() -> impl Stream<Item = Message> {
             tokio::spawn(run_tray(output.clone(), state_rx));
             state_tx
         };
-        let path = Path::new(cg_ipc::SOCKET_PATH);
+        let endpoint = Endpoint::system();
         loop {
-            let subscribed = match handshake(path).await {
-                Ok(()) => client::subscribe(path)
+            let subscribed = match handshake(&endpoint).await {
+                Ok(()) => client::subscribe(&endpoint)
                     .await
                     .map_err(|e| ServiceDown::other(describe::unreachable(&e))),
                 Err(problem) => Err(problem),
@@ -356,6 +355,7 @@ mod tests {
     use super::*;
     use cg_ipc::health::{HealthStatus, IssueCause};
     use cg_ipc::{ConnState, DnsMode};
+    use std::path::Path;
 
     #[test]
     fn tray_look_follows_connection_and_health() {

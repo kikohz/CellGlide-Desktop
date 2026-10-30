@@ -19,16 +19,62 @@ pub mod phone;
 use phone::{PhoneCard, PhoneLabel};
 use std::collections::BTreeMap;
 
-#[cfg(unix)]
 pub mod client;
+#[cfg(windows)]
+pub mod pipe_identity;
 
 pub const SOCKET_PATH: &str = "/run/cellglide/control.sock";
+/// The service's control pipe on Windows; clients check its server is LocalSystem.
+#[cfg(windows)]
+pub const PIPE_NAME: &str = r"\\.\pipe\cellglide-control";
+
+/// Where the service listens: a Unix socket, or a named pipe on Windows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+    #[cfg(windows)]
+    Pipe(String),
+}
+
+impl Endpoint {
+    /// The system service's endpoint: [`SOCKET_PATH`], or `PIPE_NAME` on Windows.
+    pub fn system() -> Endpoint {
+        #[cfg(unix)]
+        return Endpoint::Unix(SOCKET_PATH.into());
+        #[cfg(windows)]
+        return Endpoint::Pipe(PIPE_NAME.into());
+    }
+
+    /// A socket path, or on Windows a pipe name (`\\.\pipe\name`, or just `name`).
+    pub fn parse(text: &str) -> Endpoint {
+        #[cfg(unix)]
+        return Endpoint::Unix(text.into());
+        #[cfg(windows)]
+        return if text.starts_with(r"\\") {
+            Endpoint::Pipe(text.into())
+        } else {
+            Endpoint::Pipe(format!(r"\\.\pipe\{text}"))
+        };
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(unix)]
+            Endpoint::Unix(path) => write!(f, "{}", path.display()),
+            #[cfg(windows)]
+            Endpoint::Pipe(name) => f.write_str(name),
+        }
+    }
+}
 pub const GROUP: &str = "cellglide";
 pub const MAX_LINE: usize = 64 * 1024;
 /// Replies (history, diagnostics) can be far longer than requests.
 pub const MAX_REPLY_LINE: usize = 4 * 1024 * 1024;
 /// Bumped whenever a message changes shape; clients check it with `Request::Hello`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// What a user typed into the diagnostics dialog: their own words, sent on purpose.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +119,8 @@ pub enum Reason {
         detail: String,
     },
     NotInGroup,
+    /// Windows: only an administrator or a user in an active session may do this.
+    NotAllowed,
     BadRequest,
     ShuttingDown,
     /// `history` asked for a day that isn't `YYYY-MM-DD` or not among the last seven.
@@ -98,6 +146,7 @@ impl Reason {
             Reason::Tunnel { detail: "x".into() },
             Reason::Internal { detail: "x".into() },
             Reason::NotInGroup,
+            Reason::NotAllowed,
             Reason::BadRequest,
             Reason::ShuttingDown,
             Reason::BadDay,
@@ -117,6 +166,7 @@ impl Reason {
                 | Reason::Tunnel { .. }
                 | Reason::Internal { .. }
                 | Reason::NotInGroup
+                | Reason::NotAllowed
                 | Reason::BadRequest
                 | Reason::ShuttingDown
                 | Reason::BadDay => {}
@@ -143,6 +193,7 @@ impl Reason {
             Reason::Tunnel { .. } => "reason.tunnel",
             Reason::Internal { .. } => "reason.internal",
             Reason::NotInGroup => "reason.not_in_group",
+            Reason::NotAllowed => "reason.not_allowed",
             Reason::BadRequest => "reason.bad_request",
             Reason::ShuttingDown => "reason.shutting_down",
             Reason::BadDay => "reason.bad_day",
@@ -285,6 +336,12 @@ pub enum CheckId {
     Polkit,
     PolkitRule,
     Tun,
+    /// Windows: Apple's device service is installed and running.
+    AppleService,
+    /// Windows: wintun.dll is present and properly signed.
+    Wintun,
+    /// Windows: nothing else holds the resolver's port 53.
+    Dns,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,7 +502,7 @@ mod tests {
                 .unwrap()
                 .contains("\"dns\":\"unmanaged\"")
         );
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
         assert_eq!(
             to_line(&Request::History {
                 day: Some("2026-10-16".into())
@@ -497,6 +554,56 @@ mod tests {
         let back: Snapshot = from_line(&to_line(&snap)).unwrap();
         assert_eq!(back, snap);
         assert_eq!(Snapshot::default().state, ConnState::NoPhone);
+    }
+
+    #[test]
+    fn protocol_is_six() {
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
+
+    #[test]
+    fn endpoint_parses_and_prints() {
+        #[cfg(windows)]
+        {
+            assert_eq!(Endpoint::parse(PIPE_NAME), Endpoint::Pipe(PIPE_NAME.into()));
+            assert_eq!(Endpoint::system(), Endpoint::Pipe(PIPE_NAME.into()));
+            assert_eq!(
+                Endpoint::system().to_string(),
+                r"\\.\pipe\cellglide-control"
+            );
+            // A bare name is a pipe in the local namespace.
+            assert_eq!(Endpoint::parse("cellglide-control"), Endpoint::system());
+        }
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                Endpoint::parse(SOCKET_PATH),
+                Endpoint::Unix(SOCKET_PATH.into())
+            );
+            assert_eq!(Endpoint::system().to_string(), SOCKET_PATH);
+        }
+        assert_eq!(
+            Endpoint::system().to_string(),
+            Endpoint::parse(&Endpoint::system().to_string()).to_string()
+        );
+    }
+
+    #[test]
+    fn windows_wire_names() {
+        assert_eq!(
+            to_line(&Response::Error {
+                reason: Reason::NotAllowed
+            }),
+            b"{\"type\":\"error\",\"reason\":{\"code\":\"not_allowed\"}}\n"
+        );
+        assert_eq!(Reason::NotAllowed.key(), "reason.not_allowed");
+        for (id, name) in [
+            (CheckId::AppleService, "apple_service"),
+            (CheckId::Wintun, "wintun"),
+            (CheckId::Dns, "dns"),
+        ] {
+            assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{name}\""));
+        }
     }
 
     #[tokio::test]

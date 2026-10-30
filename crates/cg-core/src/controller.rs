@@ -1195,6 +1195,7 @@ fn release_detail(reason: &Reason) -> String {
         Reason::Tunnel { .. } => "tunnel",
         Reason::Internal { .. } => "internal",
         Reason::NotInGroup => "notInGroup",
+        Reason::NotAllowed => "notAllowed",
         Reason::BadRequest => "badRequest",
         Reason::ShuttingDown => "shuttingDown",
         Reason::BadDay => "badDay",

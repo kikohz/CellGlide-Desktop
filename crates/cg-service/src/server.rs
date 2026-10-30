@@ -241,6 +241,11 @@ mod tests {
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
+    /// The tests hold the socket path; the client takes an endpoint.
+    fn ep(path: &std::path::Path) -> cg_ipc::Endpoint {
+        cg_ipc::Endpoint::Unix(path.into())
+    }
+
     struct NoDoctor;
     impl DoctorApi for NoDoctor {
         fn run(&self) -> BoxFuture<'_, Vec<Check>> {
@@ -302,24 +307,26 @@ mod tests {
     async fn answers_status_doctor_and_commands() {
         let (_dir, path, _mux) = start(me()).await;
         assert!(matches!(
-            client::request(&path, &Request::Hello).await.unwrap(),
+            client::request(&ep(&path), &Request::Hello).await.unwrap(),
             Response::Hello {
                 protocol: cg_ipc::PROTOCOL_VERSION,
                 ..
             }
         ));
         assert!(matches!(
-            client::request(&path, &Request::Status).await.unwrap(),
+            client::request(&ep(&path), &Request::Status).await.unwrap(),
             Response::Status { .. }
         ));
         assert!(
-            matches!(client::request(&path, &Request::Doctor).await.unwrap(), Response::Doctor { checks } if checks.len() == 1)
+            matches!(client::request(&ep(&path), &Request::Doctor).await.unwrap(), Response::Doctor { checks } if checks.len() == 1)
         );
         assert_eq!(
-            client::request(&path, &Request::Disconnect).await.unwrap(),
+            client::request(&ep(&path), &Request::Disconnect)
+                .await
+                .unwrap(),
             Response::Ok
         );
-        let mut updates = client::subscribe(&path).await.unwrap();
+        let mut updates = client::subscribe(&ep(&path)).await.unwrap();
         assert!(updates.recv().await.is_some());
     }
 
@@ -330,8 +337,12 @@ mod tests {
             auto_connect: Some(false),
             phone: None,
         };
-        assert_eq!(client::request(&path, &set).await.unwrap(), Response::Ok);
-        let Response::Status { snapshot } = client::request(&path, &Request::Status).await.unwrap()
+        assert_eq!(
+            client::request(&ep(&path), &set).await.unwrap(),
+            Response::Ok
+        );
+        let Response::Status { snapshot } =
+            client::request(&ep(&path), &Request::Status).await.unwrap()
         else {
             panic!("expected a status");
         };
@@ -341,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn history_round_trip() {
         let (_dir, path, _mux) = start(me()).await;
-        let reply = client::request(&path, &Request::History { day: None })
+        let reply = client::request(&ep(&path), &Request::History { day: None })
             .await
             .unwrap();
         let Response::History { day } = reply else {
@@ -358,7 +369,7 @@ mod tests {
         );
         let first = day.days[0].clone();
         let reply = client::request(
-            &path,
+            &ep(&path),
             &Request::History {
                 day: Some(first.clone()),
             },
@@ -379,7 +390,7 @@ mod tests {
         ] {
             assert_eq!(
                 client::request(
-                    &path,
+                    &ep(&path),
                     &Request::History {
                         day: Some(bad.into())
                     }
@@ -399,7 +410,7 @@ mod tests {
         use cg_ipc::DiagRange;
         let (_dir, path, _mux) = start(me()).await;
         let reply = client::request(
-            &path,
+            &ep(&path),
             &Request::Diagnostics {
                 range: DiagRange::Day,
                 contact: None,
@@ -443,7 +454,7 @@ mod tests {
         drop(flood);
 
         assert!(matches!(
-            client::request(&path, &Request::Status).await.unwrap(),
+            client::request(&ep(&path), &Request::Status).await.unwrap(),
             Response::Status { .. }
         ));
     }
@@ -483,7 +494,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(matches!(
-            client::request(&path, &Request::Status).await.unwrap(),
+            client::request(&ep(&path), &Request::Status).await.unwrap(),
             Response::Status { .. }
         ));
     }
@@ -494,7 +505,7 @@ mod tests {
             return; // root is always allowed
         }
         let (_dir, path, _mux) = start(Policy::for_test(Some(u32::MAX - 1), |_| vec![])).await;
-        let reply = client::request(&path, &Request::Status).await.unwrap();
+        let reply = client::request(&ep(&path), &Request::Status).await.unwrap();
         assert_eq!(
             reply,
             Response::Error {

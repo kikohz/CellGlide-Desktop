@@ -6,8 +6,7 @@ use crate::app::Message;
 use crate::effect::{DoctorFor, Reply};
 use crate::pages::{PageMsg, diagnostics, history, leak, settings};
 use cg_i18n::tr;
-use cg_ipc::{Request, Response, client, describe};
-use std::path::Path;
+use cg_ipc::{Endpoint, Request, Response, client, describe};
 use std::time::Duration;
 
 /// How long a reply may take before the page stops waiting.
@@ -25,11 +24,11 @@ fn timeout_for(request: &Request) -> Duration {
 /// One request; the service's own refusal, an unreachable service and one that never answers
 /// all become text.
 pub async fn call(request: Request) -> Result<Response, String> {
-    call_at(Path::new(cg_ipc::SOCKET_PATH), request).await
+    call_at(&Endpoint::system(), request).await
 }
 
-async fn call_at(path: &Path, request: Request) -> Result<Response, String> {
-    match tokio::time::timeout(timeout_for(&request), client::request(path, &request)).await {
+async fn call_at(endpoint: &Endpoint, request: Request) -> Result<Response, String> {
+    match tokio::time::timeout(timeout_for(&request), client::request(endpoint, &request)).await {
         Err(_elapsed) => Err(tr("gui.service_timeout", &[])),
         Ok(Ok(Response::Error { reason })) => Err(describe::reason_text(&reason)),
         Ok(Ok(response)) => Ok(response),
@@ -129,7 +128,7 @@ mod tests {
             }
         });
         let started = tokio::time::Instant::now();
-        let result = call_at(&path, Request::History { day: None }).await;
+        let result = call_at(&Endpoint::Unix(path), Request::History { day: None }).await;
         // Other tests may switch the language meanwhile; either language's sentence will do.
         let text = result.unwrap_err();
         assert!(

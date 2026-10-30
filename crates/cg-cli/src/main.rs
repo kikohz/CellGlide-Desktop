@@ -11,7 +11,9 @@ mod unix_main {
     use anyhow::{Result, bail};
     use cg_i18n::tr;
     use cg_ipc::client::{self, ClientError};
-    use cg_ipc::{Check, CheckId, ConnState, PhoneChoice, Reason, Request, Response, describe};
+    use cg_ipc::{
+        Check, CheckId, ConnState, Endpoint, PhoneChoice, Reason, Request, Response, describe,
+    };
     use clap::{Parser, Subcommand};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -24,10 +26,16 @@ mod unix_main {
     )]
     struct Cli {
         /// Control socket of cellglide-service.
-        #[arg(long, default_value = cg_ipc::SOCKET_PATH)]
-        socket: PathBuf,
+        #[arg(long, default_value_t = Endpoint::system().to_string())]
+        socket: String,
         #[command(subcommand)]
         command: Cmd,
+    }
+
+    impl Cli {
+        fn endpoint(&self) -> Endpoint {
+            Endpoint::parse(&self.socket)
+        }
     }
 
     #[derive(Subcommand)]
@@ -161,7 +169,7 @@ mod unix_main {
 
     /// Refuse to talk to a service that speaks another protocol version.
     async fn ensure_protocol(cli: &Cli) -> Result<()> {
-        match client::request(&cli.socket, &Request::Hello).await {
+        match client::request(&cli.endpoint(), &Request::Hello).await {
             Ok(Response::Hello { protocol, .. }) if protocol == cg_ipc::PROTOCOL_VERSION => Ok(()),
             Ok(Response::Hello { protocol, .. }) => Err(version_mismatch(&protocol.to_string())),
             Ok(Response::Error {
@@ -177,7 +185,7 @@ mod unix_main {
     }
 
     async fn call(cli: &Cli, request: Request) -> Result<Response> {
-        match client::request(&cli.socket, &request).await {
+        match client::request(&cli.endpoint(), &request).await {
             Ok(Response::Error { reason }) => bail!("{}", describe::reason_text(&reason)),
             Ok(response) => Ok(response),
             Err(error) => Err(unreachable(&error)),
@@ -361,7 +369,7 @@ mod unix_main {
                     },
                 )
                 .await?;
-                let mut updates = client::subscribe(&cli.socket)
+                let mut updates = client::subscribe(&cli.endpoint())
                     .await
                     .map_err(|e| unreachable(&e))?;
                 let waited = tokio::time::timeout(Duration::from_secs(20), async {
@@ -390,7 +398,7 @@ mod unix_main {
                 outln!("{}", tr("cli.disconnected", &[]));
             }
             Cmd::Doctor => {
-                let checks = match client::request(&cli.socket, &Request::Doctor).await {
+                let checks = match client::request(&cli.endpoint(), &Request::Doctor).await {
                     Ok(Response::Doctor { checks }) => [
                         Check::new(CheckId::Service, true),
                         Check::new(CheckId::Group, true),
@@ -541,7 +549,7 @@ mod unix_main {
                 history,
             } => return speedtest_command(&cli, *compare, *yes, *history).await,
             Cmd::Watch => {
-                let mut updates = client::subscribe(&cli.socket)
+                let mut updates = client::subscribe(&cli.endpoint())
                     .await
                     .map_err(|e| unreachable(&e))?;
                 while let Some(snapshot) = updates.recv().await {
@@ -563,6 +571,16 @@ mod unix_main {
             assert!(sudo_hint(true, Some("x")).is_some());
             assert!(sudo_hint(true, None).is_none());
             assert!(sudo_hint(false, Some("x")).is_none());
+        }
+
+        #[test]
+        fn socket_defaults_to_the_system_endpoint() {
+            let cli = Cli::try_parse_from(["cellglide", "status"]).unwrap();
+            assert_eq!(cli.endpoint(), Endpoint::system());
+            assert_eq!(cli.socket, cg_ipc::SOCKET_PATH);
+            let cli =
+                Cli::try_parse_from(["cellglide", "--socket", "/tmp/c.sock", "status"]).unwrap();
+            assert_eq!(cli.endpoint(), Endpoint::parse("/tmp/c.sock"));
         }
 
         #[test]

@@ -620,6 +620,7 @@ name = "cg-i18n"
 version = "1.0.0"
 dependencies = [
  "rust-i18n",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -633,6 +634,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "windows 0.62.2",
 ]
 
 [[package]]

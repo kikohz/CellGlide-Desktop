@@ -1,6 +1,7 @@
 list_separator: ", "
 state:
   no_usb_service: "No iPhone detected (the USB service usbmuxd is not running; it starts when an iPhone is plugged in)"
+  no_usb_service_windows: "No iPhone detected (Apple's device service from the Apple Devices app isn't running; install and open the Apple Devices app, which then runs whenever you sign in to Windows)"
   no_phone: "No iPhone connected"
   choose_phone: "Several iPhones are connected. Choose one with cellglide connect --serial <serial>: %{devices}"
   idle: "iPhone connected. Run cellglide connect to use the phone's network"
@@ -38,6 +39,7 @@ phone:
   battery_level_charging: "%{percent}% (charging)"
 reason:
   no_usb_service: "The USB service usbmuxd can't be found"
+  no_usb_service_windows: "Apple's device service (from the Apple Devices app) can't be found"
   phone_not_ready: "The phone isn't ready. Unlock the iPhone and start sharing in CellGlide; right after plugging in, it connects by itself in a moment"
   phone_too_old: "Please update CellGlide on the phone; this version is too old"
   session_changed: "The sharing session on the phone changed"
@@ -50,6 +52,7 @@ reason:
   tunnel: "Couldn't set up the virtual network interface: %{detail}"
   internal: "Internal error: %{detail}"
   not_in_group: "Permission denied: the current user isn't in the cellglide group"
+  not_allowed: "Only an administrator or the user currently using this computer can do this"
   bad_request: "Unrecognized request"
   shutting_down: "The CellGlide service is shutting down"
   version_mismatch: "The CellGlide service (protocol %{service}) doesn't match this program (protocol %{client}). Please restart CellGlide"
@@ -59,7 +62,10 @@ check:
   service:
     ok: "The CellGlide service is running"
     fail: "The CellGlide service isn't running (%{error})"
+    fail_windows: "Can't reach the CellGlide service (%{error})"
+    impostor: "another program has taken its control pipe"
     fix: "sudo systemctl enable --now cellglide"
+    fix_windows: "in PowerShell run as administrator: Start-Service CellGlide"
   group:
     ok: "The current user can control CellGlide"
     fail: "The current user isn't in the cellglide group and can't control the service"
@@ -69,6 +75,10 @@ check:
     idle: "The USB service is installed and starts when an iPhone is plugged in"
     fail: "The USB service usbmuxd isn't installed"
     fix: "Ubuntu / Debian: sudo apt install usbmuxd; Fedora: sudo dnf install usbmuxd"
+    ok_windows: "Apple's device service is answering on port 27015"
+    idle_windows: "Apple's device service is installed and runs after you sign in to Windows (port 27015 isn't answering yet)"
+    fail_windows: "Apple's device service isn't answering on port 27015 (the Apple Devices app isn't installed or hasn't started)"
+    fix_windows: "install and open the Apple Devices app: winget install --id 9NP83LWLPZ9K --source msstore, or open ms-windows-store://pdp/?ProductId=9NP83LWLPZ9K; it then runs whenever you sign in to Windows"
   phone:
     ok: "%{count} iPhone(s) detected"
     fail: "No iPhone is plugged in"
@@ -77,6 +87,7 @@ check:
     ok: "The iPhone trusts this computer"
     fail: "The iPhone doesn't trust this computer yet: %{serials}"
     fix: "Unlock the iPhone and tap Trust; if no prompt appears, unplug and plug the cable back in"
+    fix_windows: "Unlock the iPhone and tap Trust; if no prompt appears, open the Apple Devices app and plug the cable back in"
   resolved:
     ok: "systemd-resolved is running"
     fail: "CellGlide needs systemd-resolved to set DNS on its own interface only"
@@ -93,6 +104,20 @@ check:
     ok: "The kernel supports TUN interfaces"
     fail: "The kernel's TUN interface support (/dev/net/tun) is missing"
     fix: "sudo modprobe tun"
+  apple_service:
+    ok: "Apple's device service is installed (%{kind})"
+    kind_store: "Apple Devices app"
+    kind_itunes: "iTunes / Apple Mobile Device Support"
+    fail: "Apple's device service isn't installed or isn't running"
+    fix: "install and open the Apple Devices app: winget install --id 9NP83LWLPZ9K --source msstore, or open ms-windows-store://pdp/?ProductId=9NP83LWLPZ9K; it then runs whenever you sign in to Windows"
+  wintun:
+    ok: "wintun.dll is present and properly signed"
+    fail: "wintun.dll is missing or its signature isn't valid"
+    fix: "run the installation command again in PowerShell: irm https://pkg.cellglide.com/install.ps1 | iex"
+  dns:
+    ok: "CellGlide's DNS port 53 is free"
+    fail: "Another program is using DNS port 53: %{owner}"
+    fix: "turn off that program's DNS feature, such as Internet Connection Sharing (the SharedAccess service)"
 cli:
   disconnected: "Disconnected. This computer is back on its own network"
   still_connecting: "Still connecting. Run cellglide watch to follow progress"

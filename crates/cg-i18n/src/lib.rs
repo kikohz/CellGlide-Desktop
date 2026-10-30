@@ -26,13 +26,47 @@ impl Lang {
         }
     }
 
+    /// The language the environment asks for; on Windows without any of the variables, the
+    /// user's first preferred display language.
     pub fn from_env() -> Lang {
         ["CELLGLIDE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"]
             .iter()
             .filter_map(|name| std::env::var(name).ok())
             .find(|value| !value.is_empty())
+            .or_else(os_language)
             .map_or(Lang::En, |value| Lang::from_tag(&value))
     }
+}
+
+#[cfg(not(windows))]
+fn os_language() -> Option<String> {
+    None
+}
+
+/// The first entry of `GetUserPreferredUILanguages`, e.g. `zh-CN` or `en-US`.
+#[cfg(windows)]
+fn os_language() -> Option<String> {
+    use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    use windows::core::PWSTR;
+    let mut count = 0u32;
+    let mut len = 0u32;
+    // SAFETY: a null buffer asks only for the length, written to `len`.
+    unsafe { GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut len) }.ok()?;
+    let mut buffer = vec![0u16; len as usize];
+    // SAFETY: `buffer` holds `len` UTF-16 units, as the call above asked for.
+    unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &mut len,
+        )
+    }
+    .ok()?;
+    // A list of NUL-terminated names ending with an empty one.
+    let first = buffer.split(|&unit| unit == 0).next()?;
+    let name = String::from_utf16(first).ok()?;
+    (!name.is_empty()).then_some(name)
 }
 
 pub fn set(lang: Lang) {
@@ -75,9 +109,24 @@ pub fn tr_in(lang: Lang, key: &str, args: &[(&str, &str)]) -> String {
     fill(&rust_i18n::t!(key, locale = lang.code()), args)
 }
 
+/// Like [`tr`], but on Windows `<key>_windows` wins when the locale files have it (plan
+/// decision 6). On other systems this is exactly `tr`.
+pub fn tr_os(key: &str, args: &[(&str, &str)]) -> String {
+    #[cfg(windows)]
+    {
+        let windows = format!("{key}_windows");
+        // Every key exists in English (the fallback), so English decides whether the variant exists.
+        if _rust_i18n_backend_translate(Lang::En.code(), &windows).is_some() {
+            return tr(&windows, args);
+        }
+    }
+    tr(key, args)
+}
+
 pub const KEYS: &[&str] = &[
     "list_separator",
     "state.no_usb_service",
+    "state.no_usb_service_windows",
     "state.no_phone",
     "state.choose_phone",
     "state.idle",
@@ -112,6 +161,7 @@ pub const KEYS: &[&str] = &[
     "phone.battery_level",
     "phone.battery_level_charging",
     "reason.no_usb_service",
+    "reason.no_usb_service_windows",
     "reason.phone_not_ready",
     "reason.phone_too_old",
     "reason.session_changed",
@@ -124,6 +174,7 @@ pub const KEYS: &[&str] = &[
     "reason.tunnel",
     "reason.internal",
     "reason.not_in_group",
+    "reason.not_allowed",
     "reason.bad_request",
     "reason.shutting_down",
     "reason.version_mismatch",
@@ -186,20 +237,28 @@ pub const KEYS: &[&str] = &[
     "check.fix",
     "check.service.ok",
     "check.service.fail",
+    "check.service.fail_windows",
+    "check.service.impostor",
     "check.service.fix",
+    "check.service.fix_windows",
     "check.group.ok",
     "check.group.fail",
     "check.group.fix",
     "check.usbmuxd.ok",
     "check.usbmuxd.idle",
     "check.usbmuxd.fail",
+    "check.usbmuxd.ok_windows",
+    "check.usbmuxd.idle_windows",
+    "check.usbmuxd.fail_windows",
     "check.usbmuxd.fix",
+    "check.usbmuxd.fix_windows",
     "check.phone.ok",
     "check.phone.fail",
     "check.phone.fix",
     "check.trust.ok",
     "check.trust.fail",
     "check.trust.fix",
+    "check.trust.fix_windows",
     "check.resolved.ok",
     "check.resolved.fail",
     "check.resolved.fix",
@@ -212,6 +271,17 @@ pub const KEYS: &[&str] = &[
     "check.tun.ok",
     "check.tun.fail",
     "check.tun.fix",
+    "check.apple_service.ok",
+    "check.apple_service.kind_store",
+    "check.apple_service.kind_itunes",
+    "check.apple_service.fail",
+    "check.apple_service.fix",
+    "check.wintun.ok",
+    "check.wintun.fail",
+    "check.wintun.fix",
+    "check.dns.ok",
+    "check.dns.fail",
+    "check.dns.fix",
     "cli.disconnected",
     "cli.still_connecting",
     "cli.service_stopped",
@@ -452,11 +522,83 @@ mod tests {
     }
 
     #[test]
+    fn tr_os_prefers_the_windows_key_on_windows() {
+        let _g = lock_for_tests();
+        set(Lang::En);
+        let text = tr_os("reason.no_usb_service", &[]);
+        if cfg!(windows) {
+            assert!(text.contains("Apple Devices"), "{text}");
+            assert!(!text.contains("usbmuxd"), "{text}");
+        } else {
+            assert_eq!(text, tr("reason.no_usb_service", &[]));
+            assert!(text.contains("usbmuxd"), "{text}");
+        }
+        // Without a Windows variant both platforms use the shared key.
+        assert_eq!(tr_os("check.trust.ok", &[]), tr("check.trust.ok", &[]));
+        assert_eq!(
+            tr_os("check.apple_service.ok", &[("kind", "x")]),
+            tr("check.apple_service.ok", &[("kind", "x")])
+        );
+    }
+
+    #[test]
+    fn windows_keys_exist_in_both_languages() {
+        let windows: Vec<&str> = KEYS
+            .iter()
+            .copied()
+            .filter(|k| k.ends_with("_windows"))
+            .collect();
+        for key in [
+            "state.no_usb_service_windows",
+            "reason.no_usb_service_windows",
+            "check.service.fix_windows",
+            "check.usbmuxd.ok_windows",
+            "check.usbmuxd.idle_windows",
+            "check.usbmuxd.fail_windows",
+            "check.usbmuxd.fix_windows",
+            "check.trust.fix_windows",
+        ] {
+            assert!(windows.contains(&key), "{key} missing from KEYS");
+        }
+        for key in windows {
+            let shared = key.strip_suffix("_windows").unwrap();
+            assert!(KEYS.contains(&shared), "{key} has no shared key {shared}");
+            for lang in [Lang::ZhCn, Lang::En] {
+                assert!(
+                    crate::_rust_i18n_backend_translate(lang.code(), key).is_some(),
+                    "{} has no {key}",
+                    lang.code()
+                );
+            }
+        }
+        let fix = tr_in(Lang::En, "check.usbmuxd.fix_windows", &[]);
+        assert!(
+            fix.contains("winget install --id 9NP83LWLPZ9K --source msstore")
+                && fix.contains("ms-windows-store://pdp/?ProductId=9NP83LWLPZ9K"),
+            "{fix}"
+        );
+        for lang in [Lang::ZhCn, Lang::En] {
+            let text = tr_in(lang, "state.no_usb_service_windows", &[]);
+            assert!(!text.contains("Start-Service"), "{text}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_a_display_language() {
+        let name = os_language().expect("a preferred UI language");
+        assert!(name.contains('-') || name.len() == 2, "{name}");
+    }
+
+    #[test]
     fn picks_language_from_tags() {
         assert_eq!(Lang::from_tag("zh_CN.UTF-8"), Lang::ZhCn);
         assert_eq!(Lang::from_tag("ZH_tw"), Lang::ZhCn);
         assert_eq!(Lang::from_tag("en_US.UTF-8"), Lang::En);
         assert_eq!(Lang::from_tag("C"), Lang::En);
+        // Windows display-language names.
+        assert_eq!(Lang::from_tag("zh-Hans-CN"), Lang::ZhCn);
+        assert_eq!(Lang::from_tag("en-US"), Lang::En);
         assert_eq!(Lang::from_tag(""), Lang::En);
     }
 }
