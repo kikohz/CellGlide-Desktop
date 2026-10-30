@@ -267,10 +267,16 @@ mod tests {
         drop(control);
         tokio::time::sleep(Duration::from_millis(200)).await;
         client.send_to(&packet, ("127.0.0.1", relay)).await.unwrap();
+        let after = tokio::time::timeout(Duration::from_millis(300), client.recv(&mut buf)).await;
+        // No datagram comes back. Windows reports the closed relay port's ICMP
+        // unreachable as ConnectionReset on the next receive; Unix just times out.
+        #[cfg(windows)]
+        if let Ok(Err(error)) = &after {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            return;
+        }
         assert!(
-            tokio::time::timeout(Duration::from_millis(300), client.recv(&mut buf))
-                .await
-                .is_err(),
+            after.is_err(),
             "association closed with its control connection"
         );
     }

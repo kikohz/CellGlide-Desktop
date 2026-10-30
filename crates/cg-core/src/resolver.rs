@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub const MAX_IN_FLIGHT: usize = 128;
+/// How long a query waits for the upstream before it gets SERVFAIL, unless the caller
+/// sets its own deadline.
 pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_TCP_CLIENTS: usize = 16;
 const TCP_IDLE: Duration = Duration::from_secs(10);
@@ -36,7 +38,13 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub async fn start(addr: SocketAddr, upstream: Arc<dyn Upstream>) -> Result<Resolver> {
+    /// Serves `addr` over UDP and TCP; a query the upstream has not answered within
+    /// `deadline` gets SERVFAIL.
+    pub async fn start(
+        addr: SocketAddr,
+        upstream: Arc<dyn Upstream>,
+        deadline: Duration,
+    ) -> Result<Resolver> {
         let (udp, tcp) = bind_pair(addr).await?;
         let udp = Arc::new(udp);
         let addr = udp.local_addr()?;
@@ -48,14 +56,14 @@ impl Resolver {
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {}
-                _ = serve_udp(sock, up, w, token.clone()) => {}
+                _ = serve_udp(sock, up, w, deadline, token.clone()) => {}
             }
         });
         let token = cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {}
-                _ = serve_tcp(tcp, upstream, waiters, token.clone()) => {}
+                _ = serve_tcp(tcp, upstream, waiters, deadline, token.clone()) => {}
             }
         });
         Ok(Resolver { addr, cancel })
@@ -124,6 +132,7 @@ async fn resolve(
     query: Vec<u8>,
     upstream: &Arc<dyn Upstream>,
     waiters: &Waiters,
+    deadline: Duration,
 ) -> Option<Vec<u8>> {
     let mut key = query.clone();
     key[0] = 0;
@@ -146,7 +155,7 @@ async fn resolve(
         let waiters = waiters.clone();
         let q = query.clone();
         tokio::spawn(async move {
-            let reply = tokio::time::timeout(UPSTREAM_TIMEOUT, upstream.exchange(q))
+            let reply = tokio::time::timeout(deadline, upstream.exchange(q))
                 .await
                 .ok()
                 .flatten();
@@ -170,6 +179,7 @@ async fn serve_udp(
     socket: Arc<UdpSocket>,
     upstream: Arc<dyn Upstream>,
     waiters: Waiters,
+    deadline: Duration,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65535];
@@ -188,7 +198,7 @@ async fn serve_udp(
         tokio::spawn(async move {
             tokio::select! {
                 _ = cancel.cancelled() => {}
-                reply = resolve(query, &upstream, &waiters) => {
+                reply = resolve(query, &upstream, &waiters, deadline) => {
                     if let Some(reply) = reply {
                         let _ = socket.send_to(&reply, from).await;
                     }
@@ -202,6 +212,7 @@ async fn serve_tcp(
     listener: TcpListener,
     upstream: Arc<dyn Upstream>,
     waiters: Waiters,
+    deadline: Duration,
     cancel: CancellationToken,
 ) {
     let slots = Arc::new(Semaphore::new(MAX_TCP_CLIENTS));
@@ -218,7 +229,7 @@ async fn serve_tcp(
             let _slot = slot;
             tokio::select! {
                 _ = cancel.cancelled() => {}
-                _ = serve_tcp_client(stream, upstream, waiters) => {}
+                _ = serve_tcp_client(stream, upstream, waiters, deadline) => {}
             }
         });
     }
@@ -228,6 +239,7 @@ async fn serve_tcp_client(
     mut stream: TcpStream,
     upstream: Arc<dyn Upstream>,
     waiters: Waiters,
+    deadline: Duration,
 ) -> Option<()> {
     loop {
         let len = tokio::time::timeout(TCP_IDLE, stream.read_u16())
@@ -242,7 +254,7 @@ async fn serve_tcp_client(
             .await
             .ok()?
             .ok()?;
-        let reply = resolve(query, &upstream, &waiters).await?;
+        let reply = resolve(query, &upstream, &waiters, deadline).await?;
         let len = u16::try_from(reply.len()).ok()?;
         stream.write_all(&len.to_be_bytes()).await.ok()?;
         stream.write_all(&reply).await.ok()?;
@@ -291,7 +303,7 @@ mod tests {
     }
 
     async fn start(echo: Arc<Echo>) -> Resolver {
-        Resolver::start("127.0.0.1:0".parse().unwrap(), echo)
+        Resolver::start("127.0.0.1:0".parse().unwrap(), echo, UPSTREAM_TIMEOUT)
             .await
             .unwrap()
     }
@@ -381,7 +393,7 @@ mod tests {
             delay: Duration::ZERO,
             fail: false,
         });
-        let err = Resolver::start(taken.local_addr().unwrap(), echo)
+        let err = Resolver::start(taken.local_addr().unwrap(), echo, UPSTREAM_TIMEOUT)
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::ResolverPortBusy(_)));
@@ -443,5 +455,32 @@ mod tests {
         response[2] |= 0x80;
         assert!(servfail(&response).is_none(), "never answer a response");
         assert!(servfail(&q[..5]).is_none());
+    }
+
+    #[tokio::test]
+    async fn servfail_after_the_configured_deadline() {
+        let echo = Arc::new(Echo {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_secs(3600),
+            fail: false,
+        });
+        let resolver = Resolver::start(
+            "127.0.0.1:0".parse().unwrap(),
+            echo,
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client
+            .send_to(&query(5), resolver.local_addr())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let n = tokio::time::timeout(Duration::from_millis(400), client.recv(&mut buf))
+            .await
+            .expect("SERVFAIL within 400 ms")
+            .unwrap();
+        assert_eq!(&buf[..n], &servfail(&query(5)).unwrap()[..]);
     }
 }

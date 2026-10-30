@@ -3,10 +3,9 @@ use cg_protocol::mux::{Device, MuxEvent, encode_message};
 use plist::{Dictionary, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -19,36 +18,54 @@ struct State {
     listeners: Vec<mpsc::UnboundedSender<MuxEvent>>,
 }
 
-/// A usbmuxd on a temporary Unix socket. `Connect` to a routed port is piped to a local TCP server.
+/// A usbmuxd on a temporary Unix socket; on Windows on TCP 127.0.0.1, as Apple Mobile
+/// Device Service. `Connect` to a routed port is piped to a local TCP server.
 pub struct FakeMux {
+    #[cfg(unix)]
     _dir: tempfile::TempDir,
-    path: PathBuf,
+    endpoint: MuxEndpoint,
     state: Arc<Mutex<State>>,
     task: JoinHandle<()>,
 }
 
 impl FakeMux {
     pub async fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mux.sock");
-        let listener = UnixListener::bind(&path).unwrap();
         let state = Arc::new(Mutex::new(State::default()));
         let shared = state.clone();
-        let task = tokio::spawn(async move {
-            while let Ok((conn, _)) = listener.accept().await {
-                tokio::spawn(serve(conn, shared.clone()));
-            }
-        });
+        #[cfg(unix)]
+        let (dir, endpoint, task) = {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mux.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let task = tokio::spawn(async move {
+                while let Ok((conn, _)) = listener.accept().await {
+                    tokio::spawn(serve(conn, shared.clone()));
+                }
+            });
+            (dir, MuxEndpoint::Unix(path), task)
+        };
+        #[cfg(not(unix))]
+        let (endpoint, task) = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                while let Ok((conn, _)) = listener.accept().await {
+                    tokio::spawn(serve(conn, shared.clone()));
+                }
+            });
+            (MuxEndpoint::Tcp(addr), task)
+        };
         Self {
+            #[cfg(unix)]
             _dir: dir,
-            path,
+            endpoint,
             state,
             task,
         }
     }
 
     pub fn endpoint(&self) -> MuxEndpoint {
-        MuxEndpoint::Unix(self.path.clone())
+        self.endpoint.clone()
     }
 
     pub fn attach(&self, device: Device) {
@@ -127,11 +144,11 @@ fn device_dict(device: &Device) -> Dictionary {
     d
 }
 
-async fn send(conn: &mut UnixStream, dict: &Dictionary) -> std::io::Result<()> {
+async fn send<S: AsyncWrite + Unpin>(conn: &mut S, dict: &Dictionary) -> std::io::Result<()> {
     conn.write_all(&encode_message(dict, 1).unwrap()).await
 }
 
-async fn serve(mut conn: UnixStream, state: Arc<Mutex<State>>) {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, state: Arc<Mutex<State>>) {
     let Ok(request) = read_message(&mut conn).await else {
         return;
     };

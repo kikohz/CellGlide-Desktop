@@ -29,7 +29,8 @@ pub fn state_home() -> PathBuf {
     state_home_from(std::env::var_os("XDG_STATE_HOME"), std::env::home_dir())
 }
 
-#[cfg(test)]
+// XDG paths are a Unix rule: "/home/x" is not absolute on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -13,11 +13,12 @@ use crate::lockdown;
 use crate::mux::{self, MuxEndpoint};
 use crate::phone::{self, Ended, Phone};
 use crate::phone_feed::{PhoneFeed, sanitize};
-use crate::resolver::Resolver;
+use crate::resolver::{self, Resolver};
 use crate::retry::backoff;
 use crate::settings::{LastVersions, SettingsStore, Stored};
 use crate::tunnel::{
-    DnsPlan, FALLBACK_DNS, RESOLVER, RunningTunnel, TunnelBackend, TunnelNotice, TunnelPlan,
+    DnsPlan, FALLBACK_DNS, RESOLVER, ResolverOrder, RunningTunnel, TunnelBackend, TunnelNotice,
+    TunnelPlan,
 };
 use crate::{CoreError, Result};
 use cg_ipc::health::{DayStart, EventKind, HistoryDay};
@@ -42,6 +43,8 @@ pub struct ControllerConfig {
     pub endpoint: MuxEndpoint,
     pub backend: Arc<dyn TunnelBackend>,
     pub resolver_addr: SocketAddr,
+    /// How long the resolver waits for the phone before answering SERVFAIL.
+    pub resolver_deadline: Duration,
     pub computer_name: Option<String>,
     pub health: HealthTiming,
     pub exit_probe: Arc<dyn ExitProbe>,
@@ -126,6 +129,7 @@ impl ControllerConfig {
             endpoint,
             backend,
             resolver_addr: RESOLVER,
+            resolver_deadline: resolver::UPSTREAM_TIMEOUT,
             computer_name: None,
             health: HealthTiming::default(),
             exit_probe: Arc::new(HttpsProbe::cloudflare()),
@@ -1005,25 +1009,61 @@ impl Actor {
             return Err(CoreError::NoExit);
         }
         let phone_dns = hello.dns_enabled() && hello.has(capability::DNS_FORWARD);
-        let resolver = if phone_dns {
+        // BeforeTunnel (Linux): resolver, then the whole tunnel. AfterInterface (Windows):
+        // the interface and its addresses, then the resolver on one of them, then `finish`
+        // sets the DNS. Either way `finish` runs once, and a failure after `start` stops
+        // the tunnel before the error is returned.
+        let order = self.config.backend.resolver_order();
+        let (resolver_addr, deadline) = (self.config.resolver_addr, self.config.resolver_deadline);
+        let start_resolver = || {
             let upstream = Arc::new(DohUpstream::new(phone.clone()));
-            Some(Resolver::start(self.config.resolver_addr, upstream).await?)
-        } else {
-            None
+            Resolver::start(resolver_addr, upstream, deadline)
         };
+        let mut resolver = None;
+        if phone_dns && order == ResolverOrder::BeforeTunnel {
+            resolver = Some(start_resolver().await?);
+        }
         let plan = TunnelPlan {
             socks_port: forwarder.port(),
             dns: match &resolver {
                 Some(r) => DnsPlan::Resolver(r.local_addr()),
+                None if phone_dns => DnsPlan::Resolver(resolver_addr),
                 None => DnsPlan::Servers(FALLBACK_DNS.to_vec()),
             },
             bypass: self.config.bypass,
         };
+        let planned_dns = plan.dns.clone();
         let backend = self.config.backend.clone();
         let started = tokio::task::spawn_blocking(move || backend.start(&plan)).await;
         let tunnel = match started {
             Ok(Ok(tunnel)) => tunnel,
             Ok(Err(error)) => return Err(CoreError::Tunnel(error.0)),
+            Err(join) => return Err(CoreError::Tunnel(join.to_string())),
+        };
+        if phone_dns && order == ResolverOrder::AfterInterface {
+            match start_resolver().await {
+                Ok(r) => resolver = Some(r),
+                Err(error) => {
+                    stop_tunnel(tunnel).await;
+                    return Err(error);
+                }
+            }
+        }
+        let dns_plan = match &resolver {
+            Some(r) => DnsPlan::Resolver(r.local_addr()),
+            None => planned_dns,
+        };
+        let finished = tokio::task::spawn_blocking(move || {
+            let result = tunnel.finish(&dns_plan);
+            (tunnel, result)
+        })
+        .await;
+        let tunnel = match finished {
+            Ok((tunnel, Ok(()))) => tunnel,
+            Ok((tunnel, Err(error))) => {
+                stop_tunnel(tunnel).await;
+                return Err(CoreError::Tunnel(error.0));
+            }
             Err(join) => return Err(CoreError::Tunnel(join.to_string())),
         };
 
@@ -1091,11 +1131,7 @@ impl Actor {
         };
         self.monitor.tunnel_stopped(detail, Timestamp::now());
         if let Some(tunnel) = active.tunnel.take() {
-            match tokio::task::spawn_blocking(move || tunnel.stop()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::error!("stopping tunnel: {error}"),
-                Err(error) => tracing::error!("stopping tunnel: {error}"),
-            }
+            stop_tunnel(tunnel).await;
         }
         drop(active);
         self.feed.reset();
@@ -1225,6 +1261,15 @@ fn history_day(
         days: last_seven(today).iter().map(Date::to_string).collect(),
         begin,
         end: next.min(now).max(begin),
+    }
+}
+
+/// Undoes the tunnel on a blocking thread; a failure is logged, there is nothing else to do.
+async fn stop_tunnel(tunnel: Box<dyn RunningTunnel>) {
+    match tokio::task::spawn_blocking(move || tunnel.stop()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!("stopping tunnel: {error}"),
+        Err(error) => tracing::error!("stopping tunnel: {error}"),
     }
 }
 
@@ -1365,11 +1410,35 @@ mod tests {
         timing: HealthTiming,
         adjust: impl FnOnce(&mut ControllerConfig),
     ) -> Rig {
+        rig_backend(options, resolver_addr, timing, FakeBackend::new(), adjust).await
+    }
+
+    /// A rig on the given backend, auto connect off.
+    async fn rig_on(
+        backend: Arc<FakeBackend>,
+        options: FakePhoneOptions,
+        resolver_addr: SocketAddr,
+    ) -> Rig {
+        rig_backend(options, resolver_addr, quiet_timing(), backend, |config| {
+            config.settings = SettingsSource::Memory(Stored {
+                auto_connect: false,
+                ..Stored::default()
+            });
+        })
+        .await
+    }
+
+    async fn rig_backend(
+        options: FakePhoneOptions,
+        resolver_addr: SocketAddr,
+        timing: HealthTiming,
+        backend: Arc<FakeBackend>,
+        adjust: impl FnOnce(&mut ControllerConfig),
+    ) -> Rig {
         let probe = FakeProbe::new();
         let tunnel_probe = FakeTunnelProbe::new();
         let mux = FakeMux::start().await;
         let phone = FakePhone::start(&mux, options).await;
-        let backend = FakeBackend::new();
         let mut config =
             ControllerConfig::new(mux.endpoint(), Arc::new(SharedFake(backend.clone())));
         config.resolver_addr = resolver_addr;
@@ -1392,6 +1461,109 @@ mod tests {
 
     fn any_port() -> SocketAddr {
         "127.0.0.1:0".parse().unwrap()
+    }
+
+    /// A loopback port free for both UDP and TCP right now, as a fixed resolver address.
+    fn free_port() -> SocketAddr {
+        loop {
+            let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = udp.local_addr().unwrap();
+            if std::net::TcpListener::bind(addr).is_ok() {
+                return addr;
+            }
+        }
+    }
+
+    async fn connect_and_wait(r: &Rig, what: &str, pred: impl Fn(&Snapshot) -> bool) -> Snapshot {
+        r.mux.attach(device("aaaa", 1));
+        wait_for(&r.controller, "idle", |s| s.state == ConnState::Idle).await;
+        r.controller
+            .send(Command::Connect { serial: None })
+            .await
+            .unwrap();
+        wait_for(&r.controller, what, pred).await
+    }
+
+    fn retrying(s: &Snapshot) -> bool {
+        matches!(s.state, ConnState::Retrying { .. })
+    }
+
+    #[tokio::test]
+    async fn after_interface_starts_resolver_between_start_and_finish() {
+        let addr = free_port();
+        let backend = FakeBackend::with_order(ResolverOrder::AfterInterface);
+        let r = rig_on(backend, FakePhoneOptions::default(), addr).await;
+        let snap = connect_and_wait(&r, "connected", connected).await;
+        assert!(matches!(
+            snap.state,
+            ConnState::Connected {
+                dns: DnsMode::Phone,
+                ..
+            }
+        ));
+        assert_eq!(r.backend.started(), 1);
+        assert_eq!(r.backend.last_plan().unwrap().dns, DnsPlan::Resolver(addr));
+        assert_eq!(
+            r.backend.listening_at_start(),
+            Some(false),
+            "the interface comes up before the resolver"
+        );
+        let finish = r.backend.last_finish().unwrap();
+        assert_eq!(finish.dns, DnsPlan::Resolver(addr));
+        assert!(finish.resolver_listening, "resolver listens before finish");
+        assert_eq!(r.backend.finished(), 1);
+        assert_eq!(r.backend.stopped(), 0);
+    }
+
+    #[tokio::test]
+    async fn after_interface_rolls_back_when_resolver_cannot_bind() {
+        let taken = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap();
+        let backend = FakeBackend::with_order(ResolverOrder::AfterInterface);
+        let r = rig_on(backend, FakePhoneOptions::default(), addr).await;
+        let snap = connect_and_wait(&r, "retrying", retrying).await;
+        assert_eq!(
+            snap.state,
+            ConnState::Retrying {
+                reason: Reason::ResolverPortBusy { port: addr.port() }
+            }
+        );
+        assert_eq!(r.backend.started(), 1);
+        assert_eq!(r.backend.stopped(), 1);
+        assert_eq!(r.backend.finished(), 0);
+    }
+
+    #[tokio::test]
+    async fn after_interface_rolls_back_when_finish_fails() {
+        let backend = FakeBackend::with_order(ResolverOrder::AfterInterface);
+        backend.set_finish_fails(true);
+        let r = rig_on(backend, FakePhoneOptions::default(), free_port()).await;
+        let snap = connect_and_wait(&r, "retrying", retrying).await;
+        assert!(matches!(
+            snap.state,
+            ConnState::Retrying {
+                reason: Reason::Tunnel { .. }
+            }
+        ));
+        assert_eq!(r.backend.finished(), 1);
+        assert_eq!(r.backend.stopped(), 1);
+    }
+
+    #[tokio::test]
+    async fn before_tunnel_order_is_unchanged() {
+        let r = rig(FakePhoneOptions::default(), any_port()).await;
+        connect_and_wait(&r, "connected", connected).await;
+        let plan = r.backend.last_plan().unwrap();
+        assert!(matches!(plan.dns, DnsPlan::Resolver(addr) if addr.port() != 0));
+        assert_eq!(
+            r.backend.listening_at_start(),
+            Some(true),
+            "the resolver listens before the tunnel starts"
+        );
+        assert_eq!(r.backend.finished(), 1);
+        let finish = r.backend.last_finish().unwrap();
+        assert_eq!(finish.dns, plan.dns);
+        assert!(finish.resolver_listening);
     }
 
     async fn wait_for(c: &Controller, what: &str, pred: impl Fn(&Snapshot) -> bool) -> Snapshot {
@@ -1766,10 +1938,8 @@ mod tests {
     #[tokio::test]
     async fn missing_usbmuxd_is_reported() {
         let backend = FakeBackend::new();
-        let mut config = ControllerConfig::new(
-            MuxEndpoint::Unix("/nonexistent/usbmuxd".into()),
-            Arc::new(SharedFake(backend)),
-        );
+        let mut config =
+            ControllerConfig::new(crate::testing::missing_mux(), Arc::new(SharedFake(backend)));
         config.exit_probe = Arc::new(SharedProbe(FakeProbe::new()));
         config.health = quiet_timing();
         let controller = Controller::spawn(config);

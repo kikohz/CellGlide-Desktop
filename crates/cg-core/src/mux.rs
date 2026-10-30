@@ -160,7 +160,7 @@ pub async fn listen(endpoint: &MuxEndpoint) -> Result<mpsc::Receiver<MuxEvent>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{FakeMux, device, echo_server};
+    use crate::testing::{FakeMux, device, echo_server, missing_mux};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -228,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_usbmuxd_and_pair_records() {
-        let gone = MuxEndpoint::Unix("/nonexistent/usbmuxd".into());
+        let gone = missing_mux();
         assert!(matches!(
             list_devices(&gone).await,
             Err(CoreError::NoUsbService)

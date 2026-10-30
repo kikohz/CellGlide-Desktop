@@ -7,7 +7,7 @@ mod fake_mux;
 mod fake_phone;
 mod fake_probe;
 
-pub use fake_backend::{FakeBackend, SharedFake};
+pub use fake_backend::{FakeBackend, FinishCall, SharedFake};
 pub use fake_lockdown::{
     DEVICE_CERT_PEM, DEVICE_KEY_PEM, FAKE_RELAY_PORT, FIXTURE_HOST_ID, FIXTURE_SYSTEM_BUID,
     FakeLockdown, HOST_CERT_PEM, HOST_KEY_PEM, fixture_pair_record, host_cert_der,
@@ -40,4 +40,20 @@ pub async fn echo_server() -> SocketAddr {
         }
     });
     addr
+}
+
+/// Where no usbmuxd answers: a missing socket, or on Windows a loopback port nobody listens on.
+pub fn missing_mux() -> crate::mux::MuxEndpoint {
+    #[cfg(unix)]
+    {
+        crate::mux::MuxEndpoint::Unix("/nonexistent/usbmuxd".into())
+    }
+    #[cfg(not(unix))]
+    {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        crate::mux::MuxEndpoint::Tcp(addr)
+    }
 }
