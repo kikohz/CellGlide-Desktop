@@ -31,6 +31,16 @@ zbus.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 cg-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

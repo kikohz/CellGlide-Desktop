@@ -29,9 +29,11 @@ pub const SOCKET_PATH: &str = "/run/cellglide/control.sock";
 #[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\cellglide-control";
 /// The control pipe's security descriptor: owned by LocalSystem (the owner is what clients
-/// check), full access for SYSTEM and administrators, read/write for interactive users.
+/// check), full access for SYSTEM and administrators, read/write for interactive users:
+/// `0x12019b` is FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES,
+/// i.e. GENERIC_WRITE without FILE_CREATE_PIPE_INSTANCE, so they can't add instances of it.
 #[cfg(windows)]
-pub const PIPE_SDDL: &str = "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+pub const PIPE_SDDL: &str = "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)";
 
 /// Where the service listens: a Unix socket, or a named pipe on Windows.
 #[derive(Clone, Debug, PartialEq, Eq)]

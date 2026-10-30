@@ -1,6 +1,8 @@
-// The modules are written for Linux; macOS only compiles them for development.
+// The modules are written for Linux (and, under windows/, Windows); macOS only compiles them
+// for development, and the Windows entry point is still to come.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+mod access;
 #[cfg(unix)]
 mod auth;
 #[cfg(unix)]
@@ -9,10 +11,11 @@ mod diagnostics;
 mod doctor;
 #[cfg(unix)]
 mod resume_check;
-#[cfg(unix)]
 mod server;
 #[cfg(unix)]
 mod sleep;
+#[cfg(windows)]
+mod windows;
 
 /// CAP_NET_ADMIN in the effective set, from /proc/self/status (bit 12 of CapEff).
 #[cfg(target_os = "linux")]
@@ -79,10 +82,9 @@ async fn main() -> anyhow::Result<()> {
     let path = Path::new(cg_ipc::SOCKET_PATH);
     let listener = server::bind(path, cg_ipc::GROUP)?;
     let serving = server::serve(
-        listener,
+        server::SocketListener::new(listener, auth::Policy::system(cg_ipc::GROUP)),
         controller.clone(),
         Arc::new(SystemDoctor(MuxEndpoint::system())),
-        auth::Policy::system(cg_ipc::GROUP),
         Arc::new(sources),
     );
     // logind's suspend and resume reset the health judgement; failing to listen is logged
