@@ -148,6 +148,9 @@ function Invoke-Uninstall {
     if ($Purge) {
         Step 'purge data directory' {
             if (Test-Path -LiteralPath $DataDir) {
+                # Remove-Item -Recurse would delete what a link points to.
+                if (Test-ReparsePoint (Get-Item -LiteralPath $DataDir -Force)) { Refuse-ReparsePoint $DataDir }
+                foreach ($link in @(Get-ReparsePoints $DataDir)) { Refuse-ReparsePoint $link }
                 Write-Host "Removing $DataDir"
                 Remove-PathWithRetry $DataDir
             }
@@ -163,21 +166,68 @@ function Invoke-Uninstall {
     Write-Host 'CellGlide uninstalled.'
 }
 
+function Test-ReparsePoint($item) {
+    return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+}
+
+function Get-ReparsePoints([string]$Dir) {
+    # Every junction or symbolic link under $Dir, without following any of them.
+    foreach ($child in @(Get-ChildItem -LiteralPath $Dir -Force)) {
+        if (Test-ReparsePoint $child) { $child.FullName }
+        elseif ($child.PSIsContainer) { Get-ReparsePoints $child.FullName }
+    }
+}
+
+function Refuse-ReparsePoint([string]$Path) {
+    throw ("$Path is a junction or symbolic link. CellGlide's data directory must hold " +
+        'plain files and folders only; remove it (it may point anywhere) and run again.')
+}
+
+function Lock-DataItem($item) {
+    # Takes ownership of one file or folder and resets its ACL to what it inherits, never
+    # recursing (icacls /T would follow a junction). Checked before and after, so a link
+    # swapped in between is caught: once locked, its owner can no longer change it.
+    if (Test-ReparsePoint $item) { Refuse-ReparsePoint $item.FullName }
+    Invoke-Native 'icacls.exe' @($item.FullName, '/setowner', $SidAdmins, '/C', '/Q') | Out-Null
+    Invoke-Native 'icacls.exe' @($item.FullName, '/reset', '/C', '/Q') | Out-Null
+    if (Test-ReparsePoint (Get-Item -LiteralPath $item.FullName -Force)) {
+        Refuse-ReparsePoint $item.FullName
+    }
+}
+
+function Lock-DataTree([string]$Dir) {
+    # Top-down: a folder is locked before its entries are listed, so nobody else can add a
+    # link to it while the rest is done.
+    foreach ($child in @(Get-ChildItem -LiteralPath $Dir -Force)) {
+        Lock-DataItem $child
+        if ($child.PSIsContainer) { Lock-DataTree $child.FullName }
+    }
+}
+
 function Set-DataDirAcl {
     # Root: no inheritance from ProgramData; SYSTEM and Administrators full control, the
     # service SID modify. health\ adds Users read (the GUI reads health files). logs\ keeps
     # only the inherited entries: users must not be able to plant files the service reads.
+    # Anyone can create folders in ProgramData, so a pre-existing CellGlide folder may hold
+    # anything, links included: the root is locked first, then each entry in turn, and a
+    # junction or symbolic link anywhere stops the install before any ACL goes through it.
     $health = Join-Path $DataDir 'health'
     $logs = Join-Path $DataDir 'logs'
-    New-Item -ItemType Directory -Force -Path $DataDir, $health, $logs | Out-Null
-    # Anyone can create folders in ProgramData; take ownership and drop whatever ACEs a
-    # pre-existing directory had before granting ours.
-    Invoke-Native 'icacls.exe' @($DataDir, '/setowner', $SidAdmins, '/T', '/C', '/Q') | Out-Null
-    Invoke-Native 'icacls.exe' @($DataDir, '/reset', '/T', '/C', '/Q') | Out-Null
+    if (Test-Path -LiteralPath $DataDir) {
+        $root = Get-Item -LiteralPath $DataDir -Force
+        if (Test-ReparsePoint $root) { Refuse-ReparsePoint $DataDir }
+    } else {
+        New-Item -ItemType Directory -Path $DataDir | Out-Null
+    }
+    Invoke-Native 'icacls.exe' @($DataDir, '/setowner', $SidAdmins, '/C', '/Q') | Out-Null
     Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/Q',
         '/grant:r', "${SidSystem}:(OI)(CI)F",
         '/grant:r', "${SidAdmins}:(OI)(CI)F",
         '/grant:r', "NT SERVICE\${ServiceName}:(OI)(CI)M") | Out-Null
+    if (Test-ReparsePoint (Get-Item -LiteralPath $DataDir -Force)) { Refuse-ReparsePoint $DataDir }
+    # Only administrators can add to the root now; created here, they are locked below too.
+    New-Item -ItemType Directory -Force -Path $health, $logs | Out-Null
+    Lock-DataTree $DataDir
     Invoke-Native 'icacls.exe' @($health, '/Q', '/grant:r', "${SidUsers}:(OI)(CI)RX") | Out-Null
 }
 
