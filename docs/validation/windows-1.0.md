@@ -112,11 +112,19 @@ A 轮的差异都来自局域网，与 CellGlide 无关（服务没有创建网�
 
 ### 5. 拔线 / 插回
 
-待测（需要用户在场，controller 稍后和用户一起做）。注意：用户执行过 `disconnect` 后，`user_disconnected` 会写进设置，自动连接要等下一次 `connect` 才恢复；测之前先 `cellglide.exe connect` 一次。
+**通过，有附注**（2026-10-30，用户在场）。注意：用户执行过 `disconnect` 后，`user_disconnected` 会写进设置，自动连接要等下一次 `connect` 才恢复；测之前先 `cellglide.exe connect` 了一次。
+
+- 拔线：16:15:51Z 健康检查报 `NoUsbService`，会话释放，cellglide0 消失，`status` 显示 `No iPhone connected`。
+- 第一次插回：PnP 里 iPhone 正常（`VID_05AC&PID_12A8`），但 Apple 设备的 usbmuxd `ListDevices` 返回空列表（原始查询和 `phone_probe` 都是），手机上显示 USB 只在充电。CellGlide 按退避重试（日志写 `usbmuxd not reachable`，这个措辞对「端口在、但没有设备」的情况不准，待改）。系统日志显示 16:15:01Z–16:22:19Z 机器处于现代待机，和这次拔插重叠，很可能是原因。
+- 第二次插回：usbmuxd 列出手机，16:24:54Z 自动连接，严格 DNS 重新开启。
 
 ### 6. 睡眠 / 唤醒
 
-待测（需要用户在场，controller 稍后和用户一起做）。
+**部分通过，发现问题**（2026-10-30，用户在场）。
+
+- 这台机器只支持现代待机（`powercfg /a`：Standby (S0 Low Power Idle) Network Connected）。brief 里的 `rundll32.exe powrprof.dll,SetSuspendState 0,1,0` 被系统拒绝（Kernel-Power 187），机器没有睡下去。
+- 改为用户短按电源键：16:28:11Z 进入、16:28:23Z 退出现代待机。连接保持不断，唤醒后 `status` 仍为已连接；日志只有一条「battery details unavailable」。
+- **问题**：两次现代待机（上面这次和第 5 项期间 16:15–16:22 的那次）服务日志里都没有 Suspend / Resume 事件，也没有墙钟跳变记录。现在的电源处理只覆盖 S3 睡眠（`PBT_APMSUSPEND` / `PBT_APMRESUMEAUTOMATIC`）。现代待机要另外处理（例如注册 `GUID_CONSOLE_DISPLAY_STATE` 的 `PBT_POWERSETTINGCHANGE`，退出待机时按唤醒处理、立即重新探测手机），列入后续任务。传统 S3 睡眠这台机器测不了。
 
 ### 7. 诊断包 —— 通过
 
