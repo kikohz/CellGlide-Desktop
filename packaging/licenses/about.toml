@@ -2,6 +2,7 @@
 # Only what the Linux builds link: dev- and build-dependencies stay out, and so do this
 # repository's own crates.
 accepted = [
+    "0BSD",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
