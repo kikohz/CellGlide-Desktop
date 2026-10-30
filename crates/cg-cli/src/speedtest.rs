@@ -3,8 +3,8 @@
 
 use cg_i18n::tr;
 use cg_tools::speed::session::Leg;
-use cg_tools::speed::text::{direction, error_text, numbers, verdict_line};
-use cg_tools::speed::{Note, Plan, Record, Stage};
+use cg_tools::speed::text::{error_text, note_text, numbers, verdict_line};
+use cg_tools::speed::{Plan, Record, Stage};
 
 /// What to print before the first leg starts: that only Wi‑Fi or Ethernet is measured when no
 /// phone is connected, or why the comparison cannot run.
@@ -26,17 +26,8 @@ pub fn leg_lines(leg: &Leg) -> Vec<String> {
         Stage::Done => {
             let r = &leg.result;
             lines.push(format!("  {}", numbers(r.latency, r.download, r.upload)));
-            for Note::CapReached { uploading, seconds } in &r.notes {
-                lines.push(format!(
-                    "  {}",
-                    tr(
-                        "speed.cap_note",
-                        &[
-                            ("direction", &direction(*uploading)),
-                            ("seconds", &format!("{seconds:.1}")),
-                        ]
-                    )
-                ));
+            for note in &r.notes {
+                lines.push(format!("  {}", note_text(note)));
             }
         }
         Stage::Failed(error) => lines.push(format!("  {}", error_text(error))),
@@ -94,7 +85,7 @@ pub fn history_lines(records: &[Record], zone: &jiff::tz::TimeZone) -> Vec<Strin
 mod tests {
     use super::*;
     use cg_tools::speed::session::{Run, history_record};
-    use cg_tools::speed::{Route, SpeedResult, plan};
+    use cg_tools::speed::{Note, Route, SpeedResult, plan};
     use jiff::Timestamp;
     use std::sync::MutexGuard;
 

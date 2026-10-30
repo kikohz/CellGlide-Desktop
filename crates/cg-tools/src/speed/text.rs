@@ -125,6 +125,7 @@ pub fn note_text(note: &Note) -> String {
                 ("seconds", &format!("{seconds:.1}")),
             ],
         ),
+        Note::UploadTooSlow => tr("speed.upload_too_slow", &[]),
     }
 }
 

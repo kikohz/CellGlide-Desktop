@@ -217,6 +217,7 @@ speed:
   done: "测速完成"
   cancelled: "测速已取消"
   cap_note: "%{direction}达到流量上限，采样 %{seconds} 秒；结果仅供参考。"
+  upload_too_slow: "上传太慢，没能测出：服务器在限定时间内没有确认任何数据。"
   wifi_faster: "Wi‑Fi 下载比 iPhone 快 %{ratio} 倍。"
   phone_faster: "iPhone 下载比 Wi‑Fi 快 %{ratio} 倍。"
   similar: "两条线路速度相近。"

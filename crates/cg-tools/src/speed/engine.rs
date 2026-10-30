@@ -88,6 +88,9 @@ pub enum Stage {
 pub enum Note {
     /// A direction moved all its capped bytes before 10 s: the rate rests on `seconds` only.
     CapReached { uploading: bool, seconds: f64 },
+    /// The server confirmed no upload request within the test and its grace period: upload is
+    /// too slow to measure with requests of `UPLOAD_REQUEST`, so it has no figure (not 0).
+    UploadTooSlow,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -282,6 +285,17 @@ pub(crate) fn decide(
 /// Live streams and the first error among the ones that ended.
 type Streams = Arc<Mutex<(usize, Option<SpeedError>)>>;
 
+/// What the streams of one direction report to the sampling loop.
+#[derive(Default)]
+struct Counters {
+    /// Bytes moved: received for download, confirmed by the server for upload.
+    bytes: AtomicU64,
+    /// Upload requests the server answered.
+    requests: AtomicU64,
+    /// When the last upload request was answered, in µs since the direction began; 0 for none.
+    last: AtomicU64,
+}
+
 async fn measure_direction(
     route: &Route,
     server: &Server,
@@ -295,23 +309,27 @@ async fn measure_direction(
         params.download_cap
     };
     let per_stream = cap / params.streams.max(1) as u64;
-    let bytes = Arc::new(AtomicU64::new(0));
+    let counters = Arc::new(Counters::default());
     let streams: Streams = Arc::new(Mutex::new((params.streams, None)));
+    // Upload streams start no new request once this is cancelled (the grace period).
+    let no_more = CancellationToken::new();
+    let begin = Instant::now();
     // Dropping the set (on return or cancel) aborts every stream and closes its socket.
     let mut set = JoinSet::new();
     for _ in 0..params.streams {
-        let (route, server, bytes, streams) = (
+        let (route, server, counters, streams, no_more) = (
             route.clone(),
             server.clone(),
-            bytes.clone(),
+            counters.clone(),
             streams.clone(),
+            no_more.clone(),
         );
         let request_size = params.request_size.max(1);
         set.spawn(async move {
             let outcome = if uploading {
-                upload_stream(&route, &server, per_stream, &bytes).await
+                upload_stream(&route, &server, per_stream, &counters, begin, &no_more).await
             } else {
-                download_stream(&route, &server, per_stream, request_size, &bytes).await
+                download_stream(&route, &server, per_stream, request_size, &counters.bytes).await
             };
             let mut state = streams.lock().unwrap_or_else(|e| e.into_inner());
             state.0 -= 1;
@@ -320,28 +338,71 @@ async fn measure_direction(
             }
         });
     }
-    let begin = Instant::now();
     let mut direction = Direction::new(params, uploading, progress.borrow().payload_bytes);
     loop {
         tokio::time::sleep(params.tick).await;
-        let moved = bytes.load(Ordering::Relaxed);
+        let last = counters.last.load(Ordering::Relaxed);
+        let requests = counters.requests.load(Ordering::Relaxed);
+        let moved = counters.bytes.load(Ordering::Relaxed);
         let (active, error) = streams.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let elapsed = begin.elapsed().as_secs_f64();
+        let sample = Sample {
+            moved,
+            requests,
+            last: (last > 0).then(|| last as f64 / 1_000_000.0),
+            active,
+            error,
+            elapsed: begin.elapsed().as_secs_f64(),
+        };
         let mut outcome = None;
-        progress.send_modify(|p| outcome = direction.tick(p, moved, active, error, elapsed));
+        progress.send_modify(|p| outcome = direction.tick(p, sample));
+        if direction.in_grace() {
+            no_more.cancel();
+        }
         if let Some(outcome) = outcome {
             return outcome;
         }
     }
 }
 
+/// One tick's view of the streams.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Sample {
+    /// Bytes so far (upload: confirmed).
+    pub moved: u64,
+    /// Upload requests answered so far.
+    pub requests: u64,
+    /// Seconds into the direction of the last answered upload request.
+    pub last: Option<f64>,
+    /// Streams still running.
+    pub active: usize,
+    /// The first error among the streams that ended.
+    pub error: Option<SpeedError>,
+    /// Seconds into the direction.
+    pub elapsed: f64,
+}
+
 /// The bookkeeping of one direction's sampling loop, apart from the sockets and the clock.
+///
+/// Download uses the Mac's rate math as it is. Upload counts whole confirmed requests, so it
+/// differs: while fewer than two requests per stream were confirmed after the warm-up, and
+/// when the cap ends the direction, its rate is the average since the start (a burst of
+/// confirmations just after the warm-up point would otherwise be divided by a fraction of a
+/// second). When time is up with too few confirmations, no new request starts and the ones
+/// in flight get up to one more `duration` to be confirmed (the grace period); the rate is
+/// then the confirmed bytes over the time to the last confirmation. With no confirmation at
+/// all, upload has no figure and a note says why, instead of 0.
 pub(crate) struct Direction {
     uploading: bool,
     duration: f64,
+    warmup: f64,
+    streams: u64,
     /// Payload bytes of the measurement before this direction began.
     before: u64,
     sampler: Sampler,
+    /// Upload requests answered at the warm-up point.
+    warm_requests: Option<u64>,
+    /// Time is up and upload waits for the requests in flight.
+    grace: bool,
 }
 
 impl Direction {
@@ -349,44 +410,108 @@ impl Direction {
         Direction {
             uploading,
             duration: params.duration.as_secs_f64(),
+            warmup: params.warmup.as_secs_f64(),
+            streams: params.streams as u64,
             before,
             sampler: Sampler::new(params.warmup),
+            warm_requests: None,
+            grace: false,
         }
     }
 
-    /// One tick: `moved` bytes so far, `active` streams left, the first stream error, at
-    /// `elapsed` seconds. Updates `p`; returns the direction's outcome once it is over.
-    pub(crate) fn tick(
-        &mut self,
-        p: &mut Progress,
-        moved: u64,
-        active: usize,
-        error: Option<SpeedError>,
-        elapsed: f64,
-    ) -> Option<Result<f64, SpeedError>> {
-        let (rate, point) = self.sampler.sample(moved, elapsed);
-        let next = decide(active, error, moved, elapsed, self.duration);
-        let shown = elapsed.min(self.duration);
-        p.payload_bytes = self.before + moved;
+    /// Whether upload is in its grace period: streams must start no new request.
+    pub(crate) fn in_grace(&self) -> bool {
+        self.grace
+    }
+
+    /// One tick. Updates `p`; returns the direction's outcome once it is over.
+    pub(crate) fn tick(&mut self, p: &mut Progress, s: Sample) -> Option<Result<f64, SpeedError>> {
+        let (rate, point) = self.sampler.sample(s.moved, s.elapsed);
+        if self.warm_requests.is_none() && s.elapsed >= self.warmup {
+            self.warm_requests = Some(s.requests);
+        }
+        let next = decide(s.active, s.error.clone(), s.moved, s.elapsed, self.duration);
+        let shown = s.elapsed.min(self.duration);
+        p.payload_bytes = self.before + s.moved;
         p.elapsed = shown;
         p.progress = if self.uploading { 0.5 } else { 0.0 } + shown / self.duration / 2.0;
-        if self.uploading {
-            p.result.upload = Some(rate);
-        } else {
+        if !self.uploading {
             p.result.download = Some(rate);
             p.result.download_series.extend(point);
+            return match next {
+                Next::Continue => None,
+                Next::Finish => Some(Ok(rate)),
+                Next::CapReached => {
+                    p.result.notes.push(Note::CapReached {
+                        uploading: false,
+                        seconds: s.elapsed,
+                    });
+                    Some(Ok(rate))
+                }
+                Next::Fail(error) => Some(Err(error)),
+            };
         }
+        self.upload_tick(p, &s, rate, next)
+    }
+
+    fn upload_tick(
+        &mut self,
+        p: &mut Progress,
+        s: &Sample,
+        warm_rate: f64,
+        next: Next,
+    ) -> Option<Result<f64, SpeedError>> {
+        let enough = !self.grace
+            && self
+                .warm_requests
+                .is_some_and(|warm| s.requests.saturating_sub(warm) >= 2 * self.streams);
+        let average = if s.elapsed > 0.0 {
+            mbps(s.moved, s.elapsed)
+        } else {
+            0.0
+        };
+        // Confirmed bytes over the time to the last confirmation.
+        let to_last = s.last.filter(|t| *t > 0.0).map(|t| mbps(s.moved, t));
         match next {
-            Next::Continue => None,
-            Next::Finish => Some(Ok(rate)),
-            Next::CapReached => {
-                p.result.notes.push(Note::CapReached {
-                    uploading: self.uploading,
-                    seconds: elapsed,
-                });
-                Some(Ok(rate))
-            }
             Next::Fail(error) => Some(Err(error)),
+            Next::Continue => {
+                p.result.upload = if s.moved == 0 {
+                    None
+                } else if enough {
+                    Some(warm_rate)
+                } else {
+                    Some(average)
+                };
+                None
+            }
+            Next::CapReached => {
+                p.result.upload = Some(average);
+                p.result.notes.push(Note::CapReached {
+                    uploading: true,
+                    seconds: s.elapsed,
+                });
+                Some(Ok(average))
+            }
+            Next::Finish if enough => {
+                p.result.upload = Some(warm_rate);
+                Some(Ok(warm_rate))
+            }
+            Next::Finish if s.active > 0 && s.elapsed < 2.0 * self.duration => {
+                self.grace = true;
+                p.result.upload = if s.moved == 0 { None } else { to_last };
+                None
+            }
+            Next::Finish => match to_last {
+                Some(rate) if s.moved > 0 => {
+                    p.result.upload = Some(rate);
+                    Some(Ok(rate))
+                }
+                _ => {
+                    p.result.upload = None;
+                    p.result.notes.push(Note::UploadTooSlow);
+                    Some(Ok(0.0))
+                }
+            },
         }
     }
 }
@@ -427,20 +552,25 @@ async fn download_stream(
 /// same kept-alive connection, and counts a request's bytes only once the server answered it.
 /// What the socket took has not been sent yet: on the phone route megabytes can wait in
 /// buffers past this computer (W2 Task 4 found them in the phone) and drain for seconds or
-/// minutes, so counting them would report a burst at the start and then nothing. The socket
-/// closes with RST, so whatever is still buffered when the test ends is dropped, not sent.
+/// minutes, so counting them would report a burst at the start and then nothing. Once
+/// `no_more` is cancelled (the grace period) the request in flight is still waited for but no
+/// new one starts. The socket closes with RST, so whatever is still buffered when the test
+/// ends is dropped, not sent.
 async fn upload_stream(
     route: &Route,
     server: &Server,
     total: u64,
-    bytes: &AtomicU64,
+    counters: &Counters,
+    begin: Instant,
+    no_more: &CancellationToken,
 ) -> Result<(), SpeedError> {
     let stream = connect(route, server).await?;
     stream.reset_on_close()?;
     let (mut reader, mut writer) = tokio::io::split(stream);
     let block = vec![0x61u8; CHUNK];
     let mut sent = 0u64;
-    while sent < total {
+    // Time is up: the request in flight is waited for, no new one starts.
+    while sent < total && !no_more.is_cancelled() {
         let length = UPLOAD_REQUEST.min(total - sent);
         let send = async {
             writer.write_all(&upload_request(server, length)).await?;
@@ -455,8 +585,10 @@ async fn upload_stream(
         };
         let reply = read_reply(&mut reader);
         tokio::pin!(send, reply);
-        // A refusal can come before the whole body went out; an early 200 still waits for it.
+        // A refusal can come before the whole body went out (and wins when both are ready);
+        // an early 200 still waits for the body.
         tokio::select! {
+            biased;
             replied = &mut reply => {
                 replied?;
                 (&mut send).await?;
@@ -467,7 +599,10 @@ async fn upload_stream(
             }
         }
         sent += length;
-        bytes.fetch_add(length, Ordering::Relaxed);
+        let at = u64::try_from(begin.elapsed().as_micros()).unwrap_or(u64::MAX);
+        counters.last.store(at.max(1), Ordering::Relaxed);
+        counters.requests.fetch_add(1, Ordering::Relaxed);
+        counters.bytes.fetch_add(length, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -538,6 +673,11 @@ pub(crate) mod tests {
         WrongLength,
         /// Upload bodies are read at once, unpaced; each reply comes this long after its body.
         SlowAck(Duration),
+        /// Uploads get 429 (`Retry-After: 120`) as soon as their head is in, the body unread;
+        /// the connection stays open.
+        UploadRefused,
+        /// Upload replies promise a 10-byte body, send 3 bytes and close.
+        UploadReplyCut,
     }
 
     /// A local stand-in for speed.cloudflare.com, paced to about 13 MB/s per connection so a
@@ -664,6 +804,12 @@ pub(crate) mod tests {
                             .map(|v| v.trim().parse().unwrap())
                     })
                     .unwrap_or(0);
+                if mode == Mode::UploadRefused {
+                    let reply = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    return;
+                }
                 let mut left = length.saturating_sub(body.len() as u64);
                 while left > 0 {
                     let want = left.min(CHUNK as u64) as usize;
@@ -679,6 +825,11 @@ pub(crate) mod tests {
                     tokio::time::sleep(delay).await;
                 }
                 uploads.fetch_add(1, Ordering::SeqCst);
+                if mode == Mode::UploadReplyCut {
+                    let reply = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc";
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    return;
+                }
                 let reply = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
                 if stream.write_all(reply.as_bytes()).await.is_err() {
                     return;
@@ -776,6 +927,103 @@ pub(crate) mod tests {
         // so at most 3 MB × 8 / 2.9 s.
         let upload = result.upload.unwrap();
         assert!(upload > 0.0 && upload <= 8.5, "{upload}");
+    }
+
+    /// One stream, 1 s, uploads answered `ack` after their body.
+    async fn slow_upload(ack: Duration) -> (SpeedResult, Progress) {
+        let fake = FakeServer::start(Mode::SlowAck(ack)).await;
+        let params = Params {
+            streams: 1,
+            duration: Duration::from_secs(1),
+            download_cap: 1,
+            upload_cap: 5 * UPLOAD_REQUEST,
+            ..small()
+        };
+        run_against(&fake, params).await
+    }
+
+    #[tokio::test]
+    async fn a_reply_after_the_time_is_up_still_counts() {
+        // The first reply comes 0.5 s after the 1 s: within the grace period.
+        let (result, last) = slow_upload(Duration::from_millis(1500)).await;
+        assert_eq!(last.stage, Stage::Done);
+        let upload = result.upload.unwrap();
+        // 1 MB over about 1.5 s.
+        assert!(upload > 4.0 && upload < 6.0, "{upload}");
+        // Only the 1-byte download reached its cap.
+        assert!(
+            matches!(
+                result.notes.as_slice(),
+                [Note::CapReached {
+                    uploading: false,
+                    ..
+                }]
+            ),
+            "{:?}",
+            result.notes
+        );
+        assert!(last.elapsed <= 1.0, "{}", last.elapsed);
+    }
+
+    #[tokio::test]
+    async fn no_reply_within_the_grace_period_has_no_upload_figure() {
+        let started = Instant::now();
+        let (result, last) = slow_upload(Duration::from_secs(5)).await;
+        assert_eq!(last.stage, Stage::Done);
+        assert_eq!(result.upload, None);
+        assert_eq!(result.notes.last(), Some(&Note::UploadTooSlow));
+        // The grace period ends one duration after the time is up, not when the reply comes.
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_refused_before_its_body_is_rate_limited() {
+        let fake = FakeServer::start(Mode::UploadRefused).await;
+        let (result, last) = run_against(&fake, small()).await;
+        assert_eq!(
+            last.stage,
+            Stage::Failed(SpeedError::RateLimited { minutes: 2 })
+        );
+        assert!(result.download.is_some(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn an_upload_reply_cut_short_fails() {
+        let fake = FakeServer::start(Mode::UploadReplyCut).await;
+        let (_, last) = run_against(&fake, small()).await;
+        assert_eq!(last.stage, Stage::Failed(SpeedError::ClosedEarly));
+    }
+
+    #[tokio::test]
+    async fn read_reply_takes_one_whole_reply() {
+        let read = |text: &'static str| async move {
+            let mut reader = text.as_bytes();
+            (read_reply(&mut reader).await, reader.len())
+        };
+        assert_eq!(
+            read("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await,
+            (Ok(()), 0)
+        );
+        assert_eq!(
+            read("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+                .await
+                .0,
+            Err(SpeedError::ClosedEarly)
+        );
+        assert_eq!(
+            read("HTTP/1.1 200 OK\r\n\r\n").await.0,
+            Err(SpeedError::BadReply)
+        );
+        assert_eq!(
+            read("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n")
+                .await
+                .0,
+            Err(SpeedError::RateLimited { minutes: 1 })
+        );
     }
 
     #[tokio::test]
@@ -888,13 +1136,142 @@ pub(crate) mod tests {
         state: State,
     ) -> Result<f64, SpeedError> {
         let mut direction = Direction::new(&Params::default(), uploading, p.payload_bytes);
+        let mut last = None;
+        let mut before = 0;
         for tick in 1.. {
             let (bytes, active, error) = state(tick);
-            if let Some(outcome) = direction.tick(p, bytes, active, error, tick as f64 * 0.5) {
+            let elapsed = tick as f64 * 0.5;
+            // Upload: whole requests, confirmed at the tick the bytes show up.
+            if bytes > before {
+                last = Some(elapsed);
+                before = bytes;
+            }
+            let sample = Sample {
+                moved: bytes,
+                requests: bytes / UPLOAD_REQUEST,
+                last,
+                active,
+                error,
+                elapsed,
+            };
+            if let Some(outcome) = direction.tick(p, sample) {
                 return outcome;
             }
         }
         unreachable!()
+    }
+
+    /// Drives the upload direction alone with `Params::default()` (6 streams, 10 s, 2 s
+    /// warm-up) on 0.5 s ticks until it ends; `state(elapsed)` gives the sample without its
+    /// time. Returns the progress and the elapsed shown at every tick.
+    fn simulate_upload(state: impl Fn(f64) -> Sample) -> (Progress, Vec<f64>) {
+        let mut p = Progress::default();
+        let mut direction = Direction::new(&Params::default(), true, 0);
+        let mut shown = Vec::new();
+        for tick in 1..1000 {
+            let elapsed = tick as f64 * 0.5;
+            let sample = Sample {
+                elapsed,
+                ..state(elapsed)
+            };
+            let outcome = direction.tick(&mut p, sample);
+            shown.push(p.elapsed);
+            if outcome.is_some() {
+                return (p, shown);
+            }
+        }
+        unreachable!()
+    }
+
+    /// `mb` whole requests confirmed, the last at `last`.
+    fn confirmed(mb: u64, last: f64, active: usize) -> Sample {
+        Sample {
+            moved: mb * UPLOAD_REQUEST,
+            requests: mb,
+            last: (mb > 0).then_some(last),
+            active,
+            ..Sample::default()
+        }
+    }
+
+    #[test]
+    fn a_burst_of_confirmations_after_warmup_is_averaged_from_the_start() {
+        // Nothing confirmed before 2.0 s, then 6 MB between 2.0 and 2.5 s and the cap: the
+        // rate is 6 MB over 2.5 s, not over the 0.5 s after the warm-up point.
+        let (p, _) = simulate_upload(|t| {
+            if t < 2.5 {
+                confirmed(0, 0.0, 6)
+            } else {
+                confirmed(6, 2.4, 0)
+            }
+        });
+        assert!(
+            near(p.result.upload, 6.0 * 8.0 / 2.5, 0.01),
+            "{:?}",
+            p.result
+        );
+        assert!(
+            matches!(
+                p.result.notes.as_slice(),
+                [Note::CapReached {
+                    uploading: true,
+                    ..
+                }]
+            ),
+            "{:?}",
+            p.result.notes
+        );
+    }
+
+    #[test]
+    fn slow_upload_waits_for_requests_in_flight() {
+        // 3.3 Mbps over 6 streams: the first confirmations come at 14.5 s, after the 10 s.
+        let (p, shown) = simulate_upload(|t| {
+            if t < 14.5 {
+                confirmed(0, 0.0, 6)
+            } else {
+                confirmed(6, 14.5, 0)
+            }
+        });
+        assert!(
+            near(p.result.upload, 6.0 * 8.0 / 14.5, 0.01),
+            "{:?}",
+            p.result
+        );
+        assert!(p.result.notes.is_empty(), "{:?}", p.result.notes);
+        // The grace period shows the end of the 10 s, never more and never a countdown.
+        assert_eq!(shown.len(), 29);
+        assert!(shown.iter().all(|e| *e <= 10.0));
+        assert_eq!(p.progress, 1.0);
+    }
+
+    #[test]
+    fn nothing_confirmed_in_the_grace_period_has_no_upload_figure() {
+        let (p, shown) = simulate_upload(|_| confirmed(0, 0.0, 6));
+        assert_eq!(p.result.upload, None);
+        assert_eq!(p.result.notes, vec![Note::UploadTooSlow]);
+        // The grace period is one more duration: 20 s in all.
+        assert_eq!(shown.len(), 40);
+    }
+
+    #[test]
+    fn enough_confirmations_keep_the_warm_rate() {
+        // 2 requests per stream after the warm-up: the Mac's rate since the warm-up point,
+        // and no grace period although requests are still in flight at 10 s.
+        let (p, shown) = simulate_upload(|t| {
+            let mb = if t < 2.0 {
+                0
+            } else {
+                ((t - 2.0) * 2.0) as u64 * 3
+            };
+            confirmed(mb, t, 6)
+        });
+        assert!(
+            near(p.result.upload, 48.0 * 8.0 / 8.0, 0.01),
+            "{:?}",
+            p.result
+        );
+        assert_eq!(shown.len(), 20);
     }
 
     /// Download then upload with the same streams, then the final stage, as `measure` does

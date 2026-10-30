@@ -374,6 +374,7 @@ pub const KEYS: &[&str] = &[
     "speed.done",
     "speed.cancelled",
     "speed.cap_note",
+    "speed.upload_too_slow",
     "speed.wifi_faster",
     "speed.phone_faster",
     "speed.similar",

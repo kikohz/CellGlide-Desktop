@@ -247,7 +247,8 @@ enum End {
     Reset,
     /// The client is gone before its FIN (it reset, or its socket was dropped with data still
     /// unread): reset the SOCKS connection, since an orderly close would tell the far end
-    /// the stream ended there and let the phone keep sending what it holds.
+    /// the stream ended there and let the phone keep sending what it holds. hev closes the
+    /// SOCKS side in order here; this differs on purpose (W2 Task 4, see engine_parity.rs).
     Gone,
     /// The engine is stopping: just close.
     Stopped,
@@ -301,7 +302,10 @@ impl Flow {
         let activity = Activity(Mutex::new(Instant::now()));
         // Every await of both directions sits under this select, so stopping and the
         // idle timeout apply even while one of them waits on a full buffer.
+        // Biased, stopping first: when the engine stops, the sessions go too, so the channels
+        // close at the same moment; that must read as a stop, not as clients that vanished.
         let end = tokio::select! {
+            biased;
             _ = self.cancel.cancelled() => End::Stopped,
             _ = activity.expired(self.idle) => {
                 tracing::debug!(target = %self.target, "tcp idle timeout");

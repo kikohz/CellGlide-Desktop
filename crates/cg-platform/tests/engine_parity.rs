@@ -3,6 +3,11 @@
 //! server see must match. hev gets one end of a `socketpair(AF_UNIX, SOCK_DGRAM)`: on
 //! Linux it reads and writes its fd as raw IP packets (no packet-info header) and only
 //! sets it non-blocking, so any fd that keeps packet boundaries will do. No TUN, no root.
+//!
+//! One difference is deliberate and not compared here: when the client resets a connection
+//! (or vanishes before its FIN), cg-netstack resets the SOCKS side too, while hev closes it in
+//! order. An orderly close lets the phone keep sending what it already holds (W2 Task 4); do
+//! not "fix" cg-netstack back to hev's behaviour.
 #![cfg(target_os = "linux")]
 
 use cg_core::tunnel::{ENGINE, hev_config};

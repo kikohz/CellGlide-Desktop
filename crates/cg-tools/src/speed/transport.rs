@@ -516,6 +516,38 @@ pub(crate) mod tests {
     use super::*;
     use crate::speed::engine::tests::{FakeServer, Mode};
 
+    /// What the far end reads after the client connected and closed, `reset` choosing
+    /// `reset_on_close` first.
+    async fn read_after_close(reset: bool) -> io::Result<usize> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = Server {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            tls: false,
+        };
+        let stream = connect(&Route::Unbound, &server).await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        if reset {
+            stream.reset_on_close().unwrap();
+        }
+        drop(stream);
+        let mut buf = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(2), peer.read(&mut buf))
+            .await
+            .expect("the far end sees the close")
+    }
+
+    #[tokio::test]
+    async fn reset_on_close_closes_with_rst() {
+        assert_eq!(
+            read_after_close(false).await.unwrap(),
+            0,
+            "orderly close: EOF"
+        );
+        let read = read_after_close(true).await;
+        assert!(read.is_err(), "{read:?}");
+    }
+
     fn local_server() -> Server {
         Server {
             host: "127.0.0.1".into(),
