@@ -832,3 +832,95 @@ fn strict_dns_rules_vanish_when_the_process_dies() {
     eprintln!("answered {:?} after TerminateProcess", killed.elapsed());
     wait_for(|| !adapter_listed()).expect("adapter still listed after the child was killed");
 }
+
+// ---- Strict DNS blocks physical adapters only (Task 11c).
+
+/// A second wintun adapter of our own, standing in for another VPN (Tailscale, WireGuard).
+const OTHER_VPN_NAME: &str = "cg-test-vpn";
+const OTHER_VPN_TYPE: &str = "CellGlideTest";
+const OTHER_VPN_GUID: u128 = 0x7A0F_3C51_9D2E_4B8A_A6C4_1E5B_D093_F217;
+/// TEST-NET-2: on-link on the other VPN's adapter, clear of Tailscale's 100.64.0.0/10.
+const OTHER_VPN_ADDRESS: &str = "198.51.100.1";
+const OTHER_VPN_DNS: &str = "198.51.100.53:53";
+
+/// Whether `packet` is an IPv4 UDP datagram to `to`.
+fn udp_to(packet: &[u8], to: SocketAddr) -> bool {
+    let SocketAddr::V4(to) = to else { return false };
+    if packet.len() < 28 || packet[0] >> 4 != 4 || packet[9] != 17 {
+        return false;
+    }
+    let header = usize::from(packet[0] & 0x0f) * 4;
+    packet.len() >= header + 8
+        && packet[16..20] == to.ip().octets()
+        && packet[header + 2..header + 4] == to.port().to_be_bytes()
+}
+
+#[test]
+#[ignore]
+fn strict_dns_leaves_other_vpns_port_53_alone() {
+    let dll = dll();
+    assert!(
+        Adapter::open(&dll, OTHER_VPN_NAME).unwrap().is_none(),
+        "{OTHER_VPN_NAME} already exists; remove the leftover first"
+    );
+    let (dns_v4, _) = physical_dns();
+    assert!(
+        answered(dns_v4),
+        "{dns_v4} doesn't answer even without strict DNS"
+    );
+
+    let adapter = adapter_with_address(&dll);
+    let other = Adapter::create(&dll, OTHER_VPN_NAME, OTHER_VPN_TYPE, OTHER_VPN_GUID).unwrap();
+    let other_session = other.start_session(SESSION_CAPACITY).unwrap();
+    // ActiveStore: the address goes with the adapter.
+    ps(&format!(
+        "New-NetIPAddress -InterfaceAlias {OTHER_VPN_NAME} -IPAddress {OTHER_VPN_ADDRESS} -PrefixLength 24 -PolicyStore ActiveStore | Out-Null"
+    ));
+    wait_for(|| {
+        ps(&format!(
+            "(Get-NetIPAddress -InterfaceAlias {OTHER_VPN_NAME} -IPAddress {OTHER_VPN_ADDRESS}).AddressState"
+        )) == "Preferred"
+    })
+    .expect("the other VPN's address never became preferred");
+
+    let strict = strict_dns::start(adapter.luid()).unwrap();
+    assert!(
+        !strict.exempt_luids().contains(&adapter.luid()),
+        "cellglide0 listed as a virtual adapter"
+    );
+    // The physical adapter's DNS server: still blocked.
+    assert!(!answered(dns_v4), "{dns_v4} answered with strict DNS on");
+    // Port 53 through the other VPN's adapter (wintun, type 53) leaves the machine: the
+    // datagram reaches that adapter's ring.
+    let target: SocketAddr = OTHER_VPN_DNS.parse().unwrap();
+    let udp = UdpSocket::bind("0.0.0.0:0").unwrap();
+    udp.send_to(&dns_query(11), target).unwrap();
+    let start = Instant::now();
+    let mut arrived = false;
+    while !arrived && start.elapsed() < Duration::from_secs(5) {
+        match other_session.try_receive().unwrap() {
+            Some(packet) => arrived = udp_to(&packet, target),
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert!(
+        arrived,
+        "UDP to {target} through {OTHER_VPN_NAME} blocked with strict DNS on"
+    );
+    eprintln!("{target} reached {OTHER_VPN_NAME} in {:?}", start.elapsed());
+
+    drop(udp);
+    drop(strict);
+    assert!(answered(dns_v4), "{dns_v4} still blocked after drop");
+    drop(other_session);
+    drop(other);
+    ip::flush(adapter.luid()).unwrap();
+    drop(adapter);
+    wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+    wait_for(|| {
+        ps(&format!(
+            "if (Get-NetAdapter -IncludeHidden -Name {OTHER_VPN_NAME} -ErrorAction SilentlyContinue) {{ 'yes' }} else {{ 'no' }}"
+        )) == "no"
+    })
+    .expect("the other VPN's adapter still listed after drop");
+}

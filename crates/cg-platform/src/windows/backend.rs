@@ -227,9 +227,9 @@ impl Running {
         Ok(())
     }
 
-    /// Blocks port 53 off cellglide0 for as long as `inner.strict_dns` lives. A failure
-    /// leaves DNS working through cellglide0, but Windows may also ask the physical
-    /// adapters' servers. Skipped when our DNS servers weren't applied: Windows then uses
+    /// Blocks port 53 on the physical adapters for as long as `inner.strict_dns` lives
+    /// (other VPNs keep theirs; see strict_dns.rs). A failure leaves DNS working through
+    /// cellglide0, but Windows may also ask the physical adapters' servers. Skipped when our DNS servers weren't applied: Windows then uses
     /// the physical adapters' servers, and while an off-link one goes over the /1 routes
     /// through cellglide0 (permitted), an on-link one, typically the router, would be
     /// blocked and resolution would stop.
@@ -240,7 +240,10 @@ impl Running {
         }
         match strict_dns::start(self.luid) {
             Ok(strict) => {
-                tracing::info!("strict DNS on: port 53 only through {INTERFACE_NAME}");
+                tracing::info!(
+                    "strict DNS on: port 53 blocked on physical adapters ({} virtual exempt)",
+                    strict.exempt_luids().len()
+                );
                 inner.strict_dns = Some(strict);
             }
             Err(error) => tracing::warn!(

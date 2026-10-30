@@ -158,5 +158,11 @@ Speed test finished
 
 ## 已知问题（W1 实测发现，未修）
 
-- **严格 DNS 下，查不到的名字要等约 11 秒**。连接时 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 要 11.2–11.4 秒才返回 NXDOMAIN，断开后只要 0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到一个网卡的否定应答后，还会等其他网卡的 DNS 服务器（Wi-Fi 的 `10.10.10.1`、Tailscale 等），而这些 53 端口的包都被 WFP 拦掉，只能等超时。能查到的名字不受影响（0.01–0.4 秒）。另外，Tailscale 的 MagicDNS（NRPT `.ts.net` → `100.100.100.100`）在连接期间无法使用：`nohost.tail707c29.ts.net` 11.4 秒后超时。
+- **严格 DNS 下，查不到的名字要等约 12 秒**。连接时 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 要 11.2–11.4 秒才返回 NXDOMAIN，断开后只要 0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到一个网卡的否定应答后，还会等其他网卡的 DNS 服务器（Wi-Fi 的 `10.10.10.1`、Tailscale 等），而这些 53 端口的包都被 WFP 拦掉，只能等超时。能查到的名字不受影响（0.01–0.4 秒）。~~另外，Tailscale 的 MagicDNS（NRPT `.ts.net` → `100.100.100.100`）在连接期间无法使用：`nohost.tail707c29.ts.net` 11.4 秒后超时。~~
+  - **Task 11c（2026-10-30）复测与处理**（Wi-Fi DNS 这时是 `192.168.1.254` / `2600:381:7368:4c73::1`，Tailscale 已登录）：
+    - 严格 DNS 改为只拦物理网卡（以太网 6、Wi-Fi 71、移动宽带 243/244，`FWPM_CONDITION_INTERFACE_TYPE`；这些类型里的虚拟网卡按 LUID 放行，蓝牙 PAN 仍拦）。**MagicDNS 已恢复**：连接时 `debian.tail707c29.ts.net -DnsOnly` 0.00 秒得到 `100.77.4.23`，`nohost-<随机>.tail707c29.ts.net` 0.00 秒得到 NXDOMAIN（改动前 12.03 秒超时）。
+    - **NXDOMAIN 仍约 12 秒，未修好**。`Resolve-DnsName nonexistent-<随机>.example` 每种做法各 5–6 次：改动前（拦除 cellglide0 外所有网卡）12.02–12.07 秒；只拦物理网卡、`ALE_AUTH_CONNECT` 12.02–12.08 秒；只拦物理网卡、`OUTBOUND_TRANSPORT` 12.03–12.08 秒；最终版本 12.02–12.08 秒；断开时 0.02–0.05 秒。能查到的名字 0.01–0.12 秒。
+    - 原因：用户态 WFP 没有任何办法让 UDP 发送立即失败。单独测套接字（硬拦截发往 `192.168.1.254:53`）：在 `ALE_AUTH_CONNECT`、`OUTBOUND_TRANSPORT`、`DATAGRAM_DATA` 三层，`sendto`（未连接和已连接、第一次和 300 ms 后的再次发送）都立即成功，接收都要等到超时；只有 TCP 在 `ALE_AUTH_CONNECT` 上 0.3–0.7 ms 就以 `WSAEACCES`（10013）失败（在 `OUTBOUND_TRANSPORT` 上 5 秒超时）。DNS 客户端用 UDP，并且用通配地址 `::` 绑定套接字，所以也没法按本地地址拦它的 bind。保留 `ALE_AUTH_CONNECT`：UDP 上不比其他层慢，TCP 能立即失败。
+    - 泄漏仍为 0：连接时 pktmon 抓 `--comp nics`、端口 53，60 秒内 360 次查询、90 次 `.ts.net` 查询、90 次网页请求：Wi-Fi 0 包；只有 Tailscale Tunnel 有 Rx 180 / Tx 180（MagicDNS，符合预期）。对照（端口 443，5 秒）：Wi-Fi Rx 7 / Tx 7，CellGlide Tunnel Rx 14 / Tx 10。直接问 `192.168.1.254` 和 `2600:381:7368:4c73::1` 都超时，`100.100.100.100` 0.01 秒有应答。
+    - 断开后 `netsh wfp show filters` 里 CellGlide 对象 0 个；快照与基线 `identical`。
 - **测速上行是 0.0**，见第 8 项。
