@@ -4,17 +4,17 @@
 //! (`cg_tools::speed::session`); leaving the page doesn't stop it.
 
 use super::Ctx;
-use crate::effect::{Effect, HistoryOp};
-use crate::prefs::PrefChange;
+use crate::effect::Effect;
 use crate::widgets::curve::{self, Curve};
 use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::tr;
 use cg_ipc::describe;
+use cg_tools::prefs::PrefChange;
 use cg_tools::speed::session::{self, Run};
-use cg_tools::speed::text::{direction, error_text, verdict_line};
+use cg_tools::speed::text::{error_text, note_text, stage_text, summary_text, verdict_line};
 use cg_tools::speed::{
-    HistoryStore, Note, Params, Plan, Progress, Record, Route, Server, SpeedError, SpeedResult,
-    Stage, Summary, history::LIMIT, needs_confirmation, plan,
+    HistoryOp, HistoryStore, Params, Plan, Progress, Record, Route, Server, SpeedError,
+    SpeedResult, Stage, Summary, history::LIMIT, needs_confirmation, plan, run,
 };
 use futures::{SinkExt, Stream};
 use iced::widget::{
@@ -39,7 +39,7 @@ pub struct SpeedJob {
 
 #[derive(Debug)]
 pub struct State {
-    /// The history file; only `apply_history` (run off the UI thread) touches it.
+    /// The history file; only `history::apply` (run off the UI thread) touches it.
     history_path: PathBuf,
     /// The recent results as shown, newest first; replaced by what the file says once saved.
     records: Vec<Record>,
@@ -123,20 +123,15 @@ pub fn dialog(state: &State) -> Option<Dialog> {
     }
 }
 
-/// Whether Start can be pressed, and the sentence beside it. With nothing to test (no phone,
-/// no Wi‑Fi or Ethernet) it stays disabled and says to connect the phone, as on the Mac.
+/// Whether Start can be pressed, and the sentence beside it (`cg_tools::speed::run::start_line`).
 pub fn start_line(state: &State, ctx: &Ctx) -> (bool, Option<String>) {
-    if state.running.is_some() {
-        return (true, None);
-    }
-    let phone = ctx.phone_connected();
-    if plan(phone, state.uplink.clone(), ctx.prefs.include_wifi).is_none() {
-        return (false, Some(error_text(&SpeedError::NotConnected)));
-    }
-    if let Some(notice) = &state.notice {
-        return (true, Some(notice.clone()));
-    }
-    (true, (!phone).then(|| tr("speed.wifi_only", &[])))
+    run::start_line(
+        state.running.is_some(),
+        ctx.phone_connected(),
+        state.uplink.clone(),
+        ctx.prefs.include_wifi,
+        state.notice.as_deref(),
+    )
 }
 
 /// The comparison, once the run is over and both legs finished.
@@ -277,18 +272,6 @@ impl State {
     }
 }
 
-/// Carries out `op` on the history file, blocking; the app runs it on a blocking thread.
-/// Returns the records the file holds afterwards.
-pub fn apply_history(path: PathBuf, op: HistoryOp) -> Result<Vec<Record>, String> {
-    let mut store = HistoryStore::open(path);
-    match op {
-        HistoryOp::Add(record) => store.add(record),
-        HistoryOp::Clear => store.clear(),
-    }
-    .map_err(|error| error.to_string())?;
-    Ok(store.records().to_vec())
-}
-
 pub fn update(state: &mut State, message: Msg, ctx: &Ctx) -> Effect {
     match message {
         Msg::Uplink(uplink) => state.uplink = uplink,
@@ -418,55 +401,6 @@ fn orange(content: String) -> text::Text<'static> {
     text(content).size(11).style(|_: &Theme| text::Style {
         color: Some(Tone::Orange.color()),
     })
-}
-
-/// What a leg is doing now; nothing once it finished or before its turn.
-fn stage_text(progress: &Progress) -> Option<String> {
-    let transfer = |uploading: bool| {
-        let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, 10.0));
-        tr(
-            "speed.stage.transfer",
-            &[("direction", &direction(uploading)), ("seconds", &seconds)],
-        )
-    };
-    match progress.stage {
-        Stage::Latency => Some(tr("speed.stage.latency", &[])),
-        Stage::Download => Some(transfer(false)),
-        Stage::Upload => Some(transfer(true)),
-        Stage::Cancelled => Some(tr("speed.cancelled", &[])),
-        Stage::Idle | Stage::Done | Stage::Failed(_) => None,
-    }
-}
-
-fn note_text(note: &Note) -> String {
-    match note {
-        Note::CapReached { uploading, seconds } => tr(
-            "speed.cap_note",
-            &[
-                ("direction", &direction(*uploading)),
-                ("seconds", &format!("{seconds:.1}")),
-            ],
-        ),
-    }
-}
-
-/// "↓ 123.4 ↑ 45.6 Mbps · 32 ms"; a missing figure is left out.
-pub fn summary_text(summary: &Summary) -> String {
-    let mut speeds = Vec::new();
-    if let Some(down) = summary.download {
-        speeds.push(format!("↓ {down:.1}"));
-    }
-    if let Some(up) = summary.upload {
-        speeds.push(format!("↑ {up:.1}"));
-    }
-    let mut parts = Vec::new();
-    if !speeds.is_empty() {
-        parts.push(format!("{} Mbps", speeds.join(" ")));
-    }
-    if let Some(ms) = summary.latency {
-        parts.push(format!("{ms:.0} ms"));
-    }
-    parts.join(" · ")
 }
 
 /// One route's numbers, curve, progress and stage, live while it runs.
@@ -752,7 +686,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> Element<'a, Msg> {
 mod tests {
     use super::*;
     use crate::pages::fixtures::{connected_snapshot, disconnected_snapshot};
-    use crate::prefs::Prefs;
+    use cg_tools::prefs::Prefs;
+    use cg_tools::speed::history;
     use cg_tools::speed::session::Leg;
     use cg_tools::speed::text::error_text;
     use cg_tools::speed::{Route, SpeedError, SpeedResult, Stage};
@@ -1036,9 +971,9 @@ mod tests {
         let (Effect::SpeedHistory(add), Effect::SpeedHistory(clear)) = (add, clear) else {
             panic!("expected two history effects");
         };
-        let after_add = apply_history(path.clone(), add).unwrap();
+        let after_add = history::apply(path.clone(), add).unwrap();
         assert_eq!(after_add.len(), 1);
-        let after_clear = apply_history(path.clone(), clear).unwrap();
+        let after_clear = history::apply(path.clone(), clear).unwrap();
         assert!(after_clear.is_empty());
         assert!(State::new(path).records.is_empty());
         assert!(dir.path().exists());
@@ -1095,7 +1030,7 @@ mod tests {
         // Nothing was written by `update`; the app's blocking thread does it.
         let path = dir.path().join("cellglide/speedtests.json");
         assert!(!path.exists());
-        let saved = apply_history(path.clone(), HistoryOp::Add(records[0].clone())).unwrap();
+        let saved = history::apply(path.clone(), HistoryOp::Add(records[0].clone())).unwrap();
         assert_eq!(saved, state.records);
         // Saved: a new page over the same file reads it back.
         assert_eq!(State::new(path).records.len(), 1);
@@ -1297,27 +1232,6 @@ mod tests {
         let _ = update(&mut state, Msg::Clear, &ctx);
         assert!(!state.confirming_clear);
         assert!(state.records.is_empty());
-    }
-
-    #[test]
-    fn history_cells_leave_out_what_is_missing() {
-        let full = Summary {
-            download: Some(123.44),
-            upload: Some(45.6),
-            latency: Some(31.6),
-        };
-        assert_eq!(summary_text(&full), "↓ 123.4 ↑ 45.6 Mbps · 32 ms");
-        let no_upload = Summary {
-            upload: None,
-            ..full.clone()
-        };
-        assert_eq!(summary_text(&no_upload), "↓ 123.4 Mbps · 32 ms");
-        let latency_only = Summary {
-            download: None,
-            upload: None,
-            latency: Some(40.0),
-        };
-        assert_eq!(summary_text(&latency_only), "40 ms");
     }
 
     #[test]

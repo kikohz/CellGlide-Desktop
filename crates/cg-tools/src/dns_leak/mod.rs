@@ -3,6 +3,8 @@
 //! random names and the fetch are sent; the server keeps what it saw for five minutes.
 //! Ported from the Mac's DNSLeakTest.swift (server: Scripts/dnsleak-server.py).
 
+pub mod view;
+
 use crate::ToolError;
 use crate::https::{self, Target};
 use cg_i18n::{Lang, tr_in};

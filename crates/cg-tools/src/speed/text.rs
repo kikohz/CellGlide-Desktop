@@ -1,7 +1,7 @@
 //! The words for a speed test: failures, the comparison, progress and numbers. Shared by the
 //! terminal and the window.
 
-use super::{Progress, SpeedError, Stage, Verdict, verdict};
+use super::{Note, Progress, SpeedError, Stage, Summary, Verdict, verdict};
 use cg_i18n::tr;
 
 /// The text key of a failure; the details (`minutes`, `code`, `detail`) are filled in by
@@ -98,10 +98,106 @@ pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
     Some(line)
 }
 
+/// What a leg is doing now, for the window; nothing once it finished or before its turn.
+pub fn stage_text(progress: &Progress) -> Option<String> {
+    let transfer = |uploading: bool| {
+        let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, 10.0));
+        tr(
+            "speed.stage.transfer",
+            &[("direction", &direction(uploading)), ("seconds", &seconds)],
+        )
+    };
+    match progress.stage {
+        Stage::Latency => Some(tr("speed.stage.latency", &[])),
+        Stage::Download => Some(transfer(false)),
+        Stage::Upload => Some(transfer(true)),
+        Stage::Cancelled => Some(tr("speed.cancelled", &[])),
+        Stage::Idle | Stage::Done | Stage::Failed(_) => None,
+    }
+}
+
+pub fn note_text(note: &Note) -> String {
+    match note {
+        Note::CapReached { uploading, seconds } => tr(
+            "speed.cap_note",
+            &[
+                ("direction", &direction(*uploading)),
+                ("seconds", &format!("{seconds:.1}")),
+            ],
+        ),
+    }
+}
+
+/// "↓ 123.4 ↑ 45.6 Mbps · 32 ms"; a missing figure is left out.
+pub fn summary_text(summary: &Summary) -> String {
+    let mut speeds = Vec::new();
+    if let Some(down) = summary.download {
+        speeds.push(format!("↓ {down:.1}"));
+    }
+    if let Some(up) = summary.upload {
+        speeds.push(format!("↑ {up:.1}"));
+    }
+    let mut parts = Vec::new();
+    if !speeds.is_empty() {
+        parts.push(format!("{} Mbps", speeds.join(" ")));
+    }
+    if let Some(ms) = summary.latency {
+        parts.push(format!("{ms:.0} ms"));
+    }
+    parts.join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn history_cells_leave_out_what_is_missing() {
+        let full = Summary {
+            download: Some(123.44),
+            upload: Some(45.6),
+            latency: Some(31.6),
+        };
+        assert_eq!(summary_text(&full), "↓ 123.4 ↑ 45.6 Mbps · 32 ms");
+        let no_upload = Summary {
+            upload: None,
+            ..full.clone()
+        };
+        assert_eq!(summary_text(&no_upload), "↓ 123.4 Mbps · 32 ms");
+        let latency_only = Summary {
+            download: None,
+            upload: None,
+            latency: Some(40.0),
+        };
+        assert_eq!(summary_text(&latency_only), "40 ms");
+    }
+
+    #[test]
+    fn stage_and_note_sentences() {
+        let _lang = language(cg_i18n::Lang::ZhCn);
+        let mut p = Progress {
+            stage: Stage::Latency,
+            ..Progress::default()
+        };
+        assert_eq!(stage_text(&p).as_deref(), Some("正在检测 HTTPS 延迟…"));
+        cg_i18n::set(cg_i18n::Lang::En);
+        p.stage = Stage::Download;
+        p.elapsed = 4.4;
+        assert_eq!(
+            stage_text(&p).as_deref(),
+            Some("Testing Download… 4 / 10 s")
+        );
+        for stage in [Stage::Idle, Stage::Done, Stage::Failed(SpeedError::Timeout)] {
+            p.stage = stage;
+            assert_eq!(stage_text(&p), None);
+        }
+        let note = note_text(&Note::CapReached {
+            uploading: true,
+            seconds: 3.4,
+        });
+        assert!(!note.contains("%{") && note.contains("3.4"), "{note}");
+    }
 
     fn language(lang: cg_i18n::Lang) -> MutexGuard<'static, ()> {
         let guard = cg_i18n::lock_for_tests();

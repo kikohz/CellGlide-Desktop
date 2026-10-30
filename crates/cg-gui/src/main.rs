@@ -11,8 +11,6 @@ mod pages;
 #[cfg(unix)]
 mod panel;
 #[cfg(unix)]
-mod prefs;
-#[cfg(unix)]
 mod single;
 #[cfg(unix)]
 mod tray;

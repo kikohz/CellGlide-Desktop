@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 #[test]
 fn every_key_the_window_names_is_listed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dirs = [root.join("src"), root.join("../cg-ipc/src/describe")];
+    let dirs = [
+        root.join("src"),
+        root.join("../cg-ipc/src/describe"),
+        root.join("../cg-tools/src"),
+        root.join("../cg-diag/src"),
+    ];
     assert_eq!(cg_i18n::testing::unlisted_keys(&dirs), Vec::new());
 }
 

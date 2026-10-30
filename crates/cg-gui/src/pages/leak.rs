@@ -9,10 +9,8 @@ use crate::widgets::checks::{self, Run};
 use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::{Lang, tr};
 use cg_ipc::DnsMode;
-use cg_tools::ToolError;
-use cg_tools::dns_leak::{self, Report, ResolverGroup, Verdict};
-use cg_tools::https::Target;
-use futures::future::BoxFuture;
+use cg_tools::dns_leak::view::{self as leak_view, start_label, subnet_line, tone, you_line};
+use cg_tools::dns_leak::{self, Report, Verdict};
 use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Font, Length, Theme};
 
@@ -73,92 +71,9 @@ pub fn update(state: &mut State, message: Msg, ctx: &Ctx) -> Effect {
     }
 }
 
-/// The checks are offered under the verdict when DNS isn't managed: the verdict says so, or
-/// the connection was unmanaged when the test started.
+/// Whether the checks are offered under the verdict (`leak_view::offers_checks`).
 pub fn offers_checks(state: &State) -> bool {
-    state.result.is_some()
-        && (matches!(&state.result, Some((_, Verdict::Unmanaged { .. })))
-            || state.sharing == Some(DnsMode::Unmanaged))
-}
-
-/// "Start test" before the first result, "Test again" after.
-pub fn start_label(state: &State) -> String {
-    tr(
-        if state.result.is_some() {
-            "leak.again"
-        } else {
-            "leak.start"
-        },
-        &[],
-    )
-}
-
-pub fn tone(verdict: &Verdict) -> Tone {
-    match verdict {
-        Verdict::Encrypted { .. } => Tone::Green,
-        Verdict::Carrier { .. } | Verdict::Unmanaged { .. } => Tone::Orange,
-        Verdict::Leak { .. } => Tone::Red,
-        Verdict::NotSharing | Verdict::NothingSeen => Tone::Gray,
-    }
-}
-
-/// "AT&T Enterprises, LLC · California, US".
-pub fn you_line(report: &Report) -> String {
-    let mut parts = vec![report.you.org.clone().unwrap_or(report.you.ip.clone())];
-    parts.extend(report.you.location());
-    parts.join(" · ")
-}
-
-/// The sentence about resolvers that pass on the client subnet; none when no group does.
-pub fn subnet_line(groups: &[ResolverGroup]) -> Option<String> {
-    let names: Vec<&str> = groups
-        .iter()
-        .filter(|g| g.ecs)
-        .map(|g| g.name.as_str())
-        .collect();
-    if names.is_empty() {
-        return None;
-    }
-    Some(tr(
-        "leak.subnet",
-        &[("orgs", &names.join(&tr("list_separator", &[])))],
-    ))
-}
-
-/// What a failed run says: an unavailable server, or the technical reason.
-pub fn failure_text(error: &ToolError) -> String {
-    match error {
-        ToolError::Status(_) => tr("leak.unavailable", &[]),
-        other => tr("leak.failed", &[("error", &other.to_string())]),
-    }
-}
-
-/// A finished run as the page keeps it.
-pub fn outcome(
-    result: Result<Report, ToolError>,
-    sharing: Option<DnsMode>,
-) -> Result<(Report, Verdict), String> {
-    match result {
-        Ok(report) => {
-            let verdict = dns_leak::judge(&report, sharing);
-            Ok((report, verdict))
-        }
-        Err(error) => Err(failure_text(&error)),
-    }
-}
-
-/// The test with the lookups and the server passed in, so tests never touch the network.
-pub async fn run_with(
-    resolve: impl Fn(String) -> BoxFuture<'static, ()>,
-    target: Target,
-    sharing: Option<DnsMode>,
-) -> Result<(Report, Verdict), String> {
-    outcome(dns_leak::run(resolve, &target).await, sharing)
-}
-
-/// The real test: the system resolver and the CellGlide server.
-pub async fn run_production(sharing: Option<DnsMode>) -> Result<(Report, Verdict), String> {
-    run_with(dns_leak::system_resolve, Target::leakcheck(), sharing).await
+    leak_view::offers_checks(state.result.as_ref().map(|(_, v)| v), state.sharing)
 }
 
 fn coloured(content: String, size: u32, tone: Tone) -> text::Text<'static> {
@@ -224,7 +139,7 @@ fn servers_card<'a>(report: &Report, lang: Lang) -> Element<'a, Msg> {
 }
 
 pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Element<'a, Msg> {
-    let mut start = button(text(start_label(state)).size(13)).padding([5, 14]);
+    let mut start = button(text(start_label(state.result.is_some())).size(13)).padding([5, 14]);
     if !state.running {
         start = start.on_press(Msg::Start);
     }
@@ -268,8 +183,6 @@ mod tests {
     use super::*;
     use crate::pages::fixtures::{connected_snapshot, disconnected_snapshot};
     use cg_ipc::{Check, CheckId, ConnState, Request};
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn en() -> std::sync::MutexGuard<'static, ()> {
         let guard = cg_i18n::lock_for_tests();
@@ -435,15 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn the_start_button_says_again_after_a_result() {
-        let _lang = en();
-        let mut state = State::default();
-        assert_eq!(start_label(&state), "Start test");
-        state.result = Some((report(ONE_RESOLVER), unmanaged_verdict()));
-        assert_eq!(start_label(&state), "Test again");
-    }
-
-    #[test]
     fn the_view_builds_in_every_state() {
         let _lang = en();
         let ctx = Ctx::for_test(Some(unmanaged_snapshot()));
@@ -472,145 +376,5 @@ mod tests {
             Verdict::NothingSeen,
         ));
         let _ = view(&state, &ctx);
-    }
-
-    #[test]
-    fn verdicts_have_their_colours() {
-        assert_eq!(tone(&Verdict::Encrypted { providers: vec![] }), Tone::Green);
-        assert_eq!(
-            tone(&Verdict::Carrier {
-                network: "x".into()
-            }),
-            Tone::Orange
-        );
-        assert_eq!(tone(&Verdict::Leak { networks: vec![] }), Tone::Red);
-        assert_eq!(tone(&Verdict::NotSharing), Tone::Gray);
-        assert_eq!(tone(&Verdict::NothingSeen), Tone::Gray);
-        assert_eq!(tone(&unmanaged_verdict()), Tone::Orange);
-    }
-
-    #[test]
-    fn the_exit_line_and_the_subnet_sentence() {
-        let _lang = en();
-        let r = report(ONE_RESOLVER);
-        assert_eq!(you_line(&r), "AT&T · California, US");
-        let bare = report(r#"{"you":{"ip":"1.2.3.4"},"resolvers":[]}"#);
-        assert_eq!(you_line(&bare), "1.2.3.4");
-
-        let groups = dns_leak::groups(&r, Lang::En);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].addresses, ["9.9.9.9", "9.9.9.10"]);
-        let line = subnet_line(&groups).expect("Quad9 passes the subnet");
-        assert!(line.starts_with("Quad9 tells"), "{line}");
-
-        let none =
-            report(r#"{"you":{"ip":"1.2.3.4"},"resolvers":[{"ip":"9.9.9.9","org":"Quad9"}]}"#);
-        assert_eq!(subnet_line(&dns_leak::groups(&none, Lang::En)), None);
-    }
-
-    #[test]
-    fn failures_are_unavailable_for_a_status_and_failed_otherwise() {
-        let _lang = en();
-        assert_eq!(
-            failure_text(&ToolError::Status(503)),
-            tr("leak.unavailable", &[])
-        );
-        let offline = failure_text(&ToolError::Offline("no route".into()));
-        assert!(offline.starts_with("The test did not finish"), "{offline}");
-        assert!(offline.contains("no route"));
-    }
-
-    /// A one-shot HTTP server on localhost answering with `status` and `body`; the paths it
-    /// was asked for are recorded.
-    async fn fake_server(status: u16, body: &'static str) -> (Target, Arc<Mutex<Vec<String>>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let paths = Arc::new(Mutex::new(Vec::new()));
-        let seen = paths.clone();
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut buffer = vec![0u8; 4096];
-                let n = stream.read(&mut buffer).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-                if let Some(path) = request.split_whitespace().nth(1) {
-                    seen.lock().unwrap().push(path.to_string());
-                }
-                let reply = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(reply.as_bytes()).await;
-            }
-        });
-        (
-            Target {
-                host: "127.0.0.1".into(),
-                port,
-                tls: false,
-            },
-            paths,
-        )
-    }
-
-    fn fake_resolve(asked: Arc<Mutex<Vec<String>>>) -> impl Fn(String) -> BoxFuture<'static, ()> {
-        move |name| {
-            let asked = asked.clone();
-            Box::pin(async move { asked.lock().unwrap().push(name) })
-        }
-    }
-
-    #[tokio::test]
-    async fn the_engine_judges_with_the_connection_dns_mode() {
-        let (target, paths) = fake_server(200, ONE_RESOLVER).await;
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let result = run_with(
-            fake_resolve(asked.clone()),
-            target,
-            Some(DnsMode::Unmanaged),
-        )
-        .await
-        .expect("the fake server answers");
-        assert!(matches!(result.1, Verdict::Unmanaged { .. }));
-        assert_eq!(result.0.resolvers.len(), 2);
-        assert_eq!(asked.lock().unwrap().len(), dns_leak::NAMES);
-        assert!(paths.lock().unwrap()[0].starts_with("/v1/"));
-    }
-
-    #[tokio::test]
-    async fn a_server_error_is_the_unavailable_sentence() {
-        let (target, _) = fake_server(503, "{}").await;
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let error = run_with(fake_resolve(asked), target, None)
-            .await
-            .unwrap_err();
-        // Other tests switch the language meanwhile; either language's sentence will do.
-        assert!(
-            [Lang::ZhCn, Lang::En]
-                .iter()
-                .any(|&lang| error == cg_i18n::tr_in(lang, "leak.unavailable", &[])),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_server_is_the_failed_sentence() {
-        // Nothing listens here once the listener is dropped.
-        let port = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let target = Target {
-            host: "127.0.0.1".into(),
-            port,
-            tls: false,
-        };
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let error = run_with(fake_resolve(asked), target, None)
-            .await
-            .unwrap_err();
-        assert!(
-            error.starts_with("The test did not finish") || error.starts_with("检测没有完成"),
-            "{error}"
-        );
     }
 }

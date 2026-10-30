@@ -3,10 +3,8 @@
 //! file, an older snapshot never lands after a newer one, and a history Add and Clear apply in
 //! the order the user made them. The UI thread only sends a job; it never touches the disk.
 
-use crate::effect::HistoryOp;
-use crate::pages::speed;
-use crate::prefs::{self, Prefs};
-use cg_tools::speed::Record;
+use cg_tools::prefs::{self, Prefs};
+use cg_tools::speed::{HistoryOp, Record, history};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
@@ -88,7 +86,7 @@ fn run(job: Job) {
             }
         }
         Job::History(path, op, reply) => {
-            let _ = reply.send(speed::apply_history(path, op));
+            let _ = reply.send(history::apply(path, op));
         }
         #[cfg(test)]
         Job::Flush(done) => {
@@ -100,6 +98,7 @@ fn run(job: Job) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pages::speed;
 
     fn record() -> Record {
         serde_json::from_value(serde_json::json!({

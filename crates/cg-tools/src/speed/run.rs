@@ -4,7 +4,9 @@
 
 use super::engine::SpeedResult;
 use super::history::{Record, Summary};
+use super::text::error_text;
 use super::transport::{Route, SpeedError};
+use cg_i18n::tr;
 use jiff::Timestamp;
 use uuid::Uuid;
 
@@ -46,6 +48,29 @@ pub fn plan(phone_connected: bool, uplink: Option<String>, include_wifi: bool) -
         wifi: uplink.filter(|_| include_wifi),
         wifi_unavailable,
     })
+}
+
+/// Whether Start can be pressed, and the sentence beside it. While a run is going: enabled
+/// (it is the Cancel button), no sentence. With nothing to test (no phone, no Wi‑Fi or
+/// Ethernet) it stays disabled and says to connect the phone, as on the Mac. Otherwise the
+/// `notice` of why the last Start did nothing, else "Wi‑Fi only" without a phone.
+pub fn start_line(
+    running: bool,
+    phone: bool,
+    uplink: Option<String>,
+    include_wifi: bool,
+    notice: Option<&str>,
+) -> (bool, Option<String>) {
+    if running {
+        return (true, None);
+    }
+    if plan(phone, uplink, include_wifi).is_none() {
+        return (false, Some(error_text(&SpeedError::NotConnected)));
+    }
+    if let Some(notice) = notice {
+        return (true, Some(notice.to_string()));
+    }
+    (true, (!phone).then(|| tr("speed.wifi_only", &[])))
 }
 
 /// The data warning is about phone data: only a plan with the phone leg needs it.
@@ -116,6 +141,36 @@ mod tests {
             assert_eq!(p.routes(), vec![Route::Interface("wlp2s0".into())]);
             assert_eq!(p.wifi_unavailable, None);
         }
+    }
+
+    #[test]
+    fn start_line_says_why_start_is_off_or_what_it_will_test() {
+        let _guard = cg_i18n::lock_for_tests();
+        cg_i18n::set(cg_i18n::Lang::ZhCn);
+        let not_connected = error_text(&SpeedError::NotConnected);
+        // Nothing to test: disabled, connect the phone.
+        assert_eq!(
+            start_line(false, false, None, true, None),
+            (false, Some(not_connected.clone()))
+        );
+        // ... even with an old notice.
+        assert_eq!(
+            start_line(false, false, None, true, Some("x")),
+            (false, Some(not_connected))
+        );
+        // Wi‑Fi only.
+        assert_eq!(
+            start_line(false, false, wlan(), true, None),
+            (true, Some(tr("speed.wifi_only", &[])))
+        );
+        // The phone: nothing to say, unless a notice.
+        assert_eq!(start_line(false, true, wlan(), true, None), (true, None));
+        assert_eq!(
+            start_line(false, true, None, false, Some("x")),
+            (true, Some("x".into()))
+        );
+        // While running it's the Cancel button.
+        assert_eq!(start_line(true, false, None, true, Some("x")), (true, None));
     }
 
     #[test]

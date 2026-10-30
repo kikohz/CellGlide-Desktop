@@ -11,9 +11,9 @@ pub mod settings;
 pub mod speed;
 
 use crate::effect::Effect;
-use crate::prefs::Prefs;
 use cg_ipc::describe::ui::Section;
 use cg_ipc::{ConnState, DnsMode, Snapshot};
+use cg_tools::prefs::Prefs;
 use iced::Element;
 use jiff::Timestamp;
 

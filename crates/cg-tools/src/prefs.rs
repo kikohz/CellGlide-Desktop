@@ -1,5 +1,6 @@
-//! The window's own preferences in `$XDG_CONFIG_HOME/cellglide/gui.json`. Starting at login is
-//! not here: its state is the autostart file itself.
+//! The window's own preferences: `$XDG_CONFIG_HOME/cellglide/gui.json` on Linux,
+//! `%LOCALAPPDATA%\CellGlide\prefs.json` on Windows. Starting at login is not here: its state
+//! is the autostart file itself.
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -43,13 +44,20 @@ impl Prefs {
     }
 }
 
-/// The file under a config home (see `cg_tools::paths`).
+/// The file under a config home (see `crate::paths`): the Linux layout.
 pub fn path_in(config_home: PathBuf) -> PathBuf {
     config_home.join("cellglide").join("gui.json")
 }
 
+#[cfg(not(windows))]
 pub fn path() -> PathBuf {
-    path_in(cg_tools::paths::config_home())
+    path_in(crate::paths::config_home())
+}
+
+/// Beside the speed test history, in `%LOCALAPPDATA%\CellGlide`.
+#[cfg(windows)]
+pub fn path() -> PathBuf {
+    crate::paths::app_dir().join("prefs.json")
 }
 
 /// The saved preferences; defaults when the file is missing or unreadable.
@@ -82,7 +90,6 @@ pub fn save(path: &Path, prefs: &Prefs) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cg_tools::paths::config_home_from;
 
     #[test]
     fn missing_or_corrupt_file_gives_defaults() {
@@ -121,8 +128,11 @@ mod tests {
         assert_eq!(names, ["gui.json"]);
     }
 
+    // XDG paths are a Unix rule: "/home/x" is not absolute on Windows.
+    #[cfg(unix)]
     #[test]
     fn relative_xdg_config_home_falls_back_to_home() {
+        use crate::paths::config_home_from;
         let home = Some(PathBuf::from("/home/x"));
         assert_eq!(
             path_in(config_home_from(Some("rel".into()), home.clone())),
@@ -132,5 +142,12 @@ mod tests {
             path_in(config_home_from(Some("/cfg".into()), home)),
             PathBuf::from("/cfg/cellglide/gui.json")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefs_live_beside_the_speed_history() {
+        assert_eq!(path().parent(), crate::speed::default_path().parent());
+        assert_eq!(path().file_name().unwrap(), "prefs.json");
     }
 }

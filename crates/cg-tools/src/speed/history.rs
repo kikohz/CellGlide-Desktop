@@ -39,10 +39,36 @@ pub struct Record {
 }
 
 /// `$XDG_STATE_HOME/cellglide/speedtests.json`, or `~/.local/state/cellglide/speedtests.json`.
+#[cfg(not(windows))]
 pub fn default_path() -> PathBuf {
     crate::paths::state_home()
         .join("cellglide")
         .join("speedtests.json")
+}
+
+/// `%LOCALAPPDATA%\CellGlide\speedtests.json`.
+#[cfg(windows)]
+pub fn default_path() -> PathBuf {
+    crate::paths::app_dir().join("speedtests.json")
+}
+
+/// A change to the speed test history file.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HistoryOp {
+    Add(Record),
+    Clear,
+}
+
+/// Carries out `op` on the history file, blocking; a window runs it off its UI thread.
+/// Returns the records the file holds afterwards.
+pub fn apply(path: PathBuf, op: HistoryOp) -> Result<Vec<Record>, String> {
+    let mut store = HistoryStore::open(path);
+    match op {
+        HistoryOp::Add(record) => store.add(record),
+        HistoryOp::Clear => store.clear(),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(store.records().to_vec())
 }
 
 /// The history file and its records, newest first.
@@ -232,9 +258,34 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn default_path_is_under_the_state_directory() {
         let path = default_path();
         assert!(path.ends_with("cellglide/speedtests.json"), "{path:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_path_is_in_the_app_directory() {
+        assert_eq!(
+            default_path(),
+            crate::paths::app_dir().join("speedtests.json")
+        );
+    }
+
+    #[test]
+    fn apply_adds_and_clears_and_says_what_the_file_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cellglide/speedtests.json");
+        let after_add = apply(path.clone(), HistoryOp::Add(record(1))).unwrap();
+        assert_eq!(after_add.len(), 1);
+        assert_eq!(HistoryStore::open(path.clone()).records(), &after_add[..]);
+        assert!(apply(path.clone(), HistoryOp::Clear).unwrap().is_empty());
+        assert!(!path.exists());
+        // A failure is the reason as text.
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        assert!(apply(blocker.join("speedtests.json"), HistoryOp::Add(record(2))).is_err());
     }
 }

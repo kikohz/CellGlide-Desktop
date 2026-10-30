@@ -10,8 +10,8 @@ pub const NAMESPACES: &[&str] = &[
     "common", "tray", "phone",
 ];
 
-/// File names that look like keys (`gui.json`) are not keys.
-const FILE_SUFFIXES: &[&str] = &[".json", ".desktop", ".svg", ".rs", ".txt", ".yml"];
+/// File and host names that look like keys (`gui.json`, `speed.cloudflare.com`) are not keys.
+const FILE_SUFFIXES: &[&str] = &[".json", ".desktop", ".svg", ".rs", ".txt", ".yml", ".com"];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
@@ -137,6 +137,8 @@ mod tests {
         assert!(is_key("gui.state.connected.title"));
         assert!(!is_key("gui.json"));
         assert!(!is_key("cellglide.desktop"));
+        assert!(!is_key("speed.cloudflare.com"));
+        assert!(!is_key("leak.cellglide.com"));
         assert!(!is_key("cli.unexpected_reply"));
         assert!(!is_key("CellGlide"));
         assert!(!is_key("nav."));

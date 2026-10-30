@@ -8,7 +8,6 @@ use crate::pages::{
     Ctx, PageMsg, Pages, about, diagnostics, history, leak, overview, settings, speed,
 };
 use crate::panel::{self, PanelAction, PanelState};
-use crate::prefs::{self, PrefChange, Prefs};
 use crate::widgets::kit::{self, Tone};
 use crate::writer::Writer;
 use cg_i18n::tr;
@@ -16,6 +15,7 @@ use cg_ipc::describe::ui::{
     self, Badge, GROUPS, KnownDevices, Section, ServiceDown, is_connected, plugged_in, version_line,
 };
 use cg_ipc::{Request, Snapshot, describe};
+use cg_tools::prefs::{self, PrefChange, Prefs};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
 use iced::{
     Alignment, Background, Border, Element, Length, Size, Subscription, Task, Theme, keyboard,
@@ -79,7 +79,7 @@ pub struct App {
     /// Stops the speed test that is running.
     speed_cancel: Option<CancellationToken>,
     /// Where "Save to File" looks for the download directory; `None` saves nothing.
-    places: Option<diagnostics::Places>,
+    places: Option<cg_diag::save::Places>,
     /// Where the user's `autostart/` directory is (`$XDG_CONFIG_HOME`); tests point it at a
     /// temporary directory.
     config_home: PathBuf,
@@ -181,7 +181,7 @@ impl App {
             background_launch(),
             prefs::path(),
             cg_tools::speed::default_path(),
-            diagnostics::Places::from_env(),
+            cg_diag::save::Places::from_env(),
             cg_tools::paths::config_home(),
         )
     }
@@ -192,7 +192,7 @@ impl App {
         background: bool,
         prefs_path: PathBuf,
         history_path: PathBuf,
-        places: Option<diagnostics::Places>,
+        places: Option<cg_diag::save::Places>,
         config_home: PathBuf,
     ) -> (App, Task<Message>) {
         let (id, task) = open_window();
@@ -570,11 +570,10 @@ impl App {
                     Message::Page(PageMsg::Speed(message))
                 })
             }
-            Effect::StartLeak { sharing } => {
-                Task::perform(leak::run_production(sharing), |result| {
-                    Message::Page(PageMsg::Leak(leak::Msg::Done(result)))
-                })
-            }
+            Effect::StartLeak { sharing } => Task::perform(
+                cg_tools::dns_leak::view::run_production(sharing),
+                |result| Message::Page(PageMsg::Leak(leak::Msg::Done(result))),
+            ),
             Effect::CancelSpeed => {
                 if let Some(cancel) = &self.speed_cancel {
                     cancel.cancel();
@@ -599,8 +598,8 @@ impl App {
                                 &[("reason", &tr("diag.no_home", &[]))],
                             ));
                         };
-                        diagnostics::save_bundle(
-                            &places,
+                        cg_diag::save::save_bundle(
+                            &places.download_dir(),
                             Timestamp::now(),
                             &jiff::tz::TimeZone::system(),
                             &json,

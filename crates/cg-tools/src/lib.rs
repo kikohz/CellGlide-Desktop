@@ -1,10 +1,12 @@
 //! Tools that run in the user's own processes (CLI, GUI). The service links this crate only
-//! through cg-diag, which uses `net` for its upload client; it never runs the tools.
+//! through cg-diag, which uses `net` for its upload client and `paths` to find where to save;
+//! it never runs the tools.
 
 pub mod dns_leak;
 pub mod https;
 pub mod net;
 pub mod paths;
+pub mod prefs;
 pub mod speed;
 pub mod uplink;
 

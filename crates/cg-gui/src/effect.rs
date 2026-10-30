@@ -2,8 +2,8 @@
 //! tests assert on it, and `App::run_effect` is the one place that turns it into work.
 
 use crate::pages::speed::SpeedJob;
-use crate::prefs::{PrefChange, Prefs};
-use cg_tools::speed::Record;
+use cg_tools::prefs::{PrefChange, Prefs};
+use cg_tools::speed::HistoryOp;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -44,13 +44,6 @@ pub enum Effect {
     SaveDiagnostics(String),
     /// `Message::After` once the time has passed (e.g. "Copied" turning back into "Copy").
     After(Duration, AfterMsg),
-}
-
-/// A change to the speed test history file.
-#[derive(Clone, Debug, PartialEq)]
-pub enum HistoryOp {
-    Add(Record),
-    Clear,
 }
 
 /// The page a service reply belongs to.

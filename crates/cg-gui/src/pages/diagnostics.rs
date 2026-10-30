@@ -20,8 +20,6 @@ use iced::widget::{
     text_editor, text_input,
 };
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme};
-use jiff::Timestamp;
-use jiff::tz::TimeZone;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -316,124 +314,6 @@ pub fn update(state: &mut State, message: Msg, _ctx: &Ctx) -> Effect {
     Effect::None
 }
 
-/// `XDG_DOWNLOAD_DIR` from the text of `user-dirs.dirs`: `"$HOME/…"` or an absolute path. The
-/// last such line wins, and a comment may follow the closing quote.
-pub fn user_dirs_download(user_dirs: &str, home: &Path) -> Option<PathBuf> {
-    let line = user_dirs
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("XDG_DOWNLOAD_DIR="))?;
-    let rest = line.trim().strip_prefix('"')?;
-    let close = rest.find('"')?;
-    let (value, after) = (&rest[..close], rest[close + 1..].trim());
-    if !(after.is_empty() || after.starts_with('#')) {
-        return None;
-    }
-    if let Some(rest) = value.strip_prefix("$HOME") {
-        // `$HOMEfoo` is not the home directory.
-        if !(rest.is_empty() || rest.starts_with('/')) {
-            return None;
-        }
-        let rest = rest.trim_start_matches('/');
-        return Some(if rest.is_empty() {
-            home.to_path_buf()
-        } else {
-            home.join(rest)
-        });
-    }
-    let path = PathBuf::from(value);
-    path.is_absolute().then_some(path)
-}
-
-/// Where "Save to File" writes: the XDG download directory if it is set and exists, else
-/// `~/Downloads` if it exists, else home.
-pub fn save_dir(
-    xdg_download: Option<PathBuf>,
-    home: PathBuf,
-    exists: impl Fn(&Path) -> bool,
-) -> PathBuf {
-    if let Some(dir) = xdg_download.filter(|dir| exists(dir)) {
-        return dir;
-    }
-    let downloads = home.join("Downloads");
-    if exists(&downloads) { downloads } else { home }
-}
-
-/// `cellglide-diagnostics-YYYYMMDD-HHMMSS.json` in local time, so the files sort by time.
-pub fn file_name(now: Timestamp, tz: &TimeZone) -> String {
-    format!(
-        "cellglide-diagnostics-{}.json",
-        now.to_zoned(tz.clone()).strftime("%Y%m%d-%H%M%S")
-    )
-}
-
-/// Where the user's files are; given to the app, so tests never write into the real home.
-#[derive(Clone, Debug)]
-pub struct Places {
-    pub home: PathBuf,
-    /// Holds `user-dirs.dirs`.
-    pub config_home: PathBuf,
-}
-
-impl Places {
-    pub fn from_env() -> Option<Places> {
-        Some(Places {
-            home: std::env::home_dir()?,
-            config_home: cg_tools::paths::config_home(),
-        })
-    }
-}
-
-/// Writes the bundle into the download directory, readable only by the user, never over an
-/// existing file. The error is the sentence the page shows.
-pub fn save_bundle(
-    places: &Places,
-    now: Timestamp,
-    tz: &TimeZone,
-    json: &str,
-) -> Result<PathBuf, String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let user_dirs = std::fs::read_to_string(places.config_home.join("user-dirs.dirs")).ok();
-    let xdg = user_dirs.and_then(|text| user_dirs_download(&text, &places.home));
-    let dir = save_dir(xdg, places.home.clone(), Path::is_dir);
-    let name = file_name(now, tz);
-    let stem = name.trim_end_matches(".json");
-    let failed = |error: std::io::Error| tr("diag.save_failed", &[("reason", &error.to_string())]);
-    let mut last = None;
-    for n in 1..=20 {
-        let path = if n == 1 {
-            dir.join(&name)
-        } else {
-            dir.join(format!("{stem}-{n}.json"))
-        };
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                return match file.write_all(json.as_bytes()) {
-                    Ok(()) => Ok(path),
-                    Err(error) => {
-                        // Never leave half a bundle behind.
-                        drop(file);
-                        let _ = std::fs::remove_file(&path);
-                        Err(failed(error))
-                    }
-                };
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
-            Err(error) => return Err(failed(error)),
-        }
-    }
-    Err(failed(last.unwrap_or_else(|| {
-        std::io::Error::from(std::io::ErrorKind::AlreadyExists)
-    })))
-}
-
 fn label<'a>(key: &str) -> Element<'a, Msg> {
     kit::secondary(tr(key, &[]))
         .size(13)
@@ -699,7 +579,6 @@ mod tests {
     use crate::effect::{AfterMsg, Reply};
     use cg_i18n::Lang;
     use cg_ipc::{Contact, DiagRange, Request};
-    use std::os::unix::fs::PermissionsExt;
 
     const J: &str = "{\n  \"version\": 1,\n  \"log\": \"第一行\"\n}\n";
 
@@ -1049,103 +928,6 @@ mod tests {
     }
 
     #[test]
-    fn download_dir_from_user_dirs() {
-        let home = Path::new("/home/x");
-        let file = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/桌面\"\nXDG_DOWNLOAD_DIR=\"$HOME/下载\"\n";
-        assert_eq!(
-            user_dirs_download(file, home),
-            Some(PathBuf::from("/home/x/下载"))
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"/data/dl\"\n", home),
-            Some(PathBuf::from("/data/dl"))
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME\"\n", home),
-            Some(PathBuf::from("/home/x"))
-        );
-        // Commented out, relative, or missing: no download directory.
-        assert_eq!(
-            user_dirs_download("#XDG_DOWNLOAD_DIR=\"$HOME/dl\"\n", home),
-            None
-        );
-        assert_eq!(user_dirs_download("XDG_DOWNLOAD_DIR=\"dl\"\n", home), None);
-        assert_eq!(
-            user_dirs_download("XDG_DESKTOP_DIR=\"$HOME/d\"\n", home),
-            None
-        );
-
-        let xdg = Some(PathBuf::from("/home/x/下载"));
-        let all = |_: &Path| true;
-        let none = |_: &Path| false;
-        let only = |dir: &'static str| move |p: &Path| p == Path::new(dir);
-        assert_eq!(
-            save_dir(xdg.clone(), home.into(), all),
-            PathBuf::from("/home/x/下载")
-        );
-        // Set but gone: ~/Downloads, then ~.
-        assert_eq!(
-            save_dir(xdg.clone(), home.into(), only("/home/x/Downloads")),
-            PathBuf::from("/home/x/Downloads")
-        );
-        assert_eq!(save_dir(xdg, home.into(), none), PathBuf::from("/home/x"));
-        assert_eq!(
-            save_dir(None, home.into(), all),
-            PathBuf::from("/home/x/Downloads")
-        );
-        assert_eq!(save_dir(None, home.into(), none), PathBuf::from("/home/x"));
-    }
-
-    #[test]
-    fn file_names_sort_by_time() {
-        let at: Timestamp = "2026-10-19T08:05:09Z".parse().unwrap();
-        assert_eq!(
-            file_name(at, &TimeZone::UTC),
-            "cellglide-diagnostics-20261019-080509.json"
-        );
-        let later: Timestamp = "2026-10-19T10:00:00Z".parse().unwrap();
-        assert!(file_name(at, &TimeZone::UTC) < file_name(later, &TimeZone::UTC));
-    }
-
-    #[test]
-    fn saved_files_are_private_and_never_overwrite() {
-        let _guard = cg_i18n::lock_for_tests();
-        let home = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let downloads = home.path().join("Downloads");
-        std::fs::create_dir(&downloads).unwrap();
-        let places = Places {
-            home: home.path().into(),
-            config_home: config.path().into(),
-        };
-        let at: Timestamp = "2026-10-19T08:05:09Z".parse().unwrap();
-        let first = save_bundle(&places, at, &TimeZone::UTC, J).unwrap();
-        assert_eq!(
-            first,
-            downloads.join("cellglide-diagnostics-20261019-080509.json")
-        );
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), J);
-        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-        // The same second again: a new name, the first file untouched.
-        let second = save_bundle(&places, at, &TimeZone::UTC, "other").unwrap();
-        assert_ne!(second, first);
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), J);
-        assert_eq!(second.parent(), Some(downloads.as_path()));
-
-        // user-dirs.dirs in the config home names another directory.
-        let mine = home.path().join("下载");
-        std::fs::create_dir(&mine).unwrap();
-        std::fs::write(
-            config.path().join("user-dirs.dirs"),
-            "XDG_DOWNLOAD_DIR=\"$HOME/下载\"\n",
-        )
-        .unwrap();
-        let third = save_bundle(&places, at, &TimeZone::UTC, J).unwrap();
-        assert_eq!(third.parent(), Some(mine.as_path()));
-    }
-
-    #[test]
     fn fields_are_frozen_while_sending() {
         let mut state = previewed();
         assert_eq!(step(&mut state, Msg::Send), Effect::Upload(J.into()));
@@ -1161,41 +943,6 @@ mod tests {
         step(&mut state, Msg::Sent(Err(UploadError::Offline)));
         // The retry sends the bytes that were previewed, unchanged.
         assert_eq!(step(&mut state, Msg::Send), Effect::Upload(J.into()));
-    }
-
-    #[test]
-    fn user_dirs_edge_cases() {
-        let home = Path::new("/home/x");
-        // `$HOME` must end the value or be followed by `/`.
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOMEfoo\"\n", home),
-            None
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME/\"\n", home),
-            Some(PathBuf::from("/home/x"))
-        );
-        // The last line wins, as when a shell sources the file.
-        assert_eq!(
-            user_dirs_download(
-                "XDG_DOWNLOAD_DIR=\"$HOME/old\"\nXDG_DOWNLOAD_DIR=\"$HOME/new\"\n",
-                home
-            ),
-            Some(PathBuf::from("/home/x/new"))
-        );
-        // A comment after the closing quote is fine; other trailing text is not.
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME/dl\"  # mine\n", home),
-            Some(PathBuf::from("/home/x/dl"))
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME/dl\" junk\n", home),
-            None
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME/dl\n", home),
-            None
-        );
     }
 
     /// One line of source names the uploader: its path, an import of it, or a call to a

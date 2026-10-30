@@ -10,6 +10,6 @@ pub mod text;
 pub mod transport;
 
 pub use engine::{Note, Params, Progress, SpeedResult, Stage, Verdict, measure, verdict};
-pub use history::{HistoryStore, Record, Summary, default_path};
+pub use history::{HistoryOp, HistoryStore, Record, Summary, default_path};
 pub use run::{Plan, needs_confirmation, plan, record};
 pub use transport::{Route, Server, SpeedError, Stream, connect};

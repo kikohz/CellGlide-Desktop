@@ -588,6 +588,7 @@ name = "cg-diag"
 version = "1.0.0"
 dependencies = [
  "bytes",
+ "cg-i18n",
  "cg-ipc",
  "cg-tools",
  "fancy-regex",
@@ -598,9 +599,11 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "windows 0.62.2",
 ]
 
 [[package]]

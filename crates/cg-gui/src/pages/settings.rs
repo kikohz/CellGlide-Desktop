@@ -5,7 +5,6 @@
 
 use super::Ctx;
 use crate::effect::{AfterMsg, DoctorFor, Effect, Reply, SettingField};
-use crate::prefs::PrefChange;
 use crate::widgets::checks::{self, Run};
 use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::tr;
@@ -13,6 +12,7 @@ use cg_ipc::describe::ui::{
     AutoConnectSwitch, DnsLine, PhoneOption, auto_connect_switch, dns_line, phone_options,
 };
 use cg_ipc::{Check, PhoneChoice, Request, Snapshot};
+use cg_tools::prefs::PrefChange;
 use iced::widget::{button, column, container, pick_list, row, rule, text, toggler};
 use iced::{Alignment, Background, Border, Element, Font, Length, Theme};
 use std::time::Duration;
