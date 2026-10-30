@@ -6,8 +6,10 @@ pub mod resolved;
 
 #[cfg(target_os = "linux")]
 mod backend;
+// Public only for the engine comparison test (tests/engine_parity.rs).
 #[cfg(target_os = "linux")]
-mod hev;
+#[doc(hidden)]
+pub mod hev;
 #[cfg(target_os = "linux")]
 mod tun;
 

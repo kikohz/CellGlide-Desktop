@@ -663,9 +663,12 @@ name = "cg-platform"
 version = "1.0.0"
 dependencies = [
  "cg-core",
+ "cg-netstack",
  "hev-sys",
  "libc",
  "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2",

@@ -21,6 +21,10 @@ zbus.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tracing-subscriber.workspace = true
+# tests/engine_parity.rs: hev and cg-netstack under the same client and SOCKS server.
+cg-netstack = { workspace = true, features = ["testkit"] }
+tokio.workspace = true
+tokio-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
