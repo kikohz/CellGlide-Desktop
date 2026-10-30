@@ -182,3 +182,37 @@ teardown: flush Ok(()), adapter closed, 3.8 s total
 - `IPV6_UNICAST_IF`：本机没有 IPv6 上网，**未测**（代码路径已写好，值为主机字节序）。
 - 断网约 3.5 s；结束后 `Test-NetConnection 1.1.1.1 -Port 443` 成功（经 Wi-Fi），cellglide0 和 /1 路由都已消失，快照对比 `identical`。
 - 示例在每条退出路径上都会撤路由：正常结束和出错时先 `flush` 再关网卡；panic 钩子里 `flush` 后退出；看门狗 20 s 强制 `flush` 并退出；进程被杀时网卡随句柄关闭消失（Task 3 已测）。
+
+## Task 6：iPhone（Apple Mobile Device）
+
+**状态：端点部分已测；手机部分未测。** 测试时 Windows 的 PnP 里没有任何 Apple USB 设备（没有 `VID_05AC`），usbmuxd 的 `ListDevices` 返回空列表，所以 `ReadPairRecord`、lockdown、TLS、电量都没法测。需要用户确认手机已插好、屏幕已解锁后重测。
+
+### 27015 是谁提供的
+
+「Apple 设备」应用（商店版）**没有 Windows 服务**：不存在名为 `Apple Mobile Device Service` 的服务，机器上也没有任何名字或路径含 Apple 的服务、计划任务、`Run` 注册表项。Brief 里「查服务注册表 `ImagePath`」这一步对商店版不适用。
+
+- 包：`AppleInc.AppleDevices` 1.1792.39681.0（x64），包家族名 `AppleInc.AppleDevices_nzyj5cx40ttqa`。
+- 监听者：`AppleMobileDeviceProcess.exe`，路径 `C:\Program Files\WindowsApps\AppleInc.AppleDevices_1.1792.39681.0_x64__nzyj5cx40ttqa\`（版本号在路径里，更新会变），监听 `127.0.0.1:27015`（只绑回环，一个 Listen 套接字）。
+- 它在**用户会话**（Session 1）里以当前用户身份运行，不是 SYSTEM，也不是服务。父进程是同目录的 `AppleMobileDeviceLauncher.exe`。测试时 Apple 设备的界面窗口并没有开，27015 照样在监听，所以**不需要打开应用窗口**。
+- 自启动：清单里声明了 `windows.startupTask`（TaskId `AppleInc.AppleDevices.AppleMobileDeviceLauncher`，Executable `AppleMobileDeviceLauncher.exe`，Enabled=true）。当前用户的 AppModel 注册表里该任务 `State=2`（已启用）。所以它是**用户登录时由启动任务拉起**，不是开机就有。这就意味着：LocalSystem 的 CellGlide 服务在没有用户登录（登录前）时连不上 27015；用户登录之后才可用。
+- 清单还带一条出站防火墙规则（`Apple Devices`）。
+- 没有停止或卸载任何 Apple 的进程；也就没有测「杀掉进程后会不会被拉起」。
+- 手机的配对记录目录 `C:\ProgramData\Apple\Lockdown` 存在，里面只有 `SystemConfiguration.plist`，**没有任何 `<UDID>.plist`**，也就是这台电脑还没有保存过任何手机的配对记录（与「手机没连上」一致）。
+
+对 Task 13 doctor 的含义：检查「27015 可连」即可，不要找服务；要提示的是「用户已登录，且 Apple 设备应用已安装（包家族名如上）」，失败时的指引是「安装/打开 Apple 设备」。服务以 LocalSystem 运行，访问回环 TCP 没有权限问题，但要重试：用户登录前 27015 不存在。
+
+### phone_probe
+
+`cargo run -p cg-core --example phone_probe` 在 Windows 上**不需要改动就能编译、运行**（`MuxEndpoint::system()` 是 TCP 127.0.0.1:27015）。输出：
+
+```text
+usbmuxd: no matching USB iPhone
+```
+
+我又用原始 plist 报文直接发了一次 `ListDevices`，回复是 `DeviceList` 为空数组（`<array/>`），说明 27015 协议层正常，只是没有设备。
+
+### 信任与配对结论（暂定，待手机在线后确认）
+
+没有测到「信任」弹窗由谁触发。现在能确定的只有：Windows 上 usbmuxd 端点由商店版 Apple 设备应用的用户态进程提供，配对记录目录是 `C:\ProgramData\Apple\Lockdown\<UDID>.plist`，与 macOS/Linux 的做法同形（Task 7 之后的代码已按 `ReadPairRecord` 走 mux 协议）。
+
+暂定方案：沿用「只读配对记录」（经 mux 的 `ReadPairRecord`），CellGlide 自己不发起配对；记录不存在时，界面和 doctor 引导用户「连接 iPhone、解锁，在手机上点信任；必要时打开 Apple 设备」。该方案需要用手机重测后再定稿：重测要覆盖「不开应用窗口拔插线是否弹信任」「打开 Apple 设备后是否弹」「`ReadPairRecord` 是否成功」「lockdown/TLS/diagnostics/电量」。
