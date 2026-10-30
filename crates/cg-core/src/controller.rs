@@ -1463,8 +1463,23 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    /// A loopback port free for both UDP and TCP right now, as a fixed resolver address.
-    fn free_port() -> SocketAddr {
+    /// A fixed resolver address no other socket can hold: a loopback address of its own
+    /// (Linux and Windows answer on all of 127/8), unique within this test process, on a
+    /// port below both systems' ephemeral ranges. Other sockets bind 127.0.0.1 or
+    /// ephemeral ports, so nothing can take it between picking it and the resolver
+    /// binding it, unlike a probed-then-released port.
+    #[cfg(any(target_os = "linux", windows))]
+    fn private_resolver_addr() -> SocketAddr {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT: AtomicU16 = AtomicU16::new(1);
+        let [hi, lo] = NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes();
+        SocketAddr::from(([127, 77, hi, lo], 25353))
+    }
+
+    /// Elsewhere (macOS has only 127.0.0.1 without aliases): a probed free port, which
+    /// another socket may take before the resolver binds it.
+    #[cfg(not(any(target_os = "linux", windows)))]
+    fn private_resolver_addr() -> SocketAddr {
         loop {
             let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             let addr = udp.local_addr().unwrap();
@@ -1490,7 +1505,7 @@ mod tests {
 
     #[tokio::test]
     async fn after_interface_starts_resolver_between_start_and_finish() {
-        let addr = free_port();
+        let addr = private_resolver_addr();
         let backend = FakeBackend::with_order(ResolverOrder::AfterInterface);
         let r = rig_on(backend, FakePhoneOptions::default(), addr).await;
         let snap = connect_and_wait(&r, "connected", connected).await;
@@ -1537,7 +1552,12 @@ mod tests {
     async fn after_interface_rolls_back_when_finish_fails() {
         let backend = FakeBackend::with_order(ResolverOrder::AfterInterface);
         backend.set_finish_fails(true);
-        let r = rig_on(backend, FakePhoneOptions::default(), free_port()).await;
+        let r = rig_on(
+            backend,
+            FakePhoneOptions::default(),
+            private_resolver_addr(),
+        )
+        .await;
         let snap = connect_and_wait(&r, "retrying", retrying).await;
         assert!(matches!(
             snap.state,
