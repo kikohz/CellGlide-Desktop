@@ -336,6 +336,9 @@ struct Actor {
     mux_events: Option<mpsc::Receiver<MuxEvent>>,
     next_listen: Instant,
     mux_up: bool,
+    /// usbmuxd's last device list was empty and that was logged: an empty list is logged
+    /// once, not on every relisten.
+    mux_listed_none: bool,
     devices: Vec<Device>,
     settings: SettingsStore,
     /// The user pressed Connect since the last session ended; not persisted.
@@ -380,6 +383,7 @@ impl Actor {
             mux_events: None,
             next_listen: Instant::now(),
             mux_up: true,
+            mux_listed_none: false,
             devices: Vec::new(),
             settings,
             manual: false,
@@ -905,6 +909,11 @@ impl Actor {
         match listened {
             Ok((events, devices)) => {
                 self.mux_events = Some(events);
+                // usbmuxd answered but sees no phone, which is not "not reachable".
+                if devices.is_empty() && !self.mux_listed_none {
+                    tracing::debug!("usbmuxd lists no iPhone");
+                }
+                self.mux_listed_none = devices.is_empty();
                 // Phones already plugged in when usbmuxd is (re)joined.
                 for device in &devices {
                     if !self.devices.iter().any(|d| d.mux_id == device.mux_id) {
@@ -928,6 +937,8 @@ impl Actor {
             Err(error) => {
                 tracing::debug!("usbmuxd not reachable: {error}");
                 self.mux_up = false;
+                // The next empty list after this is news again.
+                self.mux_listed_none = false;
                 self.next_listen = Instant::now() + self.config.relisten_delay;
             }
         }

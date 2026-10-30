@@ -149,8 +149,16 @@ static SSID_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
 static SSID_BARE: LazyLock<Regex> = LazyLock::new(|| re(r#"(?i)\bssid[ \t]*[=:][ \t]*[^\s,;'"]+"#));
 static HOME: LazyLock<Regex> = LazyLock::new(|| re(r#"/home/[^/\s"'<>]+"#));
 // A Windows profile folder, `C:\Users\<name>`, with either slash (or escaped backslashes).
-static WINDOWS_PROFILE: LazyLock<Regex> =
-    LazyLock::new(|| re(r#"(?i)(?<![A-Za-z0-9])[a-z]:(?:\\+|/)users(?:\\+|/)[^\\/\s"'<>:|*?]+"#));
+// The name may hold spaces ("John Smith"): it runs to the next slash, quote or line end.
+// Failing that (a `:` or `<` comes first), it is the name up to the first blank.
+static WINDOWS_PROFILE: LazyLock<Regex> = LazyLock::new(|| {
+    re(
+        r#"(?im)(?<![A-Za-z0-9])[a-z]:(?:\\+|/)users(?:\\+|/)(?:[^\\/\r\n"'<>:|*?]+(?=[\\/"']|\r?$)|[^\\/\s"'<>:|*?]+)"#,
+    )
+});
+// A user's or group's SID in a domain or on this computer (`S-1-5-21-<domain>-<RID>`).
+// Well-known SIDs (`S-1-5-18`, `S-1-5-32-544`) name no one and stay.
+static WINDOWS_SID: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bS-1-5-21-\d+-\d+-\d+-\d+"));
 /// Folders under `C:\Users` that belong to no one.
 const SHARED_PROFILES: &[&str] = &["public", "default", "user"];
 static LOCATION_CITY: LazyLock<Regex> = LazyLock::new(|| re(r"· [^·\n]+, [A-Z]{2}(?= ·|\s*$)"));
@@ -219,6 +227,7 @@ fn redact_with_profile(
         result = replace_profile_name(&regex, &result);
     }
     result = replace_profile_name(&WINDOWS_PROFILE, &result);
+    result = replace(&WINDOWS_SID, &result, |_| "S-1-5-21-<SID>".to_string());
     // The login name shows up outside paths too (sudo, PAM and logind lines).
     if let Some(user) = user_name.filter(|u| login_name_is_redactable(u))
         && let Ok(regex) = Regex::new(&format!(
@@ -297,11 +306,13 @@ fn redact_with_profile(
 }
 
 /// Replaces the folder name at the end of each `C:\Users\<name>` match with `User`,
-/// leaving the shared folders alone.
+/// leaving the shared folders alone. A name whose first word is a shared folder's
+/// ("Default User", or "Public" followed by more of the line) is left alone too.
 fn replace_profile_name(regex: &Regex, text: &str) -> String {
     replace(regex, text, |m| {
         let name = m.rsplit(['\\', '/']).next().unwrap_or_default();
-        if SHARED_PROFILES.contains(&name.to_lowercase().as_str()) {
+        let first_word = name.split_whitespace().next().unwrap_or_default();
+        if SHARED_PROFILES.contains(&first_word.to_lowercase().as_str()) {
             return m.to_string();
         }
         format!("{}User", &m[..m.len() - name.len()])
@@ -805,6 +816,72 @@ mod tests {
         let kept =
             r"C:\Windows\System32\drivers C:\Program Files\CellGlide\wintun.dll C:\Users\Public\x";
         assert_eq!(redact(kept, &names, None), kept);
+    }
+
+    #[test]
+    fn sids_are_hidden() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(
+                "owner S-1-5-21-1004336348-1177238915-682003330-1001 ok",
+                &names,
+                None
+            ),
+            "owner S-1-5-21-<SID> ok"
+        );
+        assert_eq!(redact("S-1-5-18", &names, None), "S-1-5-18"); // 众所周知的 SID 不藏
+    }
+
+    #[test]
+    fn profile_names_with_spaces_are_hidden_without_the_login() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(r"C:\Users\John Smith\AppData\x.log", &names, None),
+            r"C:\Users\User\AppData\x.log"
+        );
+    }
+
+    #[test]
+    fn sids_in_any_case_and_registry_keys() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(
+                r"HKU\s-1-5-21-1-22-333-4444_Classes and S-1-5-21-5-6-7-500\x",
+                &names,
+                None
+            ),
+            r"HKU\S-1-5-21-<SID>_Classes and S-1-5-21-<SID>\x"
+        );
+        // Service and built-in group SIDs name no one.
+        let kept = "S-1-5-32-544 S-1-5-19 S-1-1-0";
+        assert_eq!(redact(kept, &names, None), kept);
+    }
+
+    #[test]
+    fn profile_names_with_spaces_end_at_a_slash_quote_or_line_end() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(
+                "a: \"C:\\\\Users\\\\Mary Ann\\\\x\" b: 'c:/users/Jo Lee/y'",
+                &names,
+                None
+            ),
+            "a: \"C:\\\\Users\\\\User\\\\x\" b: 'c:/users/User/y'"
+        );
+        assert_eq!(
+            redact("open C:\\Users\\Ann Lee\nnext line", &names, None),
+            "open C:\\Users\\User\nnext line"
+        );
+        assert_eq!(
+            redact("open C:\\Users\\Ann Lee\r\nnext", &names, None),
+            "open C:\\Users\\User\r\nnext"
+        );
+        // The shared folders stay, with a space in their name or after it.
+        let kept = r"C:\Users\Default User\x C:\Users\Public";
+        assert_eq!(redact(kept, &names, None), kept);
+        // Redacting twice changes nothing more.
+        let once = redact(r"C:\Users\Ann Lee\x and more", &names, None);
+        assert_eq!(redact(&once, &names, None), once);
     }
 
     #[test]

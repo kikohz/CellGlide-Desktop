@@ -83,6 +83,7 @@ pub async fn run(
             config.time_zone.clone(),
         )),
         hostname: config.computer_name.clone(),
+        netbios: system::netbios_name(),
     };
     let listener = pipe::bind(cg_ipc::PIPE_NAME)
         .with_context(|| format!("can't serve {}", cg_ipc::PIPE_NAME))?;

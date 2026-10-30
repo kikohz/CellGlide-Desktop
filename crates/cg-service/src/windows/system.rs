@@ -11,7 +11,7 @@ use windows::Win32::System::Registry::{
     HKEY, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
 use windows::Win32::System::SystemInformation::{
-    ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+    COMPUTER_NAME_FORMAT, ComputerNameNetBIOS, ComputerNamePhysicalDnsHostname, GetComputerNameExW,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -111,20 +111,23 @@ pub fn reg_subkeys(root: HKEY, subkey: &str) -> Vec<String> {
 
 /// The computer's DNS host name (what `hostname` prints), not the NetBIOS name.
 pub fn computer_name() -> Option<String> {
+    computer_name_as(ComputerNamePhysicalDnsHostname)
+}
+
+/// The computer's NetBIOS name (`%COMPUTERNAME%`), which may differ from the host name:
+/// cut to 15 characters, in capitals, or set apart.
+pub fn netbios_name() -> Option<String> {
+    computer_name_as(ComputerNameNetBIOS)
+}
+
+fn computer_name_as(format: COMPUTER_NAME_FORMAT) -> Option<String> {
     let mut length = 0u32;
     // SAFETY: a size query: fails with ERROR_MORE_DATA and sets `length`.
-    let _ = unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, None, &mut length) };
+    let _ = unsafe { GetComputerNameExW(format, None, &mut length) };
     let mut buffer = vec![0u16; length.max(1) as usize];
     let mut length = buffer.len() as u32;
     // SAFETY: `buffer` holds `length` characters.
-    unsafe {
-        GetComputerNameExW(
-            ComputerNamePhysicalDnsHostname,
-            Some(PWSTR(buffer.as_mut_ptr())),
-            &mut length,
-        )
-    }
-    .ok()?;
+    unsafe { GetComputerNameExW(format, Some(PWSTR(buffer.as_mut_ptr())), &mut length) }.ok()?;
     Some(String::from_utf16_lossy(&buffer[..length as usize])).filter(|n| !n.is_empty())
 }
 
@@ -233,6 +236,7 @@ mod tests {
             host.to_uppercase().starts_with(&netbios),
             "{host} {netbios}"
         );
+        assert_eq!(netbios_name().as_deref(), Some(netbios.as_str()));
         let me = account_name(&super::super::auth::testing::my_sid()).unwrap();
         assert!(
             me.eq_ignore_ascii_case(&std::env::var("USERNAME").unwrap()),

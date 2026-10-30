@@ -5,7 +5,7 @@
 use super::system::{self, HKEY_LOCAL_MACHINE};
 use cg_core::mux::{self, MuxEndpoint};
 use cg_ipc::{Check, CheckId};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::Duration;
 
@@ -117,11 +117,11 @@ fn signature_is_valid(path: &Path) -> bool {
     verdict == 0
 }
 
-/// The resolver's port, `198.18.0.1:53` (UDP), free for us: nothing else bound to it or to
-/// all addresses on port 53. While connected our own resolver holds it, which passes.
+/// The resolver's port, `198.18.0.1:53`, free for us: no other process bound to it or to all
+/// addresses (IPv4 or IPv6) on port 53, over UDP or listening over TCP. While connected our
+/// own resolver holds it, which passes.
 fn dns() -> Check {
-    let me = std::process::id();
-    let others = conflicting_owners(&udp_port_53(), me);
+    let others = port_53_owners(&bindings(), std::process::id());
     match others.first() {
         None => Check::new(CheckId::Dns, true),
         Some(&pid) => {
@@ -131,65 +131,130 @@ fn dns() -> Check {
     }
 }
 
-/// The processes other than `me` whose UDP sockets would collide with the resolver's.
-/// A socket on another specific address (ICS on its own subnet) doesn't.
-fn conflicting_owners(sockets: &[(Ipv4Addr, u32)], me: u32) -> Vec<u32> {
-    let resolver = match cg_core::tunnel::WINDOWS_RESOLVER.ip() {
-        std::net::IpAddr::V4(ip) => ip,
-        std::net::IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
-    };
-    let mut owners: Vec<u32> = sockets
-        .iter()
-        .filter(|(address, pid)| *pid != me && (*address == resolver || address.is_unspecified()))
-        .map(|&(_, pid)| pid)
-        .collect();
-    owners.dedup();
+/// A local socket from the UDP table or a listener from the TCP table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Binding {
+    pub tcp: bool,
+    pub addr: IpAddr,
+    pub port: u16,
+    pub pid: u32,
+}
+
+/// The processes other than `own_pid` bound to port 53 on all addresses (`0.0.0.0`, `::`)
+/// or on the resolver's, in table order without repeats. A socket on another specific
+/// address (ICS on its own subnet, a loopback stub) doesn't collide with the resolver.
+pub(crate) fn port_53_owners(rows: &[Binding], own_pid: u32) -> Vec<u32> {
+    let resolver = cg_core::tunnel::WINDOWS_RESOLVER.ip();
+    let mut owners = Vec::new();
+    for row in rows {
+        if row.port == 53
+            && row.pid != own_pid
+            && (row.addr.is_unspecified() || row.addr == resolver)
+            && !owners.contains(&row.pid)
+        {
+            owners.push(row.pid);
+        }
+    }
     owners
 }
 
-/// The IPv4 UDP sockets bound to port 53, with their owning process.
-fn udp_port_53() -> Vec<(Ipv4Addr, u32)> {
-    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+/// Every UDP socket and TCP listener, IPv4 and IPv6, with its owning process. A table
+/// that can't be read adds nothing.
+fn bindings() -> Vec<Binding> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedUdpTable, MIB_UDPROW_OWNER_PID, MIB_UDPTABLE_OWNER_PID, UDP_TABLE_OWNER_PID,
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+        UDP_TABLE_OWNER_PID,
     };
-    use windows::Win32::Networking::WinSock::AF_INET;
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    let (v4, v6) = (u32::from(AF_INET.0), u32::from(AF_INET6.0));
+    // Ports are in network order in the low 16 bits; IPv4 addresses in network order.
+    let port = |raw: u32| u16::from_be(raw as u16);
+    let v4_addr = |raw: u32| IpAddr::V4(Ipv4Addr::from(u32::from_be(raw)));
+    let mut found = Vec::new();
+    // SAFETY (each call): `buffer` is None or holds `size` bytes.
+    let udp = read_table(
+        "GetExtendedUdpTable (IPv4)",
+        |buffer, size| unsafe {
+            GetExtendedUdpTable(buffer, size, false, v4, UDP_TABLE_OWNER_PID, 0)
+        },
+        |table: &MIB_UDPTABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+    );
+    found.extend(udp.iter().map(|row| Binding {
+        tcp: false,
+        addr: v4_addr(row.dwLocalAddr),
+        port: port(row.dwLocalPort),
+        pid: row.dwOwningPid,
+    }));
+    let udp6 = read_table(
+        "GetExtendedUdpTable (IPv6)",
+        |buffer, size| unsafe {
+            GetExtendedUdpTable(buffer, size, false, v6, UDP_TABLE_OWNER_PID, 0)
+        },
+        |table: &MIB_UDP6TABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+    );
+    found.extend(udp6.iter().map(|row| Binding {
+        tcp: false,
+        addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+        port: port(row.dwLocalPort),
+        pid: row.dwOwningPid,
+    }));
+    let tcp = read_table(
+        "GetExtendedTcpTable (IPv4)",
+        |buffer, size| unsafe {
+            GetExtendedTcpTable(buffer, size, false, v4, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        },
+        |table: &MIB_TCPTABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+    );
+    found.extend(tcp.iter().map(|row| Binding {
+        tcp: true,
+        addr: v4_addr(row.dwLocalAddr),
+        port: port(row.dwLocalPort),
+        pid: row.dwOwningPid,
+    }));
+    let tcp6 = read_table(
+        "GetExtendedTcpTable (IPv6)",
+        |buffer, size| unsafe {
+            GetExtendedTcpTable(buffer, size, false, v6, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        },
+        |table: &MIB_TCP6TABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+    );
+    found.extend(tcp6.iter().map(|row| Binding {
+        tcp: true,
+        addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+        port: port(row.dwLocalPort),
+        pid: row.dwOwningPid,
+    }));
+    found
+}
+
+/// The rows of one IP Helper table: `fetch` fills a buffer of `size` bytes (or, given none,
+/// reports the size needed), and `rows` finds the rows in the table it holds. The table can
+/// grow between the size query and the read, so this tries a few times.
+fn read_table<T, R: Copy>(
+    what: &str,
+    fetch: impl Fn(Option<*mut std::ffi::c_void>, &mut u32) -> u32,
+    rows: impl Fn(&T) -> (*const R, u32),
+) -> Vec<R> {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 
     let mut size = 0u32;
     let mut buffer: Vec<u64> = Vec::new();
-    // The table can grow between the size query and the read: try a few times.
     for _ in 0..4 {
-        // SAFETY: `buffer` holds `size` bytes (none on the first, sizing, call).
-        let result = unsafe {
-            GetExtendedUdpTable(
-                (!buffer.is_empty()).then(|| buffer.as_mut_ptr().cast()),
-                &mut size,
-                false,
-                u32::from(AF_INET.0),
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        };
+        let result = fetch(
+            (!buffer.is_empty()).then(|| buffer.as_mut_ptr().cast()),
+            &mut size,
+        );
         if result == NO_ERROR.0 && !buffer.is_empty() {
-            // SAFETY: on success the buffer starts with a MIB_UDPTABLE_OWNER_PID whose
-            // dwNumEntries rows follow it within `size` bytes; u64 alignment suffices.
-            let rows = unsafe {
-                let table = &*buffer.as_ptr().cast::<MIB_UDPTABLE_OWNER_PID>();
-                std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
-            };
-            return rows
-                .iter()
-                .filter(|row: &&MIB_UDPROW_OWNER_PID| u16::from_be(row.dwLocalPort as u16) == 53)
-                .map(|row| {
-                    (
-                        Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
-                        row.dwOwningPid,
-                    )
-                })
-                .collect();
+            // SAFETY: on success the buffer starts with the table (u64 alignment suffices
+            // for its u32 fields), whose `dwNumEntries` rows follow within `size` bytes.
+            let (first, count) = rows(unsafe { &*buffer.as_ptr().cast::<T>() });
+            // SAFETY: as above.
+            return unsafe { std::slice::from_raw_parts(first, count as usize) }.to_vec();
         }
         if result != ERROR_INSUFFICIENT_BUFFER.0 && result != NO_ERROR.0 {
-            tracing::debug!("GetExtendedUdpTable failed: {result}");
+            tracing::debug!("{what} failed: {result}");
             return Vec::new();
         }
         buffer = vec![0u64; (size as usize).div_ceil(8) + 1];
@@ -297,28 +362,72 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_sockets_on_the_resolver_or_every_address_conflict() {
-        let resolver = Ipv4Addr::new(198, 18, 0, 1);
-        let ics = Ipv4Addr::new(192, 168, 137, 1);
-        let sockets = [
-            (ics, 100),
-            (Ipv4Addr::UNSPECIFIED, 200),
-            (resolver, 300),
-            (resolver, 42),
-        ];
-        assert_eq!(conflicting_owners(&sockets, 42), [200, 300]);
-        assert!(conflicting_owners(&[(ics, 100), (resolver, 42)], 42).is_empty());
+    fn b(tcp: bool, addr: &str, port: u16, pid: u32) -> Binding {
+        Binding {
+            tcp,
+            addr: addr.parse().unwrap(),
+            port,
+            pid,
+        }
     }
 
     #[test]
-    fn a_signed_system_file_passes_and_the_udp_table_reads() {
+    fn only_sockets_on_the_resolver_or_every_address_conflict() {
+        let sockets = [
+            b(false, "192.168.137.1", 53, 100),
+            b(false, "0.0.0.0", 53, 200),
+            b(false, "198.18.0.1", 53, 300),
+            b(false, "198.18.0.1", 53, 42),
+        ];
+        assert_eq!(port_53_owners(&sockets, 42), [200, 300]);
+        let ours = [
+            b(false, "192.168.137.1", 53, 100),
+            b(true, "::1", 53, 100),
+            b(false, "198.18.0.1", 53, 42),
+        ];
+        assert!(port_53_owners(&ours, 42).is_empty());
+    }
+
+    #[test]
+    fn owners_cover_tcp_and_ipv6_wildcards() {
+        let rows = [
+            b(false, "127.0.0.1", 53, 7),
+            b(true, "0.0.0.0", 53, 8),
+            b(false, "::", 53, 9),
+            b(false, "198.18.0.1", 53, 1),
+            b(true, "0.0.0.0", 80, 10),
+            b(false, "::", 53, 9),
+        ];
+        assert_eq!(port_53_owners(&rows, 1), vec![8, 9]);
+    }
+
+    #[test]
+    fn a_signed_system_file_passes_and_the_socket_tables_read() {
         let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap());
         // Catalog-signed system files have no embedded signature; ntoskrnl's is embedded.
         assert!(signature_is_valid(&system.join(r"System32\ntoskrnl.exe")));
         assert!(!signature_is_valid(&system.join("no-such-file.dll")));
-        // Whatever is on port 53 here, the table reads without failing.
-        let _ = udp_port_53();
+        // Our own sockets show up in all four tables, with their address, port and pid.
+        let me = std::process::id();
+        let tcp4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp6 = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let udp4 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp6 = std::net::UdpSocket::bind("[::1]:0").unwrap();
+        let found = bindings();
+        for (tcp, local) in [
+            (true, tcp4.local_addr().unwrap()),
+            (true, tcp6.local_addr().unwrap()),
+            (false, udp4.local_addr().unwrap()),
+            (false, udp6.local_addr().unwrap()),
+        ] {
+            let expected = Binding {
+                tcp,
+                addr: local.ip(),
+                port: local.port(),
+                pid: me,
+            };
+            assert!(found.contains(&expected), "{expected:?} missing");
+        }
         assert_eq!(dns().id, CheckId::Dns);
     }
 }

@@ -324,6 +324,7 @@ pub(crate) mod test_support {
             root: root.to_path_buf(),
             health: None,
             hostname: Some("tester-host".into()),
+            netbios: None,
         }
     }
 
@@ -334,6 +335,7 @@ pub(crate) mod test_support {
             root: root.to_path_buf(),
             health: None,
             hostname: Some("tester-host".into()),
+            netbios: None,
         }
     }
 

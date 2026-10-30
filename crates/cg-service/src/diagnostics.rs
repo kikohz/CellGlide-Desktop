@@ -50,6 +50,8 @@ pub struct Sources {
     pub root: PathBuf,
     pub health: Option<HealthLog>,
     pub hostname: Option<String>,
+    /// The computer's NetBIOS name (Windows), which can differ from the host name.
+    pub netbios: Option<String>,
 }
 
 impl Sources {
@@ -78,6 +80,7 @@ impl Sources {
             hostname: nix::unistd::gethostname()
                 .ok()
                 .and_then(|h| h.into_string().ok()),
+            netbios: None,
         }
     }
 }
@@ -175,7 +178,11 @@ pub async fn build(
         }
     };
 
-    let (names, user_name) = names(src.hostname.as_deref(), account(requester).as_ref());
+    let (names, user_name) = names(
+        src.hostname.as_deref(),
+        src.netbios.as_deref(),
+        account(requester).as_ref(),
+    );
 
     let mut bundle = DiagnosticsBundle::new(
         PLATFORM,
@@ -209,12 +216,13 @@ fn internal(error: impl std::fmt::Display) -> Reason {
     }
 }
 
-/// What to replace and with what: the host name (short and as given) becomes `computer`,
-/// the requester's full name (Linux: the account's comment field) becomes `User`, and the
-/// requester's login name is passed on separately for `/home/<name>`, `C:\Users\<name>`
-/// and plain mentions.
+/// What to replace and with what: the host name (short and as given) and the NetBIOS name
+/// (Windows; `None` elsewhere) become `computer`, the requester's full name (Linux: the
+/// account's comment field) becomes `User`, and the requester's login name is passed on
+/// separately for `/home/<name>`, `C:\Users\<name>` and plain mentions.
 pub fn names(
     hostname: Option<&str>,
+    netbios: Option<&str>,
     requester: Option<&Account>,
 ) -> (BTreeMap<String, String>, Option<String>) {
     let mut names = BTreeMap::new();
@@ -224,6 +232,15 @@ pub fn names(
         if let Some(short) = host.split('.').next().filter(|s| !s.is_empty()) {
             names.insert(short.to_string(), COMPUTER.to_string());
         }
+    }
+    // Names match in any case, so a NetBIOS name that is the host name in capitals
+    // ("ALICE-PC" for "alice-pc") needs no entry of its own.
+    if let Some(netbios) = netbios.map(str::trim).filter(|n| !n.is_empty())
+        && !names
+            .keys()
+            .any(|name| name.to_lowercase() == netbios.to_lowercase())
+    {
+        names.insert(netbios.to_string(), COMPUTER.to_string());
     }
     let mut user_name = None;
     if let Some(user) = requester {
@@ -591,6 +608,28 @@ async fn head_text(stream: impl AsyncRead + Unpin) -> String {
     String::from_utf8_lossy(&text).into_owned()
 }
 
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn netbios_name_is_hidden_too() {
+        let (names, _) = names(Some("alice-thinkpad.example.com"), Some("ALICE-PC"), None);
+        assert_eq!(names["ALICE-PC"], "computer");
+        let (names, _) = super::names(Some("alice-pc"), Some("ALICE-PC"), None);
+        assert_eq!(
+            names.values().filter(|v| *v == "computer").count(),
+            names.len()
+        ); // 不重复加、不报错
+        assert_eq!(names.len(), 1);
+        // The NetBIOS name is the host's short name in capitals: nothing new to add.
+        let (names, _) = super::names(Some("box.example.com"), Some("BOX"), None);
+        assert_eq!(names.len(), 2);
+        let (names, _) = super::names(None, Some("ALICE-PC"), None);
+        assert_eq!(names["ALICE-PC"], "computer");
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -636,6 +675,7 @@ mod tests {
             root: root.to_path_buf(),
             health,
             hostname: Some("alice-thinkpad".into()),
+            netbios: None,
         }
     }
 
@@ -1036,11 +1076,11 @@ mod tests {
 
     #[test]
     fn names_replace_host_and_account() {
-        let (names, user) = names(Some("alice-thinkpad.local"), None);
+        let (names, user) = names(Some("alice-thinkpad.local"), None, None);
         assert_eq!(names["alice-thinkpad.local"], "computer");
         assert_eq!(names["alice-thinkpad"], "computer");
         assert_eq!(user, None);
-        let (names, user) = super::names(None, None);
+        let (names, user) = super::names(None, None, None);
         assert!(names.is_empty() && user.is_none());
     }
 
@@ -1049,7 +1089,7 @@ mod tests {
         let me = nix::unistd::User::from_uid(nix::unistd::getuid())
             .unwrap()
             .expect("the test user has an account");
-        let (names, user) = super::names(Some("box"), Some(&unix_account(&me)));
+        let (names, user) = super::names(Some("box"), None, Some(&unix_account(&me)));
         assert_eq!(user.as_deref(), Some(me.name.as_str()));
         assert_eq!(names["box"], "computer");
         if let Some(full) = me.gecos.to_str().unwrap().split(',').next()
@@ -1124,6 +1164,7 @@ mod windows_tests {
             root: PathBuf::new(),
             health: None,
             hostname: Some("alice-thinkpad".into()),
+            netbios: None,
         }
     }
 
@@ -1203,7 +1244,7 @@ mod windows_tests {
             me.login
                 .eq_ignore_ascii_case(&std::env::var("USERNAME").unwrap())
         );
-        let (names, user) = names(Some("box.example.com"), Some(&me));
+        let (names, user) = names(Some("box.example.com"), None, Some(&me));
         assert_eq!(user.as_deref(), Some(me.login.as_str()));
         assert_eq!(names["box"], "computer");
         assert_eq!(
