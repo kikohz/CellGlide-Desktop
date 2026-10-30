@@ -1,69 +1,68 @@
-//! Who serves a named pipe: the client trusts `\\.\pipe\cellglide-control` only when its server
-//! process runs as LocalSystem, so a program that grabs the name while the service is stopped
-//! can't pose as the service.
+//! Who serves a named pipe: the client trusts `\\.\pipe\cellglide-control` only when the pipe
+//! is owned by LocalSystem and served from session 0, so a program that grabs the name while
+//! the service is stopped can't pose as the service. Both facts are readable by any client,
+//! elevated or not (opening the server process is not: LocalSystem processes refuse
+//! non-elevated callers, measured in Task 7).
 
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use tokio::net::windows::named_pipe::NamedPipeClient;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
 use windows::Win32::Security::{
-    GetTokenInformation, IsWellKnownSid, TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+    IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, WinLocalSystemSid,
 };
-use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
-use windows::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows::Win32::System::Pipes::GetNamedPipeServerSessionId;
 
-/// Closes the handle when dropped.
-struct Owned(HANDLE);
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        // SAFETY: the handle was opened by us and is closed exactly once.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
+/// The decision, apart from the system calls: the service's pipe is owned by LocalSystem
+/// (`O:SY` in [`crate::PIPE_SDDL`], which no other account can set without
+/// SeRestorePrivilege) and is served from session 0, where only services run.
+pub(crate) fn verdict(owner_is_system: bool, session_id: u32) -> bool {
+    owner_is_system && session_id == 0
 }
 
-fn os_error(e: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(e.code().0 & 0xFFFF)
-}
-
-/// Whether the pipe's server process runs as LocalSystem: `GetNamedPipeServerProcessId`, then
-/// that process's token user compared with the well-known LocalSystem SID.
-pub fn server_is_local_system(pipe: &NamedPipeClient) -> io::Result<bool> {
-    let mut pid = 0u32;
-    // SAFETY: the handle belongs to `pipe`, which outlives the call.
-    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }
-        .map_err(os_error)?;
-    // SAFETY: plain call; the returned handle is owned and closed by `Owned`.
-    let process = Owned(
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(os_error)?,
-    );
-    let mut token = HANDLE::default();
-    // SAFETY: `process` is a valid process handle; `token` receives a handle we then own.
-    unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) }.map_err(os_error)?;
-    let token = Owned(token);
-    let mut len = 0u32;
-    // SAFETY: a null buffer asks only for the size, written to `len`; the call fails by design.
-    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut len) };
-    if len == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // u64 cells keep the TOKEN_USER (pointer-sized fields) aligned.
-    let mut buffer = vec![0u64; (len as usize).div_ceil(size_of::<u64>())];
-    // SAFETY: `buffer` holds at least `len` bytes.
-    unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenUser,
-            Some(buffer.as_mut_ptr().cast()),
-            len,
-            &mut len,
+/// Whether the pipe's server is the CellGlide service: see [`verdict`].
+pub fn server_is_cellglide_service(pipe: &NamedPipeClient) -> io::Result<bool> {
+    let handle = HANDLE(pipe.as_raw_handle());
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the handle belongs to `pipe`, which outlives the call; `owner` points into
+    // `descriptor`, which we free below.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
         )
+    };
+    if status.is_err() {
+        return Err(io::Error::from_raw_os_error(status.0 as i32));
     }
-    .map_err(os_error)?;
-    // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points into the buffer.
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    // SAFETY: the SID is valid while `buffer` lives.
-    Ok(unsafe { IsWellKnownSid(user.User.Sid, WinLocalSystemSid) }.as_bool())
+    // SAFETY: `owner` is valid while `descriptor` lives.
+    let owner_is_system = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) }.as_bool();
+    // SAFETY: GetSecurityInfo allocated the descriptor with LocalAlloc; freed exactly once.
+    let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    let mut session = u32::MAX;
+    // SAFETY: the handle belongs to `pipe`.
+    unsafe { GetNamedPipeServerSessionId(handle, &mut session) }
+        .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    Ok(verdict(owner_is_system, session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_system_owned_pipe_in_session_zero_is_the_service() {
+        assert!(verdict(true, 0));
+        assert!(!verdict(true, 1));
+        assert!(!verdict(false, 0));
+        assert!(!verdict(false, 1));
+    }
 }

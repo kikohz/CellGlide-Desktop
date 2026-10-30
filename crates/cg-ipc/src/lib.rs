@@ -24,9 +24,14 @@ pub mod client;
 pub mod pipe_identity;
 
 pub const SOCKET_PATH: &str = "/run/cellglide/control.sock";
-/// The service's control pipe on Windows; clients check its server is LocalSystem.
+/// The service's control pipe on Windows; clients check it is owned by LocalSystem and served
+/// from session 0 (see [`pipe_identity`]).
 #[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\cellglide-control";
+/// The control pipe's security descriptor: owned by LocalSystem (the owner is what clients
+/// check), full access for SYSTEM and administrators, read/write for interactive users.
+#[cfg(windows)]
+pub const PIPE_SDDL: &str = "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 
 /// Where the service listens: a Unix socket, or a named pipe on Windows.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -14,7 +14,7 @@ pub enum ClientError {
     Json(#[from] serde_json::Error),
     #[error("the service closed the connection")]
     Closed,
-    /// The control pipe's server isn't LocalSystem, so it isn't the CellGlide service.
+    /// The control pipe isn't owned by LocalSystem in session 0, so it isn't the CellGlide service.
     #[error("the control pipe isn't served by the CellGlide service")]
     NotService,
 }
@@ -45,7 +45,7 @@ fn verifies(name: &str) -> bool {
 }
 
 /// Opens a pipe, retrying for up to a second while every instance is busy. With `verify`, a
-/// server that isn't LocalSystem is refused before a single byte is written to it.
+/// pipe that isn't LocalSystem's in session 0 is refused before a single byte is written to it.
 #[cfg(windows)]
 pub(crate) async fn connect_pipe(
     name: &str,
@@ -69,7 +69,7 @@ pub(crate) async fn connect_pipe(
             Err(e) => return Err(e.into()),
         }
     };
-    if verify && !crate::pipe_identity::server_is_local_system(&pipe)? {
+    if verify && !crate::pipe_identity::server_is_cellglide_service(&pipe)? {
         return Err(ClientError::NotService);
     }
     Ok(pipe)
@@ -238,13 +238,90 @@ mod tests {
         assert!(bytes.is_empty(), "the client wrote {bytes:?}");
     }
 
-    /// A pipe that Windows serves from a LocalSystem svchost passes the check. Run elevated: a
-    /// non-elevated caller can't open a LocalSystem process (measured in Task 7).
+    /// A pipe that Windows serves from a LocalSystem svchost in session 0 (owner SYSTEM) passes
+    /// the check. Ignored: it depends on the machine's own services.
     #[cfg(windows)]
     #[tokio::test]
     #[ignore]
     async fn accepts_a_local_system_server() {
         connect_pipe(r"\\.\pipe\srvsvc", true).await.unwrap();
+    }
+
+    /// What an elevated process gets by creating a pipe with the service's own SDDL. Making
+    /// SYSTEM the owner needs SeRestorePrivilege enabled (an elevated token has it, disabled);
+    /// with it, only session 0 tells the pipe apart, so outside session 0 the client refuses.
+    /// Measured in Task 7 from a session-0 shell with SeRestorePrivilege enabled: the pipe was
+    /// created and accepted, as expected for an administrator, whom the check does not defend
+    /// against. Run elevated; prints what happened.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore]
+    async fn elevated_process_with_the_service_sddl() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+        use windows::core::HSTRING;
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `sd` receives a LocalAlloc'd descriptor, freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &HSTRING::from(crate::PIPE_SDDL),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+        }
+        .unwrap();
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
+        let name = random_pipe_name();
+        // SAFETY: `attributes` and the descriptor it points to outlive the call.
+        let created = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create_with_security_attributes_raw(
+                    &name,
+                    (&raw mut attributes).cast::<std::ffi::c_void>(),
+                )
+        };
+        // SAFETY: allocated by the conversion above; freed exactly once.
+        let _ = unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+        match created {
+            Err(e) => println!("creating the pipe with PIPE_SDDL failed: {e:?}"),
+            Ok(server) => {
+                // Only possible with SeRestorePrivilege enabled; then session 0 decides.
+                println!("created the pipe with PIPE_SDDL (SeRestorePrivilege must be enabled)");
+                let verdict = connect_pipe(&name, true).await.map(|_| ());
+                println!("client verdict: {verdict:?}");
+                let plain = ServerOptions::new().create(&name).unwrap();
+                let probe = connect_pipe(&name, false).await.unwrap();
+                let mut session = u32::MAX;
+                // SAFETY: the handle belongs to `probe`.
+                unsafe {
+                    windows::Win32::System::Pipes::GetNamedPipeServerSessionId(
+                        windows::Win32::Foundation::HANDLE(
+                            std::os::windows::io::AsRawHandle::as_raw_handle(&probe),
+                        ),
+                        &mut session,
+                    )
+                }
+                .unwrap();
+                println!("this process serves from session {session}");
+                if session != 0 {
+                    assert!(
+                        matches!(verdict, Err(ClientError::NotService)),
+                        "{verdict:?}"
+                    );
+                }
+                drop((server, plain, probe));
+            }
+        }
     }
 
     /// The system pipe is only trusted from the service's own name.
