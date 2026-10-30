@@ -156,6 +156,18 @@ Speed test finished
 
 最终状态（09:06）：服务已安装、Running，隧道断开（`user_disconnected`），没有 cellglide0，没有 phantom 设备；快照与基线只差 DHCPv6 续租时间戳，与 `snap-4` 比 `identical`。
 
+## 上行 0.0 调查（W2 Task 4，2026-10-30）
+
+工具：`cargo run -p cg-tools --example speed_probe -- --route phone --down-mb 5 --up-mb 5 --seconds 5`（小数据量探针），同时每秒 `cellglide.exe status` 看手机卡片的 `↑`。这天手机（Cricket 5G NSA）上行比 W1 快得多：curl 往 `__up` 传 5 MB 用 2.02 秒，**19.8 Mbps**（W1 是 3.3 Mbps）。服务里临时加了计数（查完已删）：② cg-netstack 每条会话写给 SOCKS 的字节（`tcp.rs` 的 `uplink`），③ 转发器写进 usbmux 连接的字节（`copy_bidirectional` 临时换成计数拷贝），另外记下手机那一侧何时回 EOF。
+
+- **复现（修改前）**：6 条流各 833 KB，① 引擎在 0.5 秒的第一个 tick 就算完 5 MB（cap reached），报上行 **79.3 Mbps**；② 每条 835,277 字节在 85–91 ms 内全部交给 SOCKS；③ 转发器在 152–157 ms 内全部写进 usbmux；**手机在 0.3–0.4 秒后就回了 EOF**（说明我们的数据和 FIN 都已到手机），可手机 `↑` 之后还以 2.15–2.50 MB/s 持续约 3 秒。单流 10 MB、1 秒（时间到才结束）：② 0.44 秒写完 10 MB，③ 0.15 秒 4.3 MB、0.49 秒 7.0 MB、1.99 秒 10 MB（这里有约 3 MB 暂时在 netstack→转发器的本机回环套接字里），手机 2.7 秒时回 EOF，`↑` 又持续约 2 秒（约 5 MB 在手机里）；引擎报 79 Mbps，手机实际约 20 Mbps。W1 那次是 6 × 50 MB 的大请求、10 秒，积压约 50 MB，在 3.3 Mbps 的上行上排了几分钟，而引擎 2 秒预热之后几乎没有新字节被套接字收下，所以是 0.0。
+- **积压在哪**：在我们进程之外，主要在手机里。②≈③（同一批字节，几十毫秒之差），③ 远大于手机实际 `↑`，但手机已经读完了数据和 FIN（回了 EOF）还在往蜂窝发，说明是手机自己的发送缓冲（iOS 那一侧）在排队；收紧我们这边的缓冲（`SOCKET_BUFFER`、转发器的 `SO_SNDBUF`）挡不住手机吃下几 MB 到几十 MB。
+- **测速结束后 cg-netstack 对 SOCKS 一侧**：修改前是**发 FIN**（客户端 RST 后会话被清理，流任务按 `End::Gone` 正常关闭），转发器把 FIN 传给手机，手机把手里的数据发完。W1 终审 T9 遗留的 TIME-WAIT 情形（同一四元组复用时带着未读数据的会话被清掉）走的也是这条路，误报成正常结束。
+- **修法：做法 B**（理由：积压在手机，只能改计量，不能靠收紧我们这边的缓冲）。引擎按服务器确认的字节计上行：上传请求一律 `UPLOAD_REQUEST`（1 MB，`Params.request_size` 只管下载），一个请求收到 `__up` 的 200 回复才把它的字节计入，同一连接上一个接一个发；上传套接字设 `SO_LINGER 0`，测完关闭时发 RST，缓冲里剩下的不再发出。cg-netstack 在客户端没发 FIN 就消失时（RST、会话被清理）向 SOCKS **中止**（零 linger），转发器随之丢掉 usbmux 连接；只有服务停止时才正常关闭。所有平台同一算法，Linux 同样生效。
+- **修改后实机（小数据量）**：同一命令跑两次，上行 **19.8 Mbps**、**66.2 Mbps**；curl 对照 **19.8 Mbps**。第二次偏高是小上限的量化问题：每条流只有一个 833 KB 的请求，6 个确认挤在 2.0–2.5 秒之间，预热点（2.0 秒）之后 0.5 秒内算进了 4.2 MB；第一次的确认都在 2.0 秒之前到，算出的是从头平均。另跑一次每条流 5 个请求（`--streams 2 --up-mb 10 --down-mb 2 --seconds 5`）：**23.8 Mbps**，手机 `↑` 当时 1.9–3.5 MB/s。测完后手机 `↑` 1–2 秒内回到 0（3 次都是）。时间到才结束的单流 1 秒（`--up-mb 10 --seconds 1 --streams 1`）：引擎只算已确认的 1 MB（7.9 Mbps），关闭时转发器那条连接以错误结束（SOCKS 一侧被中止），手机 `↑` 约 3 秒内回到 0，剩下的不到 1 MB 是手机已经收下的。下行 26.4 Mbps（两次）、15.8 Mbps，和 W1 同量级（W1 是完整测速 195 Mbps，这里每条流不到 1 MB，主要量的是慢启动）。
+- **手机流量**：本任务合计 **62.6 MB**（`This session` 从 26.2 MB 到 88.8 MB）：修改前 2 次探针（含后台流量）22.1 MB；修改后 4 次探针加 curl 5 MB，共 40.5 MB。断开时计数为 89.2 MB（之后只有后台流量），即 63.0 MB。
+- 网络快照：当天新拍基线，装服务、连接、测量、断开之后再拍，`-Compare` 结果 `identical`。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
@@ -167,4 +179,4 @@ Speed test finished
   - 原因：用户态 WFP 没有任何办法让 UDP 发送立即失败。单独测套接字（硬拦截发往 `192.168.1.254:53`）：在 `ALE_AUTH_CONNECT`、`OUTBOUND_TRANSPORT`、`DATAGRAM_DATA` 三层，`sendto`（未连接和已连接、第一次和 300 ms 后的再次发送）都立即成功，接收都要等到超时；只有 TCP 在 `ALE_AUTH_CONNECT` 上 0.3–0.7 ms 就以 `WSAEACCES`（10013）失败（在 `OUTBOUND_TRANSPORT` 上 5 秒超时）。DNS 客户端用 UDP，并且用通配地址 `::` 绑定套接字，所以也没法按本地地址拦它的 bind。保留 `ALE_AUTH_CONNECT`：UDP 上不比其他层慢，TCP 能立即失败。
   - 泄漏仍为 0：连接时 pktmon 抓 `--comp nics`、端口 53，60 秒内 360 次查询、90 次 `.ts.net` 查询、90 次网页请求：Wi-Fi 0 包；只有 Tailscale Tunnel 有 Rx 180 / Tx 180（MagicDNS，符合预期）。对照（端口 443，5 秒）：Wi-Fi Rx 7 / Tx 7，CellGlide Tunnel Rx 14 / Tx 10。直接问 `192.168.1.254` 和 `2600:381:7368:4c73::1` 都超时，`100.100.100.100` 0.01 秒有应答。
   - 断开后 `netsh wfp show filters` 里 CellGlide 对象 0 个；快照与基线 `identical`。
-- **测速上行是 0.0**，见第 8 项。
+- **测速上行是 0.0**，见第 8 项。W2 Task 4 已修（引擎按服务器确认的字节计上行，cg-netstack 在客户端 RST 后中止 SOCKS 一侧），见「上行 0.0 调查」。

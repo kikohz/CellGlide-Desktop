@@ -165,6 +165,16 @@ impl Stream {
             Stream::Tls(s) => s.get_ref().0.local_addr(),
         }
     }
+
+    /// Makes closing the connection send RST (SO_LINGER 0): data still in the socket's
+    /// buffers is dropped instead of being sent after the caller is done with it.
+    pub(crate) fn reset_on_close(&self) -> io::Result<()> {
+        let tcp = match self {
+            Stream::Plain(s) => s,
+            Stream::Tls(s) => s.get_ref().0,
+        };
+        socket2::SockRef::from(tcp).set_linger(Some(Duration::ZERO))
+    }
 }
 
 impl AsyncRead for Stream {

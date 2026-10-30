@@ -332,3 +332,25 @@ async fn local_scope_traffic_gets_no_sessions() {
     assert_eq!(fake.associates(), 1);
     assert!(fake.connects().is_empty());
 }
+
+/// The client resets an open connection (a speed test dropping its sockets): the SOCKS side
+/// is reset at once, so the forwarder drops its usbmux connection and the phone stops
+/// sending what it still holds, instead of seeing an orderly end of the stream.
+#[tokio::test]
+async fn client_reset_aborts_the_socks_side_at_once() {
+    let fake = FakeSocks::start().await;
+    let engine = start(&fake);
+    let target = addr("93.184.216.34:443");
+    let mut flow = engine
+        .driver
+        .tcp_connect(addr("10.0.0.2:40000"), target)
+        .await;
+    flow.send(b"hello").await;
+    fake.wait_received(target, 5).await;
+    flow.reset();
+    let closed = tokio::time::timeout(Duration::from_secs(1), fake.wait_closed(target)).await;
+    assert!(
+        closed.is_ok(),
+        "SOCKS side still open 1 s after the client's RST"
+    );
+}

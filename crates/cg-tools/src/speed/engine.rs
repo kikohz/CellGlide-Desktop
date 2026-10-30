@@ -1,6 +1,7 @@
 //! One measurement along one route: latency (median of three small requests), then several
 //! streams download and then upload for up to 10 s each, the first 2 s left out. Ported from the
-//! Mac's SpeedEngine.swift with the same numbers and the same rate math.
+//! Mac's SpeedEngine.swift with the same numbers and the same rate math. Upload alone counts
+//! differently: by the bytes the server confirmed, in requests of `UPLOAD_REQUEST`.
 
 use super::transport::{
     Route, Server, SpeedError, Stream, connect, download_request, ping, read_head, upload_request,
@@ -8,7 +9,7 @@ use super::transport::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -19,6 +20,11 @@ pub const LATENCY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Upload writes the same 64 KiB block again and again.
 const CHUNK: usize = 64 * 1024;
 const READ_BUFFER: usize = 256 * 1024;
+/// Every upload request carries this many bytes (the last one of a stream may carry fewer),
+/// whatever `Params.request_size` says (that is for downloads only): upload counts a request
+/// once the server answered it, so requests must stay small enough to be answered during the
+/// test. See `upload_stream`.
+pub const UPLOAD_REQUEST: u64 = 1_000_000;
 
 /// The measurement's knobs. `Default` is the Mac's: caps bound a 10 s test on a very fast link
 /// (about 800 Mbps down, 240 Mbps up); Cloudflare refuses single downloads of 100 MB or more,
@@ -303,7 +309,7 @@ async fn measure_direction(
         let request_size = params.request_size.max(1);
         set.spawn(async move {
             let outcome = if uploading {
-                upload_stream(&route, &server, per_stream, request_size, &bytes).await
+                upload_stream(&route, &server, per_stream, &bytes).await
             } else {
                 download_stream(&route, &server, per_stream, request_size, &bytes).await
             };
@@ -417,50 +423,74 @@ async fn download_stream(
     Ok(())
 }
 
-/// Sends `total` bytes as POST bodies of at most `request_size`, counting each 64 KiB block
-/// once the socket took it. Replies are tiny; they are read and dropped so the connection
-/// stays usable, and a closed connection ends the stream with an error.
+/// Sends `total` bytes as POST bodies of `UPLOAD_REQUEST`, one request after another on the
+/// same kept-alive connection, and counts a request's bytes only once the server answered it.
+/// What the socket took has not been sent yet: on the phone route megabytes can wait in
+/// buffers past this computer (W2 Task 4 found them in the phone) and drain for seconds or
+/// minutes, so counting them would report a burst at the start and then nothing. The socket
+/// closes with RST, so whatever is still buffered when the test ends is dropped, not sent.
 async fn upload_stream(
     route: &Route,
     server: &Server,
     total: u64,
-    request_size: u64,
     bytes: &AtomicU64,
 ) -> Result<(), SpeedError> {
     let stream = connect(route, server).await?;
+    stream.reset_on_close()?;
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let drain = async move {
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => return SpeedError::ClosedEarly,
-                Ok(_) => {}
-                Err(error) => return error.into(),
-            }
-        }
-    };
-    let send = async move {
-        let block = vec![0x61u8; CHUNK];
-        let mut sent = 0u64;
-        while sent < total {
-            let length = request_size.min(total - sent);
+    let block = vec![0x61u8; CHUNK];
+    let mut sent = 0u64;
+    while sent < total {
+        let length = UPLOAD_REQUEST.min(total - sent);
+        let send = async {
             writer.write_all(&upload_request(server, length)).await?;
             let mut left = length;
             while left > 0 {
                 let n = left.min(CHUNK as u64);
                 writer.write_all(&block[..n as usize]).await?;
                 left -= n;
-                sent += n;
-                bytes.fetch_add(n, Ordering::Relaxed);
+            }
+            writer.flush().await?;
+            Ok::<(), SpeedError>(())
+        };
+        let reply = read_reply(&mut reader);
+        tokio::pin!(send, reply);
+        // A refusal can come before the whole body went out; an early 200 still waits for it.
+        tokio::select! {
+            replied = &mut reply => {
+                replied?;
+                (&mut send).await?;
+            }
+            written = &mut send => {
+                written?;
+                (&mut reply).await?;
             }
         }
-        writer.flush().await?;
-        Ok::<(), SpeedError>(())
-    };
-    tokio::select! {
-        sent = send => sent,
-        error = drain => Err(error),
+        sent += length;
+        bytes.fetch_add(length, Ordering::Relaxed);
     }
+    Ok(())
+}
+
+/// One reply to an upload: a 200 head and its body, which is read and dropped so the
+/// connection stays usable for the next request.
+async fn read_reply<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), SpeedError> {
+    let (head, extra) = read_head(reader).await?;
+    head.check()?;
+    let length = head.content_length.ok_or(SpeedError::BadReply)?;
+    let mut left = length
+        .checked_sub(extra.len() as u64)
+        .ok_or(SpeedError::BadReply)?;
+    let mut buf = vec![0u8; CHUNK];
+    while left > 0 {
+        let want = left.min(CHUNK as u64) as usize;
+        let n = reader.read(&mut buf[..want]).await?;
+        if n == 0 {
+            return Err(SpeedError::ClosedEarly);
+        }
+        left -= n as u64;
+    }
+    Ok(())
 }
 
 /// Which way out was faster, by download.
@@ -506,6 +536,8 @@ pub(crate) mod tests {
         DropMidBody,
         /// The latency request gets 5 bytes instead of none.
         WrongLength,
+        /// Upload bodies are read at once, unpaced; each reply comes this long after its body.
+        SlowAck(Duration),
     }
 
     /// A local stand-in for speed.cloudflare.com, paced to about 13 MB/s per connection so a
@@ -514,6 +546,8 @@ pub(crate) mod tests {
         port: u16,
         accepted: Arc<AtomicUsize>,
         open: Arc<AtomicUsize>,
+        /// Upload requests answered with 200.
+        uploads: Arc<AtomicUsize>,
     }
 
     const PACE: Duration = Duration::from_millis(5);
@@ -531,7 +565,8 @@ pub(crate) mod tests {
             let port = listener.local_addr().unwrap().port();
             let accepted = Arc::new(AtomicUsize::new(0));
             let open = Arc::new(AtomicUsize::new(0));
-            let (a, o) = (accepted.clone(), open.clone());
+            let uploads = Arc::new(AtomicUsize::new(0));
+            let (a, o, u) = (accepted.clone(), open.clone(), uploads.clone());
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -540,9 +575,10 @@ pub(crate) mod tests {
                     a.fetch_add(1, Ordering::SeqCst);
                     o.fetch_add(1, Ordering::SeqCst);
                     let guard = OpenGuard(o.clone());
+                    let uploads = u.clone();
                     tokio::spawn(async move {
                         let _guard = guard;
-                        serve(stream, mode).await;
+                        serve(stream, mode, &uploads).await;
                     });
                 }
             });
@@ -550,6 +586,7 @@ pub(crate) mod tests {
                 port,
                 accepted,
                 open,
+                uploads,
             }
         }
 
@@ -568,9 +605,13 @@ pub(crate) mod tests {
         pub(crate) fn open(&self) -> usize {
             self.open.load(Ordering::SeqCst)
         }
+
+        pub(crate) fn uploads(&self) -> usize {
+            self.uploads.load(Ordering::SeqCst)
+        }
     }
 
-    async fn serve(mut stream: tokio::net::TcpStream, mode: Mode) {
+    async fn serve(mut stream: tokio::net::TcpStream, mode: Mode, uploads: &AtomicUsize) {
         let block = vec![b'0'; CHUNK];
         let mut buf = vec![0u8; CHUNK];
         loop {
@@ -630,8 +671,14 @@ pub(crate) mod tests {
                         Ok(0) | Err(_) => return,
                         Ok(n) => left -= n as u64,
                     }
-                    tokio::time::sleep(PACE).await;
+                    if !matches!(mode, Mode::SlowAck(_)) {
+                        tokio::time::sleep(PACE).await;
+                    }
                 }
+                if let Mode::SlowAck(delay) = mode {
+                    tokio::time::sleep(delay).await;
+                }
+                uploads.fetch_add(1, Ordering::SeqCst);
                 let reply = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
                 if stream.write_all(reply.as_bytes()).await.is_err() {
                     return;
@@ -684,6 +731,51 @@ pub(crate) mod tests {
         assert!(last.payload_bytes > 0);
         // One latency connection plus two streams per direction.
         assert_eq!(fake.accepted(), 5);
+    }
+
+    #[tokio::test]
+    async fn upload_counts_only_confirmed_bytes() {
+        // Bodies are taken at once and each reply comes 1 s later, so the socket takes bytes
+        // long before the server confirms them. At no tick may the count run ahead of the
+        // answered requests; counting what the socket took puts megabytes there at the first
+        // tick, with nothing answered.
+        let fake = FakeServer::start(Mode::SlowAck(Duration::from_secs(1))).await;
+        let params = Params {
+            streams: 1,
+            duration: Duration::from_secs(3),
+            warmup: Duration::ZERO,
+            download_cap: 1,
+            upload_cap: 5 * UPLOAD_REQUEST,
+            ..small()
+        };
+        let (tx, mut rx) = watch::channel(Progress::default());
+        let task = tokio::spawn(measure(
+            Route::Unbound,
+            fake.server(),
+            params,
+            tx,
+            CancellationToken::new(),
+        ));
+        let mut ticks = 0;
+        while rx.changed().await.is_ok() {
+            let p = rx.borrow_and_update().clone();
+            if p.stage == Stage::Upload && p.result.upload.is_some() {
+                ticks += 1;
+                // The download moved 1 byte.
+                let uploaded = p.payload_bytes - 1;
+                let answered = fake.uploads() as u64 * UPLOAD_REQUEST;
+                assert!(
+                    uploaded <= answered,
+                    "{uploaded} counted, {answered} answered"
+                );
+            }
+        }
+        let result = task.await.unwrap();
+        assert!(ticks > 10, "{ticks}");
+        // About 1 request a second: the third reply lands at about 3 s, as the last tick does,
+        // so at most 3 MB × 8 / 2.9 s.
+        let upload = result.upload.unwrap();
+        assert!(upload > 0.0 && upload <= 8.5, "{upload}");
     }
 
     #[tokio::test]

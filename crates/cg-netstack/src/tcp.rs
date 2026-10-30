@@ -245,8 +245,12 @@ impl Drop for Wake {
 enum End {
     /// Reset the client and the SOCKS connection.
     Reset,
-    /// The session is gone (client reset, engine stopping): just close.
+    /// The client is gone before its FIN (it reset, or its socket was dropped with data still
+    /// unread): reset the SOCKS connection, since an orderly close would tell the far end
+    /// the stream ended there and let the phone keep sending what it holds.
     Gone,
+    /// The engine is stopping: just close.
+    Stopped,
 }
 
 /// The last time data moved either way.
@@ -298,7 +302,7 @@ impl Flow {
         // Every await of both directions sits under this select, so stopping and the
         // idle timeout apply even while one of them waits on a full buffer.
         let end = tokio::select! {
-            _ = self.cancel.cancelled() => End::Gone,
+            _ = self.cancel.cancelled() => End::Stopped,
             _ = activity.expired(self.idle) => {
                 tracing::debug!(target = %self.target, "tcp idle timeout");
                 End::Reset
@@ -315,6 +319,8 @@ impl Flow {
         };
         if let End::Reset = end {
             abort.cancel();
+        }
+        if let End::Reset | End::Gone = end {
             // RST towards the relay too, so the phone drops its side at once.
             if let Ok(stream) = reader.reunite(writer) {
                 let _ = stream.set_zero_linger();
