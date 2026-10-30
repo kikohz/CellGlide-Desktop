@@ -235,6 +235,8 @@ mod tests {
         let relay = u16::from_be_bytes([reply[8], reply[9]]);
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // As on Linux: the closed relay port at the end shows up as silence, not an error.
+        crate::udp::ignore_icmp_reset(&client).unwrap();
         let packet = [0, 0, 0, 1, 1, 1, 1, 1, 0, 53, b'q', b'1'];
         client.send_to(&packet, ("127.0.0.1", relay)).await.unwrap();
         let mut buf = [0u8; 64];
@@ -267,16 +269,10 @@ mod tests {
         drop(control);
         tokio::time::sleep(Duration::from_millis(200)).await;
         client.send_to(&packet, ("127.0.0.1", relay)).await.unwrap();
-        let after = tokio::time::timeout(Duration::from_millis(300), client.recv(&mut buf)).await;
-        // No datagram comes back. Windows reports the closed relay port's ICMP
-        // unreachable as ConnectionReset on the next receive; Unix just times out.
-        #[cfg(windows)]
-        if let Ok(Err(error)) = &after {
-            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
-            return;
-        }
         assert!(
-            after.is_err(),
+            tokio::time::timeout(Duration::from_millis(300), client.recv(&mut buf))
+                .await
+                .is_err(),
             "association closed with its control connection"
         );
     }

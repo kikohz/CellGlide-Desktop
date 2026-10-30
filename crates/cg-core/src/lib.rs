@@ -17,6 +17,7 @@ pub mod retry;
 pub mod settings;
 mod tls;
 pub mod tunnel;
+mod udp;
 mod udp_bridge;
 pub mod usb_speed;
 

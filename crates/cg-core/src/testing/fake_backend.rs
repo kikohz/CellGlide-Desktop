@@ -38,8 +38,9 @@ struct FakeRunning {
 }
 
 /// Whether a resolver listens on the plan's address. The resolver binds UDP and TCP on
-/// the same port together, and a loopback TCP connect is answered or refused at once,
-/// so an accepted connection is a yes/no signal with no reply to wait for.
+/// the same port together, and a loopback TCP connect to a listener is accepted at once,
+/// so an accepted connection is a yes/no signal with no reply to wait for. (Windows
+/// retries a refused connect for seconds, hence the short timeout.)
 fn resolver_listening(dns: &DnsPlan) -> bool {
     match dns {
         DnsPlan::Resolver(addr) => listening(*addr),
@@ -48,7 +49,7 @@ fn resolver_listening(dns: &DnsPlan) -> bool {
 }
 
 fn listening(addr: SocketAddr) -> bool {
-    addr.port() != 0 && TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+    addr.port() != 0 && TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
 impl FakeBackend {

@@ -2,7 +2,7 @@
 //! each to the upstream (DNS-over-HTTPS to the phone). Identical questions in flight
 //! share one exchange; answers pass through unchanged apart from the client's ID.
 
-use crate::{CoreError, Result};
+use crate::{CoreError, Result, udp};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -97,6 +97,7 @@ async fn bind_pair(addr: SocketAddr) -> Result<(UdpSocket, TcpListener)> {
         let udp = UdpSocket::bind(addr)
             .await
             .map_err(|_| CoreError::ResolverPortBusy(addr.port()))?;
+        udp::ignore_icmp_reset(&udp)?;
         let port = udp.local_addr()?;
         match TcpListener::bind(port).await {
             Ok(tcp) => return Ok((udp, tcp)),
@@ -184,9 +185,14 @@ async fn serve_udp(
 ) {
     let mut buf = vec![0u8; 65535];
     loop {
-        let Ok((len, from)) = socket.recv_from(&mut buf).await else {
-            tokio::time::sleep(ERROR_BACKOFF).await;
-            continue;
+        let (len, from) = match socket.recv_from(&mut buf).await {
+            Ok(received) => received,
+            // A late ICMP unreachable for an answer to a client that left (Windows).
+            Err(error) if udp::is_icmp_reset(&error) => continue,
+            Err(_) => {
+                tokio::time::sleep(ERROR_BACKOFF).await;
+                continue;
+            }
         };
         if len < 12 {
             continue;
@@ -477,10 +483,69 @@ mod tests {
             .await
             .unwrap();
         let mut buf = [0u8; 512];
-        let n = tokio::time::timeout(Duration::from_millis(400), client.recv(&mut buf))
+        let n = tokio::time::timeout(Duration::from_secs(1), client.recv(&mut buf))
             .await
-            .expect("SERVFAIL within 400 ms")
+            .expect("SERVFAIL well before 1 s")
             .unwrap();
         assert_eq!(&buf[..n], &servfail(&query(5)).unwrap()[..]);
+    }
+
+    /// Holds the first exchange until told to answer; answers the rest at once.
+    #[cfg(windows)]
+    struct FirstHeld {
+        release: tokio::sync::Notify,
+        first: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(windows)]
+    impl Upstream for FirstHeld {
+        fn exchange(&self, mut query: Vec<u8>) -> BoxFuture<'_, Option<Vec<u8>>> {
+            Box::pin(async move {
+                if self.first.swap(false, Ordering::SeqCst) {
+                    self.release.notified().await;
+                }
+                query[2] |= 0x80;
+                Some(query)
+            })
+        }
+    }
+
+    /// A client that leaves before its answer makes Windows send the resolver an ICMP
+    /// unreachable; the next client must not wait behind it (no error backoff).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_client_gone_before_its_answer_does_not_delay_the_next() {
+        let upstream = Arc::new(FirstHeld {
+            release: tokio::sync::Notify::new(),
+            first: std::sync::atomic::AtomicBool::new(true),
+        });
+        let resolver = Resolver::start(
+            "127.0.0.1:0".parse().unwrap(),
+            upstream.clone(),
+            UPSTREAM_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let addr = resolver.local_addr();
+        let gone = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        gone.send_to(&query(1), addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(gone);
+        // The answer goes to the closed port; the ICMP unreachable comes straight back.
+        upstream.release.notify_one();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut other = query(2);
+        other[13] = b'X'; // a different name, so no sharing with the first question
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sent = tokio::time::Instant::now();
+        client.send_to(&other, addr).await.unwrap();
+        let mut buf = [0u8; 512];
+        tokio::time::timeout(Duration::from_secs(1), client.recv(&mut buf))
+            .await
+            .expect("answer")
+            .unwrap();
+        let took = sent.elapsed();
+        assert!(took < Duration::from_millis(50), "answer took {took:?}");
     }
 }

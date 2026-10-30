@@ -19,7 +19,9 @@ pub(crate) async fn associate(
 ) -> Result<()> {
     let n = request_address.len();
     let requested_port = u16::from_be_bytes([request_address[n - 2], request_address[n - 1]]);
-    let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+    crate::udp::ignore_icmp_reset(&udp)?;
+    let udp = Arc::new(udp);
     let local_port = udp.local_addr()?.port();
 
     peer.write_all(&UDP_OVER_USB_REQUEST).await?;
@@ -59,7 +61,12 @@ async fn uplink(
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
     loop {
-        let (len, from) = udp.recv_from(&mut buf).await?;
+        let (len, from) = match udp.recv_from(&mut buf).await {
+            Ok(received) => received,
+            // A late ICMP unreachable for an earlier send (Windows): not the end.
+            Err(error) if crate::udp::is_icmp_reset(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
         if !from.ip().is_loopback() {
             continue;
         }
