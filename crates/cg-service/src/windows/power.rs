@@ -14,6 +14,7 @@
 use cg_core::controller::{Command, Controller};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// How often the wall clock is read.
 const TICK: Duration = Duration::from_secs(5);
@@ -36,8 +37,9 @@ pub enum Signal {
     StandbyEnter { at: SystemTime, reason: Option<u32> },
     /// Kernel-Power 507, written at `at`.
     StandbyExit { at: SystemTime, reason: Option<u32> },
-    /// The wall clock jumped: the computer was asleep and is awake now.
-    ClockJump,
+    /// The wall clock jumped from the reading `since`: the computer was asleep at some
+    /// point after it and is awake now.
+    ClockJump { since: SystemTime },
 }
 
 /// True when `now` is more than `tick + 30 s` after `previous`: the computer was asleep in
@@ -65,6 +67,15 @@ impl Sleep {
             tracing::debug!("stale standby record ignored: {signal:?}");
             return Vec::new();
         }
+        // The timers stop in S3 (and in a standby that reaches its deepest state), so the
+        // jump is seen up to a tick after the wake; a resume or 507 since the reading before
+        // the gap has already reported this sleep.
+        if let Signal::ClockJump { since } = signal
+            && self.woke_at.is_some_and(|woke| woke >= since)
+        {
+            tracing::debug!("wall clock jump already reported by a wake");
+            return Vec::new();
+        }
         match (signal, self.asleep) {
             (Signal::Suspend, false) => {
                 tracing::info!("power event: suspending");
@@ -73,6 +84,16 @@ impl Sleep {
             (Signal::StandbyEnter { reason, .. }, false) => {
                 tracing::info!(
                     "Modern Standby: entering (Kernel-Power {STANDBY_ENTER}, reason {})",
+                    describe(reason)
+                );
+                self.fall_asleep()
+            }
+            // A new standby while still marked asleep: the last 507 was lost (a full queue,
+            // or a gap in the subscription). Report the entry again rather than swallow it;
+            // a second `Sleep { sleeping: true }` only resets the health judge once more.
+            (Signal::StandbyEnter { reason, .. }, true) => {
+                tracing::info!(
+                    "Modern Standby: entering (Kernel-Power {STANDBY_ENTER}, reason {}; the last exit was missed)",
                     describe(reason)
                 );
                 self.fall_asleep()
@@ -88,11 +109,11 @@ impl Sleep {
                 );
                 self.wake(now)
             }
-            (Signal::ClockJump, true) => {
+            (Signal::ClockJump { .. }, true) => {
                 tracing::info!("the wall clock jumped: the computer was asleep and is awake");
                 self.wake(now)
             }
-            (Signal::ClockJump, false) => {
+            (Signal::ClockJump { .. }, false) => {
                 tracing::info!("the wall clock jumped: the computer was asleep");
                 self.woke_at = Some(now);
                 vec![true, false]
@@ -193,10 +214,10 @@ pub async fn watch(controller: Controller, mut events: mpsc::Receiver<Signal>) {
             },
             _ = ticker.tick() => {
                 let now = SystemTime::now();
-                let gap = slept(previous, now, TICK);
+                let since = previous;
                 previous = now;
-                if gap {
-                    Signal::ClockJump
+                if slept(since, now, TICK) {
+                    Signal::ClockJump { since }
                 } else {
                     continue;
                 }
@@ -213,10 +234,70 @@ pub async fn watch(controller: Controller, mut events: mpsc::Receiver<Signal>) {
 
 pub use standby::Standby;
 
+/// A subscription that can report that it stopped working.
+pub trait Subscription {
+    /// Completes when the subscription has failed and should be replaced.
+    fn failed(&self) -> impl Future<Output = ()> + Send + '_;
+}
+
+/// How long a subscription must have worked before its failure starts the backoff over.
+const STEADY: Duration = Duration::from_secs(60);
+
+/// Keeps a subscription open until `stop`, opening a new one with backoff (`delay(n)` after
+/// the n-th failure in a row) when opening fails or the subscription reports an error. The
+/// subscription is dropped (unsubscribed) before this returns.
+pub async fn keep_subscribed<S, E>(
+    mut open: impl FnMut() -> Result<S, E>,
+    stop: CancellationToken,
+    delay: impl Fn(u32) -> Duration,
+) where
+    S: Subscription,
+    E: std::fmt::Display,
+{
+    let mut failures = 0u32;
+    loop {
+        let wait = match open() {
+            Ok(subscription) => {
+                tracing::info!("watching for Modern Standby (Kernel-Power 506/507)");
+                let opened = tokio::time::Instant::now();
+                tokio::select! {
+                    _ = subscription.failed() => {}
+                    _ = stop.cancelled() => return,
+                }
+                drop(subscription);
+                if opened.elapsed() >= STEADY {
+                    failures = 0;
+                }
+                failures = failures.saturating_add(1);
+                let wait = delay(failures);
+                tracing::warn!(
+                    "the Modern Standby subscription failed; subscribing again in {:.1} s",
+                    wait.as_secs_f32()
+                );
+                wait
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                let wait = delay(failures);
+                tracing::warn!(
+                    "not watching for Modern Standby: {error}; trying again in {:.1} s",
+                    wait.as_secs_f32()
+                );
+                wait
+            }
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = stop.cancelled() => return,
+        }
+    }
+}
+
 mod standby {
-    use super::{Signal, parse_standby};
+    use super::{Signal, Subscription, parse_standby};
     use std::ffi::c_void;
-    use tokio::sync::mpsc;
+    use std::sync::{Mutex, PoisonError};
+    use tokio::sync::{Notify, mpsc};
     use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows::Win32::System::EventLog::{
         EVT_HANDLE, EVT_SUBSCRIBE_NOTIFY_ACTION, EvtClose, EvtRender, EvtRenderEventXml,
@@ -225,16 +306,24 @@ mod standby {
     };
     use windows::core::w;
 
+    /// What the callback reaches through its context pointer.
+    struct Context {
+        /// Taken out when the subscription is closed, which closes the channel.
+        sender: Mutex<Option<mpsc::Sender<Signal>>>,
+        /// Told when the subscription reports an error.
+        failed: Notify,
+    }
+
     /// A live subscription to Kernel-Power 506 and 507 in the System log. Dropping it
     /// unsubscribes.
     pub struct Standby {
         handle: EVT_HANDLE,
-        sender: *mut mpsc::Sender<Signal>,
+        context: &'static Context,
     }
 
-    // The sender is only read by the callback, which the subscription handle owns; both
-    // are released together in `drop`.
+    // SAFETY: the handle is closed once, in `drop`, and the context is synchronised.
     unsafe impl Send for Standby {}
+    unsafe impl Sync for Standby {}
 
     impl Standby {
         /// Subscribes to records written from now on.
@@ -248,15 +337,22 @@ mod standby {
         }
 
         fn open(sender: mpsc::Sender<Signal>, oldest: bool) -> windows::core::Result<Self> {
-            let sender = Box::into_raw(Box::new(sender));
+            // The context is never freed. EvtClose's documentation doesn't promise to wait
+            // for a callback already running, so there is no point after which freeing it
+            // is known to be safe. A few dozen bytes per subscription (one per service
+            // run; more only after the event log fails) buy soundness without that
+            // promise. The sender inside is still released on close.
+            let context: &'static Context = Box::leak(Box::new(Context {
+                sender: Mutex::new(Some(sender)),
+                failed: Notify::new(),
+            }));
             let flags = if oldest {
                 EvtSubscribeStartAtOldestRecord.0
             } else {
                 EvtSubscribeToFutureEvents.0
             };
-            // SAFETY: the query strings are static, the context points at a live sender
-            // that is freed only after the subscription is closed, and `deliver` matches
-            // EVT_SUBSCRIBE_CALLBACK.
+            // SAFETY: the query strings are static, the context lives for the rest of the
+            // process, and `deliver` matches EVT_SUBSCRIBE_CALLBACK.
             let handle = unsafe {
                 EvtSubscribe(
                     None,
@@ -266,34 +362,35 @@ mod standby {
                         "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=506 or EventID=507)]]"
                     ),
                     None,
-                    Some(sender as *const c_void),
+                    Some(std::ptr::from_ref(context).cast::<c_void>()),
                     Some(deliver),
                     flags,
                 )
-            };
-            match handle {
-                Ok(handle) => Ok(Self { handle, sender }),
-                Err(error) => {
-                    // SAFETY: no subscription holds the pointer.
-                    drop(unsafe { Box::from_raw(sender) });
-                    Err(error)
-                }
-            }
+            }?;
+            Ok(Self { handle, context })
+        }
+    }
+
+    impl Subscription for Standby {
+        fn failed(&self) -> impl Future<Output = ()> + Send + '_ {
+            self.context.failed.notified()
         }
     }
 
     impl Drop for Standby {
         fn drop(&mut self) {
-            // SAFETY: closing the subscription waits for a running callback to return and
-            // stops further ones, so the sender is no longer used afterwards.
-            unsafe {
-                if let Err(error) = EvtClose(self.handle) {
-                    tracing::warn!("can't close the Modern Standby subscription: {error}");
-                    // Leak the sender rather than free it under a callback.
-                    return;
-                }
-                drop(Box::from_raw(self.sender));
+            // SAFETY: the handle came from EvtSubscribe and is closed only here.
+            if let Err(error) = unsafe { EvtClose(self.handle) } {
+                tracing::warn!("can't close the Modern Standby subscription: {error}");
             }
+            // A callback still running, or one that comes after all, finds no sender.
+            drop(
+                self.context
+                    .sender
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            );
             tracing::debug!("stopped watching for Modern Standby");
         }
     }
@@ -304,21 +401,27 @@ mod standby {
         context: *const c_void,
         event: EVT_HANDLE,
     ) -> u32 {
-        // SAFETY: `context` is the sender passed to EvtSubscribe, alive until EvtClose.
-        let sender = unsafe { &*(context as *const mpsc::Sender<Signal>) };
+        // SAFETY: `context` is the leaked `Context` passed to EvtSubscribe, never freed.
+        let context = unsafe { &*context.cast::<Context>() };
         if action != EvtSubscribeActionDeliver {
             // For an error, `event` carries the Win32 error code.
             tracing::warn!("Modern Standby subscription error {}", event.0);
+            context.failed.notify_one();
             return 0;
         }
         // SAFETY: `event` is the record being delivered, valid during the callback.
-        match unsafe { render(event) }.as_deref().and_then(parse_standby) {
-            Some(signal) => {
-                if sender.try_send(signal).is_err() {
-                    tracing::warn!("standby record dropped: {signal:?}");
-                }
-            }
-            None => tracing::debug!("unreadable Kernel-Power record"),
+        let Some(signal) = unsafe { render(event) }.as_deref().and_then(parse_standby) else {
+            tracing::debug!("unreadable Kernel-Power record");
+            return 0;
+        };
+        let sender = context
+            .sender
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(sender) = sender.as_ref()
+            && sender.try_send(signal).is_err()
+        {
+            tracing::warn!("standby record dropped: {signal:?}");
         }
         0
     }
@@ -467,15 +570,55 @@ mod tests {
         // Lid closed: 506 at entry, the timers stop, the clock jumps on wake, then 507.
         let mut sleep = Sleep::default();
         assert_eq!(sleep.on(enter(0), t(0)), [true]);
-        assert_eq!(sleep.on(Signal::ClockJump, t(850)), [false]);
+        assert_eq!(sleep.on(jump(-3), t(850)), [false]);
         assert_eq!(sleep.on(exit(849), t(851)), Vec::<bool>::new());
+    }
+
+    /// A wall clock jump from the reading taken `secs` after t(0).
+    fn jump(secs: i64) -> Signal {
+        let base = t(0);
+        let since = if secs >= 0 {
+            base + Duration::from_secs(secs.unsigned_abs())
+        } else {
+            base - Duration::from_secs(secs.unsigned_abs())
+        };
+        Signal::ClockJump { since }
+    }
+
+    #[test]
+    fn a_clock_jump_after_a_resume_is_the_same_sleep() {
+        // S3: suspend, the automatic resume at once, the clock's jump a tick later.
+        let mut sleep = Sleep::default();
+        assert_eq!(sleep.on(Signal::Suspend, t(0)), [true]);
+        assert_eq!(sleep.on(Signal::Resume, t(600)), [false]);
+        assert_eq!(sleep.on(jump(-2), t(603)), Vec::<bool>::new());
+        // A later sleep the clock alone sees is still reported.
+        assert_eq!(sleep.on(jump(700), t(1_000)), [true, false]);
+    }
+
+    #[test]
+    fn a_clock_jump_after_a_standby_exit_is_the_same_sleep() {
+        // Lid standby with the timers stopped: 506, 507 at once on wake, then the jump.
+        let mut sleep = Sleep::default();
+        assert_eq!(sleep.on(enter(0), t(0)), [true]);
+        assert_eq!(sleep.on(exit(850), t(850)), [false]);
+        assert_eq!(sleep.on(jump(-4), t(854)), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn a_new_entry_after_a_lost_exit_is_reported() {
+        let mut sleep = Sleep::default();
+        assert_eq!(sleep.on(enter(0), t(0)), [true]);
+        // The 507 at t(60) never arrives.
+        assert_eq!(sleep.on(enter(300), t(300)), [true]);
+        assert_eq!(sleep.on(exit(360), t(360)), [false]);
     }
 
     #[test]
     fn records_delivered_after_the_clock_jump_are_stale() {
         // The clock saw the sleep first; 506 and 507 arrive late, written before the wake.
         let mut sleep = Sleep::default();
-        assert_eq!(sleep.on(Signal::ClockJump, t(850)), [true, false]);
+        assert_eq!(sleep.on(jump(-5), t(850)), [true, false]);
         assert_eq!(sleep.on(enter(0), t(851)), Vec::<bool>::new());
         assert_eq!(sleep.on(exit(849), t(851)), Vec::<bool>::new());
         // The next standby is reported normally.
@@ -498,6 +641,87 @@ mod tests {
         let mut sleep = Sleep::default();
         assert_eq!(sleep.on(exit(10), t(10)), Vec::<bool>::new());
         assert_eq!(sleep.on(Signal::Resume, t(11)), Vec::<bool>::new());
+    }
+
+    struct FakeSubscription {
+        failed: std::sync::Arc<tokio::sync::Notify>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Subscription for FakeSubscription {
+        fn failed(&self) -> impl Future<Output = ()> + Send + '_ {
+            self.failed.notified()
+        }
+    }
+
+    impl Drop for FakeSubscription {
+        fn drop(&mut self) {
+            self.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn keeps_trying_to_subscribe_and_resubscribes_after_a_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let failed = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(keep_subscribed(
+            {
+                let (failed, dropped, opens) = (failed.clone(), dropped.clone(), opens.clone());
+                move || {
+                    // The first two tries fail, like an event log service not up yet.
+                    if opens.fetch_add(1, Ordering::SeqCst) < 2 {
+                        return Err("unavailable");
+                    }
+                    Ok(FakeSubscription {
+                        failed: failed.clone(),
+                        dropped: dropped.clone(),
+                    })
+                }
+            },
+            stop.clone(),
+            {
+                let delays = delays.clone();
+                move |n| {
+                    delays.lock().unwrap().push(n);
+                    Duration::from_millis(10)
+                }
+            },
+        ));
+        let until = |n: usize| {
+            let opens = opens.clone();
+            async move {
+                while opens.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), until(3))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(opens.load(Ordering::SeqCst), 3, "open and holding");
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        // The subscription reports an error: it is closed and replaced.
+        failed.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), until(4))
+            .await
+            .unwrap();
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        // Backoff grows with failures in a row.
+        assert_eq!(*delays.lock().unwrap(), [1, 2, 3]);
+        // Stop unsubscribes.
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
     }
 
     /// Reads this machine's own standby history through a real subscription. Needs at least

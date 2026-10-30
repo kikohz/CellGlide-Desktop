@@ -53,7 +53,8 @@ impl server::DoctorApi for SystemDoctor {
 
 /// The service until `stop`: the controller behind the control pipe, with sleep signals
 /// from `power` passed on. `standby` is the sender for Modern Standby records, held by
-/// their subscription until `stop`. Shared by the service and `--console`.
+/// their subscription (renewed with backoff when it fails) until `stop`. Shared by the
+/// service and `--console`.
 pub async fn run(
     stop: CancellationToken,
     standby: mpsc::Sender<power::Signal>,
@@ -94,23 +95,22 @@ pub async fn run(
         Arc::new(sources),
     );
     tokio::spawn(power::watch(controller.clone(), power));
-    let standby = match power::Standby::subscribe(standby) {
-        Ok(subscription) => {
-            tracing::info!("watching for Modern Standby (Kernel-Power 506/507)");
-            Some(subscription)
-        }
-        Err(error) => {
-            tracing::warn!("not watching for Modern Standby: {error}");
-            None
-        }
-    };
+    let unsubscribe = stop.child_token();
+    let watching = tokio::spawn(power::keep_subscribed(
+        move || power::Standby::subscribe(standby.clone()),
+        unsubscribe.clone(),
+        cg_core::retry::backoff,
+    ));
     tracing::info!("cellglide-service ready on {}", cg_ipc::PIPE_NAME);
     tokio::select! {
         _ = serving => {}
         _ = stop.cancelled() => {}
     }
     tracing::info!("cellglide-service stopping");
-    drop(standby);
+    unsubscribe.cancel();
+    if let Err(error) = watching.await {
+        tracing::warn!("the Modern Standby watch ended abnormally: {error}");
+    }
     controller.shutdown().await;
     Ok(())
 }
