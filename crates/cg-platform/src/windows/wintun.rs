@@ -414,6 +414,11 @@ mod tests {
     fn missing_dll_is_explained() {
         let err = Wintun::load_from(Path::new(r"C:\nonexistent\wintun.dll")).unwrap_err();
         assert!(err.to_string().contains("wintun.dll"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("same directory as cellglide-service.exe"),
+            "{err}"
+        );
     }
 
     #[test]

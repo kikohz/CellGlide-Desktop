@@ -64,7 +64,9 @@ pub async fn run(
         tracing::warn!("clearing leftovers from a previous run: {error}");
     }
     let data = data_dir();
-    let backend = cg_platform::WindowsBackend::new()?;
+    // wintun.dll loads on the first connect: without it the pipe and doctor still run, and
+    // connecting says what is missing.
+    let backend = cg_platform::WindowsBackend::new();
     let mut config = ControllerConfig::new(MuxEndpoint::system(), Arc::new(backend));
     config.resolver_addr = cg_core::tunnel::WINDOWS_RESOLVER;
     config.resolver_deadline = RESOLVER_DEADLINE;
@@ -143,4 +145,95 @@ pub fn console() -> anyhow::Result<()> {
         }
         result
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::test_support::test_sources;
+    use cg_core::settings::Stored;
+    use cg_core::testing::{
+        FakeMux, FakePhone, FakePhoneOptions, FakeProbe, FakeTunnelProbe, SharedProbe, device,
+    };
+    use cg_ipc::{CheckId, ConnState, Endpoint, Reason, Request, Response, client};
+
+    /// Without a loadable wintun.dll (debug builds take its path from CELLGLIDE_WINTUN_DLL)
+    /// the service is still served as `run` serves it: doctor's Wintun check fails, and
+    /// connecting fails with a reason that says where wintun.dll belongs.
+    #[tokio::test]
+    async fn serves_without_wintun() {
+        // SAFETY: Windows serializes access to the environment block; no other test in this
+        // binary reads or writes this variable.
+        unsafe {
+            std::env::set_var(
+                "CELLGLIDE_WINTUN_DLL",
+                r"C:\nonexistent\cellglide\wintun.dll",
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let mux = FakeMux::start().await;
+        let _phone = FakePhone::start(&mux, FakePhoneOptions::default()).await;
+        let mut config =
+            ControllerConfig::new(mux.endpoint(), Arc::new(cg_platform::WindowsBackend::new()));
+        config.resolver_addr = cg_core::tunnel::WINDOWS_RESOLVER;
+        config.bypass = false;
+        config.sysfs_root = None;
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: false,
+            ..Stored::default()
+        });
+        config.health_dir = Some(dir.path().join("health"));
+        config.exit_probe = Arc::new(SharedProbe(FakeProbe::new()));
+        config.tunnel_probe = FakeTunnelProbe::new();
+        let controller = Controller::spawn(config);
+        let name = pipe::tests::random_pipe_name();
+        let listener = pipe::bind_with(&name, &pipe::tests::test_sddl()).unwrap();
+        tokio::spawn(server::serve(
+            listener,
+            controller.clone(),
+            Arc::new(SystemDoctor {
+                endpoint: mux.endpoint(),
+                install_dir: install.path().to_path_buf(),
+            }),
+            Arc::new(test_sources(dir.path())),
+        ));
+        let endpoint = Endpoint::Pipe(name);
+
+        let Response::Doctor { checks } =
+            client::request(&endpoint, &Request::Doctor).await.unwrap()
+        else {
+            panic!("expected doctor's checks");
+        };
+        let wintun = checks.iter().find(|c| c.id == CheckId::Wintun).unwrap();
+        assert!(!wintun.ok, "{checks:?}");
+
+        mux.attach(device("aaaa", 1));
+        let mut updates = controller.subscribe();
+        let connect = client::request(&endpoint, &Request::Connect { serial: None });
+        assert_eq!(connect.await.unwrap(), Response::Ok);
+        let state = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let state = updates.borrow_and_update().state.clone();
+                if let ConnState::Retrying { .. } = state {
+                    return state;
+                }
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("connecting never failed");
+        let ConnState::Retrying {
+            reason: Reason::Tunnel { detail },
+        } = state
+        else {
+            panic!("expected a tunnel error, got {state:?}");
+        };
+        assert!(detail.contains("wintun.dll"), "{detail}");
+        assert!(
+            detail.contains("same directory as cellglide-service.exe"),
+            "{detail}"
+        );
+        controller.shutdown().await;
+    }
 }

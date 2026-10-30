@@ -311,7 +311,7 @@ fn start_finish_stop_leaves_nothing() {
     assert_absent(&dll);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let socks = runtime.block_on(FakeSocks::start());
-    let backend = WindowsBackend::new().unwrap();
+    let backend = WindowsBackend::new();
     assert_eq!(backend.resolver_order(), ResolverOrder::AfterInterface);
 
     let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
@@ -391,7 +391,7 @@ fn dropping_without_stop_cleans_up() {
     assert_absent(&dll);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let socks = runtime.block_on(FakeSocks::start());
-    let backend = WindowsBackend::new().unwrap();
+    let backend = WindowsBackend::new();
     let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
     tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
     drop(tunnel);
@@ -420,7 +420,7 @@ fn crash_child_entry() {
     }
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let socks = runtime.block_on(FakeSocks::start());
-    let backend = WindowsBackend::new().unwrap();
+    let backend = WindowsBackend::new();
     let tunnel = backend.start(&tunnel_plan(socks.addr().port())).unwrap();
     tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
     // libtest prints "test crash_child_entry ... " before this on the same line.
@@ -528,8 +528,7 @@ fn resolver_port_taken_rolls_back() {
     let (state, gone) = runtime.block_on(async {
         let mux = FakeMux::start().await;
         let _phone = FakePhone::start(&mux, FakePhoneOptions::default()).await;
-        let mut config =
-            ControllerConfig::new(mux.endpoint(), Arc::new(WindowsBackend::new().unwrap()));
+        let mut config = ControllerConfig::new(mux.endpoint(), Arc::new(WindowsBackend::new()));
         config.resolver_addr = WINDOWS_RESOLVER;
         config.bypass = false;
         config.settings = SettingsSource::Memory(Stored {

@@ -31,26 +31,40 @@ const ENGINE_WORKERS: usize = 2;
 /// How long the engine's runtime waits for stray tasks once `run` has returned.
 const ENGINE_SHUTDOWN: Duration = Duration::from_secs(1);
 
-/// The Windows tunnel. Holds the loaded `wintun.dll`.
+/// The Windows tunnel. Loads `wintun.dll` on the first `start`, so the service, its pipe
+/// and doctor run without it; a failed load is retried on the next `start` (the DLL may
+/// have been put back in the meantime).
+#[derive(Default)]
 pub struct WindowsBackend {
-    dll: Arc<Wintun>,
+    dll: Mutex<Option<Arc<Wintun>>>,
 }
 
 impl WindowsBackend {
-    /// Loads `wintun.dll` (next to the executable, or System32).
-    pub fn new() -> io::Result<WindowsBackend> {
-        Ok(WindowsBackend {
-            dll: Wintun::load()?,
-        })
+    pub fn new() -> WindowsBackend {
+        WindowsBackend::default()
+    }
+
+    /// The loaded `wintun.dll` (next to the executable, or System32), loading it now if
+    /// it isn't yet.
+    fn dll(&self) -> Result<Arc<Wintun>, TunnelError> {
+        let mut dll = self.dll.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(dll) = &*dll {
+            return Ok(dll.clone());
+        }
+        // The error already says where wintun.dll belongs.
+        let loaded = Wintun::load().map_err(|e| TunnelError(e.to_string()))?;
+        *dll = Some(loaded.clone());
+        Ok(loaded)
     }
 }
 
 impl TunnelBackend for WindowsBackend {
     fn start(&self, plan: &TunnelPlan) -> Result<Box<dyn RunningTunnel>, TunnelError> {
+        let dll = self.dll()?;
         // `plan.bypass` adds nothing on Windows (spec 5.4): local subnets' on-link routes
         // are already longer than /1 and stay on the physical adapter.
         let adapter = Adapter::create(
-            &self.dll,
+            &dll,
             INTERFACE_NAME,
             WINDOWS_TUNNEL_TYPE,
             WINDOWS_ADAPTER_GUID,
