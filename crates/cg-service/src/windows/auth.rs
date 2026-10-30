@@ -77,12 +77,29 @@ pub(crate) fn identify_process(pid: u32) -> io::Result<ClientIdentity> {
     // SAFETY: as above.
     let is_system = unsafe { IsWellKnownSid(user_sid, WinLocalSystemSid) }.as_bool();
     let session: u32 = token_value(token.0, TokenSessionId)?;
-    Ok(ClientIdentity {
+    let session_active = session_is_active(session);
+    Ok(combine(is_system, is_admin(token.0), session_active, sid))
+}
+
+/// The identity from its parts. Only failing to read the process, token or SID makes a
+/// client unidentified (denied); not being able to tell whether it is an administrator just
+/// means "not one", so an unelevated admin in the active session still gets full access.
+fn combine(
+    is_system: bool,
+    admin: io::Result<bool>,
+    session_active: bool,
+    sid: String,
+) -> ClientIdentity {
+    let is_admin = admin.unwrap_or_else(|error| {
+        tracing::warn!(%error, %sid, "can't tell whether a control pipe client is an administrator");
+        false
+    });
+    ClientIdentity {
         is_system,
-        is_admin: is_admin(token.0)?,
-        session_active: session_is_active(session),
+        is_admin,
+        session_active,
         sid,
-    })
+    }
 }
 
 /// BUILTIN\Administrators enabled in the token, or in its elevated twin when UAC hands the
@@ -95,12 +112,16 @@ pub(crate) fn is_admin(token: HANDLE) -> io::Result<bool> {
     if elevation != TokenElevationTypeLimited {
         return Ok(false);
     }
+    // Without SeTcbPrivilege this is an identification-level impersonation token, checked
+    // as is; with it (LocalSystem) it is a primary token, which `in_administrators`
+    // duplicates. Any failure here reaches `combine` as "not an administrator".
     let linked: TOKEN_LINKED_TOKEN = token_value(token, TokenLinkedToken)?;
     let linked = Owned(linked.LinkedToken);
     in_administrators(linked.0)
 }
 
-/// CheckTokenMembership wants an impersonation token: a primary one is duplicated first.
+/// CheckTokenMembership wants an impersonation token: one is used directly, a primary one
+/// is duplicated (needing TOKEN_DUPLICATE on the handle) only when the call refuses it.
 fn in_administrators(token: HANDLE) -> io::Result<bool> {
     let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
     let mut size = SECURITY_MAX_SID_SIZE;
@@ -249,6 +270,22 @@ mod tests {
             }),
             Access::Full
         );
+    }
+
+    /// Failing to tell whether a client is an administrator never denies it: the active
+    /// session still grants full access, otherwise it may look.
+    #[test]
+    fn admin_check_failure_is_not_admin() {
+        let failed = || Err(io::Error::from_raw_os_error(5));
+        let active = combine(false, failed(), true, "S-1-5-21-1".into());
+        assert!(!active.is_admin);
+        assert_eq!(access(&active), Access::Full);
+        let inactive = combine(false, failed(), false, "S-1-5-21-1".into());
+        assert_eq!(access(&inactive), Access::ReadOnly);
+        let system = combine(true, failed(), false, "S-1-5-18".into());
+        assert_eq!(access(&system), Access::Full);
+        let admin = combine(false, Ok(true), false, "S-1-5-21-1".into());
+        assert_eq!(access(&admin), Access::Full);
     }
 
     #[test]
