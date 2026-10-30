@@ -156,7 +156,9 @@ pub enum Command {
         phone: Option<PhoneChoice>,
     },
     /// The computer is about to suspend (`true`) or has resumed (`false`): the health
-    /// judgement starts over. The session is left to the exit checks.
+    /// judgement starts over. The session is left to the exit checks. On resume, a
+    /// connection that is wanted but not up is tried at once, from a fresh backoff, and a
+    /// lost usbmuxd is rejoined at once.
     Sleep {
         sleeping: bool,
     },
@@ -481,6 +483,13 @@ impl Actor {
                     if sleeping { "suspend" } else { "resume" }
                 );
                 self.monitor.sleep_changed(Timestamp::now());
+                if !sleeping {
+                    self.next_listen = Instant::now();
+                    if self.wants() && self.active.is_none() {
+                        self.failures = 0;
+                        self.retry_soon();
+                    }
+                }
             }
             Command::Disconnect => {
                 self.settings.update(|s| {
@@ -2702,6 +2711,35 @@ mod tests {
             },
             ..watch_timing()
         }
+    }
+
+    #[tokio::test]
+    async fn resume_retries_at_once_instead_of_waiting_out_the_backoff() {
+        let r = rig(FakePhoneOptions::default(), any_port()).await;
+        r.probe.set_ok(false);
+        r.mux.attach(device("aaaa", 1));
+        r.controller
+            .send(Command::Connect { serial: None })
+            .await
+            .unwrap();
+        wait_for(&r.controller, "retrying", |s| {
+            matches!(s.state, ConnState::Retrying { .. })
+        })
+        .await;
+        // The next try is two seconds away; a resume brings it forward.
+        r.probe.set_ok(true);
+        r.controller
+            .send(Command::Sleep { sleeping: false })
+            .await
+            .unwrap();
+        let mut rx = r.controller.subscribe();
+        tokio::time::timeout(Duration::from_millis(1200), async {
+            while !connected(&rx.borrow_and_update()) {
+                rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("connected well before the two second backoff");
     }
 
     #[tokio::test]

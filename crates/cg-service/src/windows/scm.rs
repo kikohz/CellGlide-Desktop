@@ -1,6 +1,7 @@
 //! Running under the service control manager: the `CellGlide` service's entry point, its
 //! control handler (stop, shutdown and power events) and the states it reports.
 
+use super::power::Signal;
 use std::ffi::OsString;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -25,7 +26,8 @@ define_windows_service!(ffi_service_main, service_main);
 fn service_main(_arguments: Vec<OsString>) {
     let _log = super::logs::init(&super::data_dir().join("logs"), false);
     let stop = CancellationToken::new();
-    let (power, events) = mpsc::channel(8);
+    let (power, events) = mpsc::channel(32);
+    let power_for_run = power.clone();
     let handler = {
         let stop = stop.clone();
         move |control| on_control(control, &stop, &power)
@@ -67,7 +69,7 @@ fn service_main(_arguments: Vec<OsString>) {
     let code = match tokio::runtime::Runtime::new() {
         Ok(runtime) => {
             report(ServiceState::Running, 0, Duration::ZERO);
-            let result = runtime.block_on(super::run(stop, events));
+            let result = runtime.block_on(super::run(stop, power_for_run, events));
             report(ServiceState::StopPending, 0, Duration::from_secs(10));
             match result {
                 Ok(()) => 0,
@@ -86,11 +88,12 @@ fn service_main(_arguments: Vec<OsString>) {
 }
 
 /// What the service does with one control: stop and shutdown end it; suspend and the
-/// automatic resume that follows every wake are passed on as `true` and `false`.
+/// automatic resume that follows every wake are passed on. (Modern Standby sends neither;
+/// `power::Standby` watches for it.)
 fn on_control(
     control: ServiceControl,
     stop: &CancellationToken,
-    power: &mpsc::Sender<bool>,
+    power: &mpsc::Sender<Signal>,
 ) -> ServiceControlHandlerResult {
     match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -98,17 +101,17 @@ fn on_control(
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::PowerEvent(event) => {
-            let sleeping = match event {
-                PowerEventParam::Suspend => Some(true),
-                PowerEventParam::ResumeAutomatic => Some(false),
+            let signal = match event {
+                PowerEventParam::Suspend => Some(Signal::Suspend),
+                PowerEventParam::ResumeAutomatic => Some(Signal::Resume),
                 _ => None,
             };
             // The handler runs on the control manager's thread and must not block: a full
             // queue drops the event, and the wall clock check still sees the gap.
-            if let Some(sleeping) = sleeping
-                && power.try_send(sleeping).is_err()
+            if let Some(signal) = signal
+                && power.try_send(signal).is_err()
             {
-                tracing::warn!("power event dropped (sleeping: {sleeping})");
+                tracing::warn!("power event dropped: {signal:?}");
             }
             ServiceControlHandlerResult::NoError
         }
@@ -135,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn suspend_and_resume_become_sleep_flags() {
+    fn suspend_and_resume_become_signals() {
         let stop = CancellationToken::new();
         let (power, mut events) = mpsc::channel(8);
         for event in [
@@ -149,8 +152,8 @@ mod tests {
                 ServiceControlHandlerResult::NoError
             ));
         }
-        assert_eq!(events.try_recv(), Ok(true));
-        assert_eq!(events.try_recv(), Ok(false));
+        assert_eq!(events.try_recv(), Ok(Signal::Suspend));
+        assert_eq!(events.try_recv(), Ok(Signal::Resume));
         assert!(
             events.try_recv().is_err(),
             "only suspend and automatic resume"
