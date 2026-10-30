@@ -19,6 +19,18 @@
 //! while connected. This way round fails closed: a NIC that appears while connected (a USB
 //! Ethernet dongle) is blocked by type the moment it exists, with no window before a
 //! per-LUID block could be added; only a new virtual adapter waits for the notification.
+//! Known gap: an adapter that is virtual but carries this machine's own traffic over a NIC
+//! (Hyper-V External switch, Windows network bridge, vendor NIC teaming; all type 6
+//! without `HardwareInterface`) is permitted, so its port 53 leaks.
+//!
+//! PPPoE (Task 11c fix round 1, controller ruling): a PPPoE dial-up link is a PPP
+//! interface (type 23) whose traffic leaves through a physical NIC, so it is blocked too,
+//! by a per-LUID filter. The built-in VPNs (PPTP, L2TP, SSTP, IKEv2) are PPP as well and
+//! keep their DNS. `RasEnumConnections` tells them apart: a connection's device type is
+//! `RASDT_PPPoE` ("PPPoE") or not, and its entry name is the PPP interface's alias. A PPP
+//! interface that matches no non-PPPoE connection, or any PPP interface when RAS can't be
+//! asked, is blocked (fail closed). Not tried on a real PPPoE link (none on the dev
+//! machine); the classification is unit-tested.
 //!
 //! Why the block still drops silently (Task 11c, measured): no user-mode WFP action makes a
 //! UDP send fail. With a hard block at `ALE_AUTH_CONNECT`, `OUTBOUND_TRANSPORT` or
@@ -37,10 +49,13 @@ use std::sync::{Mutex, MutexGuard};
 use windows::Win32::Foundation::{HANDLE, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, FreeMibTable, GetIfTable2, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
-    IF_TYPE_WWANPP, IF_TYPE_WWANPP2, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPINTERFACE_ROW,
-    MIB_NOTIFICATION_TYPE, MibAddInstance, MibDeleteInstance, NotifyIpInterfaceChange,
+    IF_TYPE_PPP, IF_TYPE_WWANPP, IF_TYPE_WWANPP2, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPINTERFACE_ROW,
+    MIB_NOTIFICATION_TYPE, NotifyIpInterfaceChange,
 };
-use windows::Win32::NetworkManagement::Ndis::{NDIS_PHYSICAL_MEDIUM, NdisPhysicalMediumBluetooth};
+use windows::Win32::NetworkManagement::Ndis::{
+    IfOperStatusUp, NDIS_PHYSICAL_MEDIUM, NdisPhysicalMediumBluetooth,
+};
+use windows::Win32::NetworkManagement::Rras::{RASCONNW, RasEnumConnectionsW};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK,
     FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET,
@@ -75,6 +90,7 @@ const SUBLAYER_WEIGHT: u16 = u16::MAX;
 const WEIGHT_OUR_INTERFACE: u8 = 15;
 const WEIGHT_LOOPBACK: u8 = 14;
 const WEIGHT_VIRTUAL: u8 = 13;
+const WEIGHT_PPP_BLOCK: u8 = 1;
 const WEIGHT_BLOCK: u8 = 0;
 
 const LAYERS: [GUID; 2] = [
@@ -94,10 +110,41 @@ pub fn exempt(if_type: u32, hardware: bool, filter: bool, medium: NDIS_PHYSICAL_
         && medium != NdisPhysicalMediumBluetooth
 }
 
+/// A RAS connection as `RasEnumConnections` lists it: its entry name (which Windows also
+/// gives its PPP interface as the alias) and whether its device type is `RASDT_PPPoE`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RasConnection {
+    pub entry: String,
+    pub pppoe: bool,
+}
+
+/// Whether a RAS device type (`RASCONN.szDeviceType`) is PPPoE.
+pub fn is_pppoe_device(device_type: &str) -> bool {
+    device_type.eq_ignore_ascii_case("PPPoE")
+}
+
+/// Whether an up PPP interface (`IF_TYPE_PPP`, 23) gets a per-LUID port-53 block. PPPoE
+/// dial-up carries its traffic over a physical NIC, so it is blocked; the built-in VPNs
+/// (PPTP, L2TP, SSTP, IKEv2) are PPP too and are other VPNs, so they keep their DNS. An
+/// interface is permitted only when its alias names a RAS connection that isn't PPPoE:
+/// when RAS can't be asked (`None`) or no connection matches, it is blocked (fail closed).
+pub fn blocked_ppp(if_type: u32, alias: &str, ras: Option<&[RasConnection]>) -> bool {
+    if if_type != IF_TYPE_PPP {
+        return false;
+    }
+    let Some(connections) = ras else {
+        return true;
+    };
+    !connections
+        .iter()
+        .any(|c| !c.pppoe && c.entry.to_lowercase() == alias.to_lowercase())
+}
+
 /// The strict DNS rules; dropping it removes them.
 pub struct StrictDns {
-    /// Boxed so the address handed to `NotifyIpInterfaceChange` stays put.
-    rules: Box<Mutex<Rules>>,
+    /// Boxed so the address handed to `NotifyIpInterfaceChange` stays put. `None` only
+    /// inside `Drop`.
+    rules: Option<Box<Mutex<Rules>>>,
     notify: HANDLE,
 }
 
@@ -112,94 +159,149 @@ impl std::fmt::Debug for StrictDns {
 }
 
 impl StrictDns {
+    fn rules(&self) -> &Mutex<Rules> {
+        self.rules.as_deref().expect("rules present until drop")
+    }
+
     /// The LUIDs that currently have a permit as virtual adapters (for tests).
     pub fn exempt_luids(&self) -> Vec<u64> {
-        lock(&self.rules).exempt.keys().copied().collect()
+        lock(self.rules()).exempt.keys().copied().collect()
+    }
+
+    /// The LUIDs of PPP interfaces that currently have a block (PPPoE).
+    pub fn ppp_blocked_luids(&self) -> Vec<u64> {
+        lock(self.rules()).ppp_blocked.keys().copied().collect()
     }
 }
 
 impl Drop for StrictDns {
     fn drop(&mut self) {
+        let Some(rules) = self.rules.take() else {
+            return;
+        };
+        let mut cancelled = true;
         if !self.notify.is_invalid() {
             // SAFETY: the handle came from NotifyIpInterfaceChange and is cancelled once;
             // the call waits for a running callback, so `rules` outlives every callback.
             let result = unsafe { CancelMibChangeNotify2(self.notify) };
             if result != NO_ERROR {
+                cancelled = false;
                 tracing::warn!(
-                    "cancelling the strict DNS interface notification: {}",
+                    "cancelling the strict DNS interface notification: {}; leaking its state",
                     io::Error::from_raw_os_error(result.0 as i32)
                 );
             }
         }
-        let engine = lock(&self.rules).engine;
+        let engine = lock(&rules).engine;
         // SAFETY: the handle came from FwpmEngineOpen0 and is closed once. Closing a
         // dynamic session deletes the sublayer and filters it added.
         let result = unsafe { FwpmEngineClose0(engine) };
         if result != 0 {
             tracing::warn!("closing the strict DNS session: {}", wfp_error(result));
         }
+        if !cancelled {
+            // A callback may still come: it must find the state alive (its WFP calls on the
+            // closed engine just fail).
+            Box::leak(rules);
+        }
     }
 }
 
-/// The engine and the permits for virtual adapters, by LUID (their filter IDs).
+/// Per-LUID filter IDs, one slot per layer in `LAYERS`; an empty slot is retried.
+type PerLuid = BTreeMap<u64, [Option<u64>; 2]>;
+
+/// The engine and the per-LUID filters: permits for virtual adapters, blocks for PPPoE.
 struct Rules {
     engine: HANDLE,
     our_luid: u64,
-    exempt: BTreeMap<u64, Vec<u64>>,
+    exempt: PerLuid,
+    ppp_blocked: PerLuid,
 }
 
 // SAFETY: see StrictDns.
 unsafe impl Send for Rules {}
 
+#[derive(Clone, Copy)]
+enum Kind {
+    PermitVirtual,
+    BlockPpp,
+}
+
 impl Rules {
-    /// Adds permits for virtual adapters of a blocked type that lack one and deletes the
-    /// permits of adapters that are gone or no longer exempt.
+    /// Brings the per-LUID filters in line with the adapters present now: adds what is
+    /// missing (including a layer that failed last time), deletes what is no longer
+    /// wanted.
     fn sync(&mut self) -> io::Result<()> {
-        let want = exempt_adapters(self.our_luid)?;
-        let engine = self.engine;
-        self.exempt.retain(|luid, ids| {
-            if want.contains(luid) {
-                return true;
+        let wanted = wanted(self.our_luid)?;
+        let exempt = reconcile(
+            self.engine,
+            &mut self.exempt,
+            &wanted.exempt,
+            Kind::PermitVirtual,
+        );
+        let ppp = reconcile(
+            self.engine,
+            &mut self.ppp_blocked,
+            &wanted.ppp_blocked,
+            Kind::BlockPpp,
+        );
+        exempt.and(ppp)
+    }
+}
+
+fn reconcile(engine: HANDLE, have: &mut PerLuid, want: &[u64], kind: Kind) -> io::Result<()> {
+    have.retain(|luid, ids| {
+        if want.contains(luid) {
+            return true;
+        }
+        for id in ids.iter().flatten() {
+            // SAFETY: the engine is open; the ID came from FwpmFilterAdd0 on it.
+            let result = unsafe { FwpmFilterDeleteById0(engine, *id) };
+            if result != 0 {
+                tracing::warn!("deleting strict DNS filter {id}: {}", wfp_error(result));
             }
-            for id in ids.iter() {
-                // SAFETY: the engine is open; the ID came from FwpmFilterAdd0 on it.
-                let result = unsafe { FwpmFilterDeleteById0(engine, *id) };
-                if result != 0 {
-                    tracing::warn!("deleting strict DNS permit {id}: {}", wfp_error(result));
-                }
-            }
-            false
-        });
-        for luid in want {
-            if self.exempt.contains_key(&luid) {
+        }
+        false
+    });
+    let mut first = Ok(());
+    for &luid in want {
+        let slots = have.entry(luid).or_insert([None, None]);
+        for (slot, layer) in slots.iter_mut().zip(LAYERS) {
+            if slot.is_some() {
                 continue;
             }
-            let mut ids = Vec::new();
             let mut value = luid;
-            let mut condition = [luid_condition(&mut value)];
-            let mut result = Ok(());
-            for layer in LAYERS {
-                match add_filter(
+            let added = match kind {
+                Kind::PermitVirtual => add_filter(
                     engine,
                     layer,
                     "CellGlide strict DNS: permit a virtual adapter",
                     WEIGHT_VIRTUAL,
-                    &mut condition,
+                    &mut [luid_condition(&mut value)],
                     FWP_ACTION_PERMIT,
                     FWPM_FILTER_FLAG_NONE,
-                ) {
-                    Ok(id) => ids.push(id),
-                    Err(error) => {
-                        result = Err(error);
-                        break;
+                ),
+                Kind::BlockPpp => add_filter(
+                    engine,
+                    layer,
+                    "CellGlide strict DNS: block port 53 on PPPoE",
+                    WEIGHT_PPP_BLOCK,
+                    &mut [luid_condition(&mut value), port_condition()],
+                    FWP_ACTION_BLOCK,
+                    FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                ),
+            };
+            match added {
+                Ok(id) => *slot = Some(id),
+                Err(error) => {
+                    if first.is_ok() {
+                        first = Err(error);
                     }
                 }
             }
-            self.exempt.insert(luid, ids);
-            result?;
         }
-        Ok(())
     }
+    first
 }
 
 fn lock(rules: &Mutex<Rules>) -> MutexGuard<'_, Rules> {
@@ -210,8 +312,9 @@ fn lock(rules: &Mutex<Rules>) -> MutexGuard<'_, Rules> {
 
 /// Opens a dynamic WFP session and, in one transaction, adds our sublayer and, on
 /// `ALE_AUTH_CONNECT_V4` and `_V6`: permit `IP_LOCAL_INTERFACE == our_luid`, permit
-/// loopback, permit each exempt (virtual) adapter's LUID, and block remote port 53 (any
-/// protocol) on the blocked interface types. Then follows adapters coming and going.
+/// loopback, permit each exempt (virtual) adapter's LUID, block remote port 53 (any
+/// protocol) on the blocked interface types and on each PPPoE interface's LUID. Then
+/// follows interfaces coming and going.
 pub fn start(our_luid: u64) -> io::Result<StrictDns> {
     let mut name = wide("CellGlide strict DNS");
     let session = FWPM_SESSION0 {
@@ -236,11 +339,12 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
     check(result, "FwpmEngineOpen0")?;
     // From here on an early return closes the engine, which also drops anything added.
     let mut strict = StrictDns {
-        rules: Box::new(Mutex::new(Rules {
+        rules: Some(Box::new(Mutex::new(Rules {
             engine,
             our_luid,
             exempt: BTreeMap::new(),
-        })),
+            ppp_blocked: BTreeMap::new(),
+        }))),
         notify: HANDLE::default(),
     };
     // SAFETY: the engine handle is open.
@@ -248,7 +352,7 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
         unsafe { FwpmTransactionBegin0(engine, 0) },
         "FwpmTransactionBegin0",
     )?;
-    let added = add_rules(engine, our_luid).and_then(|()| lock(&strict.rules).sync());
+    let added = add_rules(engine, our_luid).and_then(|()| lock(strict.rules()).sync());
     if let Err(error) = added {
         // SAFETY: as above, inside the transaction we began.
         let _ = unsafe { FwpmTransactionAbort0(engine) };
@@ -260,10 +364,11 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
         "FwpmTransactionCommit0",
     )?;
 
-    let context: *const Mutex<Rules> = &raw const *strict.rules;
+    let context: *const Mutex<Rules> = strict.rules();
     let mut notify = HANDLE::default();
     // SAFETY: the context points into the box, which outlives the registration (Drop
-    // cancels it first); the callback matches PIPINTERFACE_CHANGE_CALLBACK.
+    // cancels it first, or leaks the box); the callback matches
+    // PIPINTERFACE_CHANGE_CALLBACK.
     let result = unsafe {
         NotifyIpInterfaceChange(
             AF_UNSPEC,
@@ -277,34 +382,38 @@ pub fn start(our_luid: u64) -> io::Result<StrictDns> {
         strict.notify = notify;
     } else {
         tracing::warn!(
-            "strict DNS won't follow new virtual adapters (NotifyIpInterfaceChange: {})",
+            "strict DNS won't follow new adapters (NotifyIpInterfaceChange: {})",
             io::Error::from_raw_os_error(result.0 as i32)
         );
     }
-    // An adapter that came between the first sync and the registration.
-    if let Err(error) = lock(&strict.rules).sync() {
-        tracing::warn!("strict DNS: updating the virtual adapter permits: {error}");
+    // An interface that came between the first sync and the registration.
+    if let Err(error) = lock(strict.rules()).sync() {
+        tracing::warn!("strict DNS: updating the per-interface filters: {error}");
     }
     Ok(strict)
 }
 
+/// Any change (an interface added or deleted, or its parameters changed, as when a PPP
+/// link comes up) re-syncs; a sync with nothing to do only enumerates.
 unsafe extern "system" fn on_interface_change(
     context: *const c_void,
     _row: *const MIB_IPINTERFACE_ROW,
-    kind: MIB_NOTIFICATION_TYPE,
+    _kind: MIB_NOTIFICATION_TYPE,
 ) {
-    if kind != MibAddInstance && kind != MibDeleteInstance {
-        return;
-    }
     // SAFETY: the context is the boxed mutex, alive until the registration is cancelled.
     let rules = unsafe { &*context.cast::<Mutex<Rules>>() };
     if let Err(error) = lock(rules).sync() {
-        tracing::warn!("strict DNS: updating the virtual adapter permits: {error}");
+        tracing::warn!("strict DNS: updating the per-interface filters: {error}");
     }
 }
 
-/// The LUIDs of exempt adapters, ours aside.
-fn exempt_adapters(our_luid: u64) -> io::Result<Vec<u64>> {
+/// The LUIDs that should have per-LUID filters now.
+struct Wanted {
+    exempt: Vec<u64>,
+    ppp_blocked: Vec<u64>,
+}
+
+fn wanted(our_luid: u64) -> io::Result<Wanted> {
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     // SAFETY: on success the function stores a table we free with FreeMibTable.
     let result = unsafe { GetIfTable2(&raw mut table) };
@@ -326,7 +435,9 @@ fn exempt_adapters(our_luid: u64) -> io::Result<Vec<u64>> {
     let rows: &[MIB_IF_ROW2] = unsafe {
         std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
     };
-    Ok(rows
+    // SAFETY: NET_LUID_LH is a union over one u64.
+    let luid = |row: &MIB_IF_ROW2| unsafe { row.InterfaceLuid.Value };
+    let exempt = rows
         .iter()
         .filter(|row| {
             let flags = row.InterfaceAndOperStatusFlags._bitfield;
@@ -337,10 +448,82 @@ fn exempt_adapters(our_luid: u64) -> io::Result<Vec<u64>> {
                 row.PhysicalMediumType,
             )
         })
-        // SAFETY: NET_LUID_LH is a union over one u64.
-        .map(|row| unsafe { row.InterfaceLuid.Value })
-        .filter(|luid| *luid != our_luid)
-        .collect())
+        .map(luid)
+        .filter(|l| *l != our_luid)
+        .collect();
+    // Only PPP links that are up: the WAN miniports underneath are type 23 too, but never
+    // up and never carry IP. RAS is asked only when there is one.
+    let ppp: Vec<&MIB_IF_ROW2> = rows
+        .iter()
+        .filter(|row| row.Type == IF_TYPE_PPP && row.OperStatus == IfOperStatusUp)
+        .collect();
+    let mut ppp_blocked = Vec::new();
+    if !ppp.is_empty() {
+        let ras = match ras_connections() {
+            Ok(connections) => Some(connections),
+            Err(error) => {
+                tracing::warn!(
+                    "strict DNS: can't list RAS connections ({error}); blocking every PPP link"
+                );
+                None
+            }
+        };
+        for row in ppp {
+            let alias = String::from_utf16_lossy(until_nul(&row.Alias));
+            if blocked_ppp(row.Type, &alias, ras.as_deref()) {
+                ppp_blocked.push(luid(row));
+            }
+        }
+    }
+    Ok(Wanted {
+        exempt,
+        ppp_blocked,
+    })
+}
+
+/// `RasEnumConnectionsW`: the active RAS connections.
+fn ras_connections() -> io::Result<Vec<RasConnection>> {
+    const ERROR_BUFFER_TOO_SMALL: u32 = 603;
+    let size = u32::try_from(std::mem::size_of::<RASCONNW>()).expect("RASCONNW fits u32");
+    let mut capacity = 4usize;
+    for _ in 0..4 {
+        let mut buffer: Vec<RASCONNW> = (0..capacity)
+            .map(|_| RASCONNW {
+                dwSize: size,
+                ..Default::default()
+            })
+            .collect();
+        let mut bytes = size * u32::try_from(capacity).expect("small capacity");
+        let mut count = 0u32;
+        // SAFETY: the buffer holds `bytes` bytes of RASCONNW, each with dwSize set.
+        let result = unsafe {
+            RasEnumConnectionsW(Some(buffer.as_mut_ptr()), &raw mut bytes, &raw mut count)
+        };
+        if result == ERROR_BUFFER_TOO_SMALL {
+            capacity = (bytes / size) as usize + 1;
+            continue;
+        }
+        if result != 0 {
+            return Err(io::Error::other(format!(
+                "RasEnumConnectionsW: error {result}"
+            )));
+        }
+        buffer.truncate(count as usize);
+        return Ok(buffer
+            .iter()
+            .map(|c| RasConnection {
+                entry: String::from_utf16_lossy(until_nul(&c.szEntryName)),
+                pppoe: is_pppoe_device(&String::from_utf16_lossy(until_nul(&c.szDeviceType))),
+            })
+            .collect());
+    }
+    Err(io::Error::other(
+        "RasEnumConnectionsW: the list kept growing",
+    ))
+}
+
+fn until_nul(s: &[u16]) -> &[u16] {
+    &s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]
 }
 
 fn luid_condition(luid: &mut u64) -> FWPM_FILTER_CONDITION0 {
@@ -350,6 +533,17 @@ fn luid_condition(luid: &mut u64) -> FWPM_FILTER_CONDITION0 {
         conditionValue: FWP_CONDITION_VALUE0 {
             r#type: FWP_UINT64,
             Anonymous: FWP_CONDITION_VALUE0_0 { uint64: luid },
+        },
+    }
+}
+
+fn port_condition() -> FWPM_FILTER_CONDITION0 {
+    FWPM_FILTER_CONDITION0 {
+        fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+        matchType: FWP_MATCH_EQUAL,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_UINT16,
+            Anonymous: FWP_CONDITION_VALUE0_0 { uint16: DNS_PORT },
         },
     }
 }
@@ -385,14 +579,7 @@ fn add_rules(engine: HANDLE, our_luid: u64) -> io::Result<()> {
     }];
     // Conditions on the same field are ORed, different fields ANDed: port 53 and one of
     // the blocked interface types.
-    let mut physical_dns = vec![FWPM_FILTER_CONDITION0 {
-        fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
-        matchType: FWP_MATCH_EQUAL,
-        conditionValue: FWP_CONDITION_VALUE0 {
-            r#type: FWP_UINT16,
-            Anonymous: FWP_CONDITION_VALUE0_0 { uint16: DNS_PORT },
-        },
-    }];
+    let mut physical_dns = vec![port_condition()];
     physical_dns.extend(BLOCKED_TYPES.map(|if_type| FWPM_FILTER_CONDITION0 {
         fieldKey: FWPM_CONDITION_INTERFACE_TYPE,
         matchType: FWP_MATCH_EQUAL,
@@ -531,5 +718,56 @@ mod tests {
         // A lightweight filter interface stacked on Wi-Fi.
         assert!(!exempt(71, false, true, NdisPhysicalMediumNative802_11));
         assert_eq!(BLOCKED_TYPES, [6, 71, 243, 244]);
+    }
+
+    fn ras(entry: &str, pppoe: bool) -> RasConnection {
+        RasConnection {
+            entry: entry.to_owned(),
+            pppoe,
+        }
+    }
+
+    #[test]
+    fn pppoe_device_type() {
+        assert!(is_pppoe_device("PPPoE"));
+        assert!(is_pppoe_device("pppoe"));
+        for vpn in ["vpn", "modem", "isdn", ""] {
+            assert!(!is_pppoe_device(vpn), "{vpn}");
+        }
+    }
+
+    #[test]
+    fn pppoe_links_are_blocked() {
+        let connections = [ras("Broadband Connection", true), ras("Work VPN", false)];
+        assert!(blocked_ppp(23, "Broadband Connection", Some(&connections)));
+        // Entry names with non-ASCII letters.
+        let connections = [ras("宽带连接", true)];
+        assert!(blocked_ppp(23, "宽带连接", Some(&connections)));
+    }
+
+    #[test]
+    fn ppp_vpns_keep_their_dns() {
+        let connections = [ras("Broadband Connection", true), ras("Work VPN", false)];
+        assert!(!blocked_ppp(23, "Work VPN", Some(&connections)));
+        assert!(!blocked_ppp(23, "work vpn", Some(&connections)));
+    }
+
+    #[test]
+    fn unknown_ppp_links_fail_closed() {
+        // No RAS connection by that name, or RAS couldn't be asked.
+        assert!(blocked_ppp(23, "Mystery", Some(&[ras("Work VPN", false)])));
+        assert!(blocked_ppp(23, "Mystery", Some(&[])));
+        assert!(blocked_ppp(23, "Work VPN", None));
+    }
+
+    #[test]
+    fn only_ppp_interfaces_get_a_ppp_block() {
+        assert!(!blocked_ppp(53, "Broadband Connection", None));
+        assert!(!blocked_ppp(
+            6,
+            "Broadband Connection",
+            Some(&[ras("Broadband Connection", true)])
+        ));
+        assert_eq!(IF_TYPE_PPP, 23);
     }
 }

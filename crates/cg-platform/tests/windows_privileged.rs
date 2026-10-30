@@ -888,6 +888,27 @@ fn strict_dns_leaves_other_vpns_port_53_alone() {
         !strict.exempt_luids().contains(&adapter.luid()),
         "cellglide0 listed as a virtual adapter"
     );
+    // The default-route NIC is not exempt; Windows always has some virtual adapter of a
+    // blocked type (WAN miniports), which is.
+    let physical_luid: u64 = ps(&format!(
+        "$i = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object InterfaceAlias -ne {INTERFACE_NAME} | Sort-Object RouteMetric | Select-Object -First 1).ifIndex; (Get-NetAdapter -InterfaceIndex $i).NetLuid"
+    ))
+    .parse()
+    .unwrap();
+    let exempt = strict.exempt_luids();
+    assert!(
+        !exempt.contains(&physical_luid),
+        "default-route NIC {physical_luid} exempt: {exempt:?}"
+    );
+    assert!(!exempt.is_empty(), "no virtual adapter exempt");
+    assert!(
+        !exempt.contains(&other.luid()),
+        "a wintun adapter needs no permit"
+    );
+    eprintln!(
+        "exempt {exempt:?}; PPP blocked {:?}",
+        strict.ppp_blocked_luids()
+    );
     // The physical adapter's DNS server: still blocked.
     assert!(!answered(dns_v4), "{dns_v4} answered with strict DNS on");
     // Port 53 through the other VPN's adapter (wintun, type 53) leaves the machine: the
