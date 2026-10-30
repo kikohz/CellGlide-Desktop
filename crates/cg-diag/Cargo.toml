@@ -26,8 +26,5 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_System_Com", "Win32_UI_Shell"] }
-
 [dev-dependencies]
 tempfile.workspace = true

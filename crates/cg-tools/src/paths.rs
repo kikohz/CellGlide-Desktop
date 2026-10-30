@@ -34,29 +34,43 @@ pub fn state_home() -> PathBuf {
 /// the shell doesn't answer; `.\CellGlide` when neither is there.
 #[cfg(windows)]
 pub fn app_dir() -> PathBuf {
-    local_app_data()
+    known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)
         .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("CellGlide")
 }
 
+/// The known folders other crates ask for, so they need no `windows` dependency of their own.
 #[cfg(windows)]
-fn local_app_data() -> Option<PathBuf> {
+pub use windows::Win32::UI::Shell::FOLDERID_Downloads;
+
+/// A shell known folder (`FOLDERID_*`) where it really is, also when the user or OneDrive moved
+/// it; `None` when the shell doesn't answer (the folder is missing, for one). The path is
+/// converted without loss, whatever UTF-16 it holds.
+#[cfg(windows)]
+pub fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
     // SAFETY: on success the path is CoTaskMemAlloc'd and freed below.
-    let path =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
-    // SAFETY: a NUL-terminated string from the call above.
-    let text = unsafe { path.to_string() };
+    let path = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.ok()?;
+    // SAFETY: a NUL-terminated string from the call above, read before it is freed.
+    let text = std::ffi::OsString::from_wide(unsafe { path.as_wide() });
     // SAFETY: freed exactly once.
     unsafe { CoTaskMemFree(Some(path.0.cast())) };
-    text.ok().filter(|text| !text.is_empty()).map(PathBuf::from)
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+
+    #[test]
+    fn a_missing_known_folder_is_none() {
+        // A GUID no folder has.
+        let unknown = windows::core::GUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        assert_eq!(known_folder(&unknown), None);
+    }
 
     #[test]
     fn app_dir_is_under_local_app_data() {

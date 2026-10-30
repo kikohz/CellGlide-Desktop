@@ -23,12 +23,20 @@ fn failed(error: io::Error) -> String {
 /// Creates `path`, which must not exist yet, and writes `json` into it: readable only by the
 /// user on Unix, the folder's own permissions on Windows. A failed write removes the file.
 fn create(path: &Path, json: &str) -> io::Result<()> {
+    create_with(path, |file| file.write_all(json.as_bytes()))
+}
+
+/// [`create`] with the writing passed in, so a test can make it fail half way.
+fn create_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(path)?;
-    let written = file.write_all(json.as_bytes());
+    let written = write(&mut file);
     if written.is_err() {
         // Never leave half a bundle behind.
         drop(file);
@@ -89,15 +97,7 @@ pub fn default_dir() -> Option<PathBuf> {
 /// OneDrive moved it.
 #[cfg(windows)]
 pub fn known_downloads() -> Option<PathBuf> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
-    // SAFETY: on success the path is CoTaskMemAlloc'd and freed below.
-    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None) }.ok()?;
-    // SAFETY: a NUL-terminated string from the call above.
-    let text = unsafe { path.to_string() };
-    // SAFETY: freed exactly once.
-    unsafe { CoTaskMemFree(Some(path.0.cast())) };
-    text.ok().filter(|text| !text.is_empty()).map(PathBuf::from)
+    cg_tools::paths::known_folder(&cg_tools::paths::FOLDERID_Downloads)
 }
 
 /// Where the user's files are; a window is given one, so its tests never write into the real
@@ -227,6 +227,20 @@ mod tests {
         std::fs::write(&not_a_dir, "x").unwrap();
         assert!(save_bundle(&not_a_dir, noon(), &TimeZone::UTC, "{}").is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_write_that_fails_half_way_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name(noon(), &TimeZone::UTC));
+        let error = create_with(&path, |file| {
+            file.write_all(b"{\"half\":")?;
+            Err(io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "disk full");
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
