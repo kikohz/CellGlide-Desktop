@@ -145,12 +145,19 @@ mod tests {
 
     #[cfg(windows)]
     fn random_pipe_name() -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        // The clock alone can repeat across tests running in parallel (coarse ticks).
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!(r"\\.\pipe\cellglide-test-{}-{nanos}", std::process::id())
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        format!(
+            r"\\.\pipe\cellglide-test-{}-{nanos}-{n}",
+            std::process::id()
+        )
     }
 
     #[cfg(windows)]
