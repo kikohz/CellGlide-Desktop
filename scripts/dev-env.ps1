@@ -1,5 +1,5 @@
-# ç”¨æ³•ï¼š. scripts\dev-env.ps1
-# æŠŠ cargo å’Œ VS BuildTools è‡ªå¸¦çš„ clangï¼ˆring ç¼–è¯‘ ARM64 éœ€è¦ï¼‰åŠ åˆ°å½“å‰ä¼šè¯ PATH å‰é¢ã€‚
+# Usage: . scripts\dev-env.ps1
+# Prepends cargo and the VS BuildTools clang (needed by ring for ARM64) to PATH for this session.
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $llvmBin = $null
