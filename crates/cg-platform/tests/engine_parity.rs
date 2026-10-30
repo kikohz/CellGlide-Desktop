@@ -28,13 +28,9 @@ enum Kind {
 /// An engine with its client on the other end of the packet link.
 struct Engine {
     driver: PacketDriver,
-    _backend: Backend,
-}
-
-enum Backend {
-    Hev(HevRun),
-    /// Stops the engine when dropped.
-    Netstack(DropGuard),
+    // Held for their drops: hev stops, or cg-netstack is cancelled.
+    _hev: Option<HevRun>,
+    _netstack: Option<DropGuard>,
 }
 
 /// A running hev, stopped on drop (also when a test fails), before its fd is closed
@@ -57,7 +53,7 @@ impl Drop for HevRun {
 
 async fn start(kind: Kind, fake: &FakeSocks) -> Engine {
     let (ours, theirs) = PacketChannel::pair(256);
-    let backend = match kind {
+    let (hev, netstack) = match kind {
         Kind::Netstack => {
             let config = Config {
                 mtu: u16::try_from(ENGINE.mtu).unwrap(),
@@ -67,13 +63,14 @@ async fn start(kind: Kind, fake: &FakeSocks) -> Engine {
             };
             let stop = CancellationToken::new();
             tokio::spawn(run(theirs, config, stop.clone()));
-            Backend::Netstack(stop.drop_guard())
+            (None, Some(stop.drop_guard()))
         }
-        Kind::Hev => Backend::Hev(start_hev(theirs, fake.addr().port()).await),
+        Kind::Hev => (Some(start_hev(theirs, fake.addr().port()).await), None),
     };
     Engine {
         driver: PacketDriver::new(ours),
-        _backend: backend,
+        _hev: hev,
+        _netstack: netstack,
     }
 }
 
