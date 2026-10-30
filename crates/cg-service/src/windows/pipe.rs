@@ -16,9 +16,11 @@ use windows::core::HSTRING;
 pub struct PipeListener {
     name: String,
     sddl: String,
-    /// The instance the next client connects to; `None` after creating one failed, retried
-    /// on the next accept.
+    /// The instance the next client connects to. `Some` whenever no accept is running, so
+    /// the name never goes without an instance of ours.
     next: Option<NamedPipeServer>,
+    #[cfg(test)]
+    pub(crate) faults: Faults,
 }
 
 /// Creates the first instance of the pipe. If the name is already taken (another program
@@ -43,6 +45,8 @@ pub(crate) fn bind_with(name: &str, sddl: &str) -> io::Result<PipeListener> {
         name: name.to_string(),
         sddl: sddl.to_string(),
         next: Some(first),
+        #[cfg(test)]
+        faults: Faults::default(),
     })
 }
 
@@ -81,16 +85,24 @@ impl Listener for PipeListener {
 
     fn accept(&mut self) -> BoxFuture<'_, io::Result<(NamedPipeServer, Peer)>> {
         Box::pin(async move {
+            // At least one of our instances exists at every moment: in a gap, anyone could
+            // create the name with FILE_FLAG_FIRST_PIPE_INSTANCE and lock the service out.
             let pipe = match self.next.take() {
                 Some(pipe) => pipe,
-                None => create(&self.name, &self.sddl, false)?,
+                None => self.create()?,
             };
-            // A failed connect leaves a broken instance: it is dropped, a new one made next time.
-            pipe.connect().await?;
-            // The next client finds an instance waiting before this one is handed over.
-            match create(&self.name, &self.sddl, false) {
+            if let Err(error) = self.connect(&pipe).await {
+                self.keep_listening(pipe);
+                return Err(error);
+            }
+            // The next client finds an instance waiting before this one is handed over. If
+            // there can't be one, this client is let go and its instance listens instead.
+            match self.create() {
                 Ok(next) => self.next = Some(next),
-                Err(error) => tracing::warn!(%error, "creating the next control pipe instance"),
+                Err(error) => {
+                    self.keep_listening(pipe);
+                    return Err(error);
+                }
             }
             let peer = match auth::identify(&pipe) {
                 Ok(id) => Peer {
@@ -108,6 +120,47 @@ impl Listener for PipeListener {
             Ok((pipe, peer))
         })
     }
+}
+
+impl PipeListener {
+    /// Makes `pipe` (connected, or failed to connect) the instance the next client connects
+    /// to. If it can't be disconnected for reuse, a fresh instance replaces it, created before
+    /// the old one closes; failing that, the old one stays so the name remains ours.
+    fn keep_listening(&mut self, pipe: NamedPipeServer) {
+        if pipe.disconnect().is_ok() {
+            self.next = Some(pipe);
+            return;
+        }
+        self.next = Some(self.create().unwrap_or(pipe));
+    }
+
+    /// Another instance of the pipe.
+    fn create(&mut self) -> io::Result<NamedPipeServer> {
+        #[cfg(test)]
+        if self.faults.creates > 0 {
+            self.faults.creates -= 1;
+            return Err(io::Error::other("injected create failure"));
+        }
+        create(&self.name, &self.sddl, false)
+    }
+
+    /// Waits for a client on `pipe`.
+    async fn connect(&mut self, pipe: &NamedPipeServer) -> io::Result<()> {
+        #[cfg(test)]
+        if self.faults.connects > 0 {
+            self.faults.connects -= 1;
+            return Err(io::Error::other("injected connect failure"));
+        }
+        pipe.connect().await
+    }
+}
+
+/// Failures the tests inject: the next `creates` instances and `connects` connections fail.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Faults {
+    pub creates: u32,
+    pub connects: u32,
 }
 
 /// Enables SeRestorePrivilege in this process's token, which setting SYSTEM as the pipe's
@@ -154,27 +207,37 @@ pub fn enable_restore_privilege() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::server::test_support::spawn_server;
     use crate::windows::auth::testing;
     use cg_ipc::{Endpoint, Request, Response, client};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
     use tokio::io::{AsyncWriteExt, BufReader};
     use windows::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
 
-    fn random_pipe_name() -> String {
+    pub(crate) fn random_pipe_name() -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        // The clock alone can repeat across tests running in parallel (coarse ticks).
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!(r"\\.\pipe\cellglide-test-{}-{nanos}", std::process::id())
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        format!(
+            r"\\.\pipe\cellglide-test-{}-{nanos}-{n}",
+            std::process::id()
+        )
     }
 
     /// The service's descriptor with the interactive users' ACE granted to the test user
     /// instead (this shell isn't an interactive logon), and no owner (setting SYSTEM as owner
     /// takes SeRestorePrivilege; see `bind_uses_the_service_descriptor`).
-    fn test_sddl() -> String {
+    pub(crate) fn test_sddl() -> String {
         let sddl = cg_ipc::PIPE_SDDL.replacen("O:SY", "", 1);
         assert!(sddl.contains(";;;IU)"), "{sddl}");
         sddl.replace(";;;IU)", &format!(";;;{})", testing::my_sid()))
@@ -271,6 +334,156 @@ mod tests {
             planted.err().and_then(|e| e.raw_os_error()),
             Some(ERROR_ACCESS_DENIED.0 as i32)
         );
+    }
+
+    /// Clients that open the pipe and drop it at once, in tight loops on two threads, and a
+    /// squatter trying all along to create the name as its first instance.
+    struct Flood {
+        stop: Arc<AtomicBool>,
+        droppers: Vec<std::thread::JoinHandle<u32>>,
+        squatter: tokio::task::JoinHandle<u32>,
+        squatted: Arc<AtomicU32>,
+    }
+
+    /// What a flood did: connections dropped, squatting attempts, and how many succeeded.
+    struct Flooded {
+        dropped: u32,
+        tries: u32,
+        squatted: u32,
+    }
+
+    impl Flood {
+        fn start(name: &str) -> Flood {
+            let stop = Arc::new(AtomicBool::new(false));
+            let droppers = (0..2)
+                .map(|_| {
+                    let (name, stop) = (name.to_string(), stop.clone());
+                    std::thread::spawn(move || {
+                        let mut opened = 0u32;
+                        while !stop.load(Ordering::Relaxed) {
+                            let open = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&name);
+                            opened += u32::from(open.is_ok());
+                        }
+                        opened
+                    })
+                })
+                .collect();
+            let squatted = Arc::new(AtomicU32::new(0));
+            let squatter = tokio::task::spawn_blocking({
+                let (name, stop, squatted) = (name.to_string(), stop.clone(), squatted.clone());
+                move || {
+                    let mut tries = 0u32;
+                    while !stop.load(Ordering::Relaxed) {
+                        let planted = ServerOptions::new().first_pipe_instance(true).create(&name);
+                        squatted.fetch_add(u32::from(planted.is_ok()), Ordering::Relaxed);
+                        tries += 1;
+                    }
+                    tries
+                }
+            });
+            Flood {
+                stop,
+                droppers,
+                squatter,
+                squatted,
+            }
+        }
+
+        async fn finish(mut self) -> Flooded {
+            self.stop.store(true, Ordering::Relaxed);
+            let tries = (&mut self.squatter).await.unwrap();
+            let dropped = std::mem::take(&mut self.droppers)
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .sum();
+            Flooded {
+                dropped,
+                tries,
+                squatted: self.squatted.load(Ordering::Relaxed),
+            }
+        }
+    }
+
+    impl Drop for Flood {
+        /// Stops the loops however a test ends, so a failure can't hang it.
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Hello, answered three times in a row.
+    async fn served_at_once(endpoint: &Endpoint) {
+        for _ in 0..3 {
+            let reply = client::request(endpoint, &Request::Hello).await;
+            assert!(matches!(reply, Ok(Response::Hello { .. })), "{reply:?}");
+        }
+    }
+
+    /// Clients opening and dropping the pipe in a tight loop never leave the name without
+    /// an instance of ours: a squatter's first instance is never created, and a real client
+    /// never finds the name missing or someone else's. The flood can keep every instance
+    /// busy past a client's one-second patience (first come, first served; not this bug),
+    /// so ERROR_PIPE_BUSY is the one failure allowed; once the flood stops, it is served.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clients_that_drop_at_once_never_free_the_name() {
+        let name = random_pipe_name();
+        let listener = bind_with(&name, &test_sddl()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _mux = spawn_server(dir.path(), listener).await;
+        let flood = Flood::start(&name);
+
+        let endpoint = Endpoint::Pipe(name.clone());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut served, mut busy) = (0u32, 0u32);
+        while Instant::now() < deadline {
+            let reply = tokio::time::timeout(
+                Duration::from_secs(5),
+                client::request(&endpoint, &Request::Hello),
+            )
+            .await
+            .expect("a real client hung");
+            match reply {
+                Ok(Response::Hello { .. }) => served += 1,
+                Err(cg_ipc::client::ClientError::Io(e))
+                    if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) =>
+                {
+                    busy += 1
+                }
+                other => panic!("a real client failed after {served} served: {other:?}"),
+            }
+        }
+        let flooded = flood.finish().await;
+        assert!(served + busy > 0);
+        assert!(flooded.dropped > 100, "dropped {}", flooded.dropped);
+        assert!(flooded.tries > 100, "tried {}", flooded.tries);
+        assert_eq!(flooded.squatted, 0, "the name was free");
+        served_at_once(&endpoint).await;
+    }
+
+    /// When connecting fails, or creating the next instance does, the instance in hand
+    /// keeps listening (a connected client is let go rather than handed over with no
+    /// instance behind it), so the name is never free for a squatter, and the service
+    /// serves again once the failures stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failures_never_free_the_name() {
+        let name = random_pipe_name();
+        let mut listener = bind_with(&name, &test_sddl()).unwrap();
+        listener.faults = Faults {
+            creates: 20,
+            connects: 20,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let _mux = spawn_server(dir.path(), listener).await;
+        let flood = Flood::start(&name);
+        // serve backs off 100 ms after each failure: 40 of them take about 4 s.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let flooded = flood.finish().await;
+        assert!(flooded.tries > 100, "tried {}", flooded.tries);
+        assert_eq!(flooded.squatted, 0, "the name was free");
+        served_at_once(&Endpoint::Pipe(name)).await;
     }
 
     #[tokio::test]
