@@ -11,7 +11,7 @@
 | clang | 19.1.5（VS 2022 BuildTools 的 Clang 组件，`VC\Tools\Llvm\x64\bin`） |
 | MSVC | 14.44.35207 |
 | .NET SDK | 10.0.403 |
-| gh | 未安装（GitHub 登录由用户处理，见下） |
+| gh | 2.103.3（`C:\Program Files\GitHub CLI\gh.exe`），已登录 kikohz |
 
 开发环境：每个新 PowerShell 会话先运行 `. scripts\dev-env.ps1`（把 cargo 和 clang 加到 PATH）。
 clang 来自 `setup.exe modify --add Microsoft.VisualStudio.Component.VC.Llvm.Clang`；ring 的构建脚本编译 ARM64 目标时需要它。
@@ -40,4 +40,4 @@ cg-service 的测试编译失败同样来自 fake_mux.rs 的前两项（经 cg-c
 
 ### GitHub
 
-`gh` 未安装，`gh auth status` 不可用。需要用户运行 `winget install GitHub.cli`、`gh auth login`、`gh auth setup-git`，之后才能推送 `windows` 分支和看 CI。
+`gh` 已安装（2.103.3，`C:\Program Files\GitHub CLI\gh.exe`），`gh auth status` 显示已登录 github.com 账号 kikohz（https，scopes: gist、read:org、repo）。`gh auth setup-git` 已运行，`git push origin windows` 可用。（本会话的 PATH 过期曾导致误判未安装。）

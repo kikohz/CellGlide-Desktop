@@ -1,5 +1,5 @@
-# 用法：. scripts\dev-env.ps1
-# 把 cargo 和 VS BuildTools 自带的 clang（ring 编译 ARM64 需要）加到当前会话 PATH 前面。
+# ç”¨æ³•ï¼š. scripts\dev-env.ps1
+# æŠŠ cargo å’Œ VS BuildTools è‡ªå¸¦çš„ clangï¼ˆring ç¼–è¯‘ ARM64 éœ€è¦ï¼‰åŠ åˆ°å½“å‰ä¼šè¯ PATH å‰é¢ã€‚
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $llvmBin = $null
@@ -10,4 +10,6 @@ if (Test-Path $vswhere) {
 $dirs = @($cargoBin)
 if ($llvmBin -and (Test-Path (Join-Path $llvmBin 'clang.exe'))) { $dirs += $llvmBin }
 else { Write-Warning 'clang.exe not found; install VS component Microsoft.VisualStudio.Component.VC.Llvm.Clang (ARM64 builds need it)' }
-$env:PATH = ($dirs -join ';') + ';' + $env:PATH
+$have = $env:PATH -split ';'
+$new = $dirs | Where-Object { $have -notcontains $_ }
+if ($new) { $env:PATH = ($new -join ';') + ';' + $env:PATH }
