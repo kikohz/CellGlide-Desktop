@@ -735,6 +735,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "webpki-roots",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
-//! Connections to the speed test server, held to one interface with SO_BINDTODEVICE so the
-//! test never changes a route, and the hand-written HTTP/1.1 the Mac speaks to Cloudflare
+//! Connections to the speed test server, held to one interface with SO_BINDTODEVICE (Linux)
+//! or IP_UNICAST_IF (Windows) so the test never changes a route, and the hand-written HTTP/1.1 the Mac speaks to Cloudflare
 //! (SpeedTransport.swift): same headers, same refusal and length checks.
 
 use crate::net;
@@ -255,13 +255,18 @@ fn bound_socket(route: &Route, address: SocketAddr) -> Result<tokio::net::TcpSoc
     )?;
     socket.set_nonblocking(true)?;
     if let Some(device) = route.device() {
-        bind_device(&socket, route, device)?;
+        bind_device(&socket, route, device, address)?;
     }
     Ok(tokio::net::TcpSocket::from_std_stream(socket.into()))
 }
 
 #[cfg(target_os = "linux")]
-fn bind_device(socket: &socket2::Socket, route: &Route, device: &str) -> Result<(), SpeedError> {
+fn bind_device(
+    socket: &socket2::Socket,
+    route: &Route,
+    device: &str,
+    _address: SocketAddr,
+) -> Result<(), SpeedError> {
     socket
         .bind_device(Some(device.as_bytes()))
         .map_err(|e| match e.raw_os_error() {
@@ -270,14 +275,66 @@ fn bind_device(socket: &socket2::Socket, route: &Route, device: &str) -> Result<
         })
 }
 
-/// SO_BINDTODEVICE is Linux's; elsewhere a bound route can't be honoured, so it fails rather
-/// than measure an unbound socket.
-#[cfg(not(target_os = "linux"))]
-fn bind_device(_socket: &socket2::Socket, _route: &Route, device: &str) -> Result<(), SpeedError> {
+/// Windows: `IP_UNICAST_IF` (ifIndex in network byte order) or `IPV6_UNICAST_IF` (host byte
+/// order) on the interface whose alias is `device` ("cellglide0", "Wi-Fi"). W0 measured that
+/// this sends the connection out that interface past cellglide0's /1 routes.
+#[cfg(windows)]
+fn bind_device(
+    socket: &socket2::Socket,
+    route: &Route,
+    device: &str,
+    address: SocketAddr,
+) -> Result<(), SpeedError> {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex,
+    };
+    use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    use windows::Win32::Networking::WinSock::{
+        IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SOCKET, WSAGetLastError,
+        setsockopt,
+    };
+    use windows::core::PCWSTR;
+
+    let alias: Vec<u16> = device.encode_utf16().chain([0]).collect();
+    let mut luid = NET_LUID_LH::default();
+    let mut index = 0u32;
+    // SAFETY: `alias` is NUL-terminated and outlives the calls; the out pointers are valid.
+    let found = unsafe {
+        ConvertInterfaceAliasToLuid(PCWSTR(alias.as_ptr()), &mut luid).is_ok()
+            && ConvertInterfaceLuidToIndex(&luid, &mut index).is_ok()
+    };
+    if !found || index == 0 {
+        return Err(missing(route, device));
+    }
+    let (level, name, value) = if address.is_ipv6() {
+        (IPPROTO_IPV6.0, IPV6_UNICAST_IF, index)
+    } else {
+        (IPPROTO_IP.0, IP_UNICAST_IF, index.to_be())
+    };
+    let raw = SOCKET(socket.as_raw_socket() as usize);
+    // SAFETY: `raw` is the open socket `socket` owns; both options take a 4-byte DWORD.
+    if unsafe { setsockopt(raw, level, name, Some(&value.to_ne_bytes())) } != 0 {
+        // SAFETY: reads this thread's last Winsock error.
+        let code = unsafe { WSAGetLastError() };
+        return Err(io::Error::from_raw_os_error(code.0).into());
+    }
+    Ok(())
+}
+
+/// Elsewhere a bound route can't be honoured, so it fails rather than measure an unbound
+/// socket.
+#[cfg(not(any(target_os = "linux", windows)))]
+fn bind_device(
+    _socket: &socket2::Socket,
+    _route: &Route,
+    device: &str,
+    _address: SocketAddr,
+) -> Result<(), SpeedError> {
     Err(SpeedError::NoInterface(device.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn missing(route: &Route, device: &str) -> SpeedError {
     match route {
         Route::Phone => SpeedError::NotConnected,
@@ -439,7 +496,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[tokio::test]
     async fn missing_uplink_fails_without_falling_back() {
         let r = connect(&Route::Interface("cg-no-such0".into()), &local_server()).await;
@@ -457,7 +514,7 @@ pub(crate) mod tests {
         assert!(matches!(r, Err(SpeedError::NotConnected)), "{:?}", r.err());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     #[tokio::test]
     async fn bound_routes_fail_off_linux_instead_of_going_unbound() {
         let r = connect(&Route::Interface("en0".into()), &local_server()).await;
