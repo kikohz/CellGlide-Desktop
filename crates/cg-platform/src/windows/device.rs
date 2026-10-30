@@ -42,7 +42,8 @@ impl JoinHandles {
 
 /// Starts the two threads on `session` and returns the engine's end of the link. Both
 /// threads exit within a second of `stop` being cancelled, and on their own once the
-/// engine drops its end or the session fails (the adapter going away).
+/// engine drops its end or the session fails (the adapter going away). A failing
+/// session call cancels `stop`, so the other thread and the engine wind down too.
 pub fn bridge(
     session: Arc<Session>,
     stop: CancellationToken,
@@ -104,11 +105,13 @@ async fn receive_loop(
                         "waiting for wintun packets failed: {}",
                         io::Error::last_os_error()
                     );
+                    stop.cancel();
                     return;
                 }
             }
             Err(error) => {
                 tracing::debug!("wintun receive ended: {error}");
+                stop.cancel();
                 return;
             }
         }
@@ -134,6 +137,7 @@ async fn send_loop(
             let full = error.raw_os_error() == Some(ERROR_BUFFER_OVERFLOW.0 as i32);
             if !full && error.kind() != io::ErrorKind::InvalidInput {
                 tracing::debug!("wintun send ended: {error}");
+                stop.cancel();
                 return;
             }
         }

@@ -128,6 +128,11 @@ pub trait RunningTunnel: Send + 'static {
     fn dns_managed(&self) -> bool {
         true
     }
+    /// Whether port 53 is blocked off the tunnel interface while it runs (Windows'
+    /// strict DNS); false where the platform has no such rules.
+    fn strict_dns(&self) -> bool {
+        false
+    }
     /// Notices since the last call, oldest first.
     fn take_notices(&self) -> Vec<TunnelNotice> {
         Vec::new()

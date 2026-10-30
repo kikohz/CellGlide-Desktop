@@ -12,9 +12,9 @@ use cg_netstack::testkit::FakeSocks;
 use cg_platform::windows::ip::{self, Family};
 use cg_platform::windows::wintun::{Adapter, SESSION_CAPACITY, Wintun};
 use cg_platform::windows::{WindowsBackend, cleanup_leftovers_with};
-use cg_platform::windows::{device, dns};
+use cg_platform::windows::{device, dns, strict_dns};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -321,12 +321,14 @@ fn start_finish_stop_leaves_nothing() {
     let ipv6 = addresses.contains("fd6c:6779:6465::1/128");
     assert!(addresses.contains("198.18.0.1/32"), "{addresses}");
     assert!(our_routes().is_empty(), "routes before finish");
+    let (physical_v4, _) = physical_dns();
     assert_eq!(dns_servers("IPv4"), "");
 
     // finish: DNS, routes, engine. From here until stop this machine is off the internet.
     let started = Instant::now();
     tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
     assert!(tunnel.dns_managed());
+    assert!(tunnel.strict_dns());
     let mut expected = vec!["0.0.0.0/1 0", "128.0.0.0/1 0"];
     if ipv6 {
         expected.extend(["8000::/1 0", "::/1 0"]);
@@ -338,6 +340,11 @@ fn start_finish_stop_leaves_nothing() {
     ));
     assert_eq!(metric, "0");
     assert_eq!(dns_servers("IPv4"), "198.18.0.1");
+    // The physical adapter's DNS server is on-link, so off the tunnel: blocked.
+    assert!(
+        !answered(physical_v4),
+        "{physical_v4} answered with the tunnel up"
+    );
 
     // A plain TCP connection (no IP_UNICAST_IF) goes through the tunnel to the relay.
     let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
@@ -598,4 +605,215 @@ fn bridge_threads_exit_within_a_second_of_stop() {
     drop(session);
     drop(adapter);
     wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+}
+
+/// A live cellglide0 (here: ours, standing in for another process's) is neither closed nor
+/// stripped of its DNS servers.
+#[test]
+#[ignore]
+fn cleanup_leftovers_leaves_a_live_adapter_and_its_dns() {
+    let dll = dll();
+    let adapter = create(&dll);
+    let luid = adapter.luid();
+    ip::configure_interface(luid, Family::V4).unwrap();
+    ip::add_address(luid, ADDRESS_V4.into(), 32).unwrap();
+    dns::set_dns(WINDOWS_ADAPTER_GUID, &[ADDRESS_V4.into()]).unwrap();
+    cleanup_leftovers_with(&dll).unwrap();
+    assert!(adapter_listed(), "{INTERFACE_NAME} gone after cleanup");
+    assert_eq!(dns_servers("IPv4"), "198.18.0.1");
+    dns::clear_dns(WINDOWS_ADAPTER_GUID).unwrap();
+    ip::flush(luid).unwrap();
+    drop(adapter);
+    wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+}
+
+// ---- Strict DNS (Task 11b). No routes: the machine stays on its physical adapter, whose
+// DNS server is what the rules must block.
+
+const STRICT_CHILD: &str = "CG_STRICT_CHILD";
+const STRICT_READY: &str = "cg-strict-child-ready";
+const ANSWER_WITHIN: Duration = Duration::from_secs(2);
+
+/// The DNS servers (IPv4, and IPv6 if any) of the interface holding the best IPv4 default
+/// route: the physical adapter whose servers Windows would also ask.
+fn physical_dns() -> (IpAddr, Option<IpAddr>) {
+    let listed = ps(&format!(
+        "$i = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object InterfaceAlias -ne {INTERFACE_NAME} | Sort-Object RouteMetric | Select-Object -First 1).ifIndex; foreach ($f in 'IPv4','IPv6') {{ $s = (Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily $f).ServerAddresses | Select-Object -First 1; if ($s) {{ $s }} else {{ '-' }} }}"
+    ));
+    let mut lines = listed.lines();
+    let v4 = lines
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("no IPv4 DNS server on the default-route interface");
+    let v6 = lines.next().and_then(|s| s.parse().ok());
+    (v4, v6)
+}
+
+/// A standard query for `example.com` A with the given id.
+fn dns_query(id: u16) -> Vec<u8> {
+    let mut query = Vec::new();
+    query.extend_from_slice(&id.to_be_bytes());
+    query.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in ["example", "com"] {
+        query.push(u8::try_from(label.len()).unwrap());
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0, 0, 1, 0, 1]);
+    query
+}
+
+/// Whether `server` answers one UDP query within ANSWER_WITHIN. A send refused locally
+/// (the WFP block) counts as no answer.
+fn answered(server: IpAddr) -> bool {
+    let bind: SocketAddr = if server.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
+    let socket = UdpSocket::bind(bind).unwrap();
+    socket.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+    let id = 0x5a5a;
+    if let Err(error) = socket.send_to(&dns_query(id), SocketAddr::new(server, 53)) {
+        eprintln!("send to {server}:53 refused: {error}");
+        return false;
+    }
+    let deadline = Instant::now() + ANSWER_WITHIN;
+    let mut buf = [0u8; 1500];
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buf) {
+            Ok((n, from)) if n >= 2 && from.ip() == server && buf[..2] == id.to_be_bytes() => {
+                return true;
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// cellglide0 with its IPv4 address, no routes.
+fn adapter_with_address(dll: &Arc<Wintun>) -> Adapter {
+    let adapter = create(dll);
+    let luid = adapter.luid();
+    ip::configure_interface(luid, Family::V4).unwrap();
+    ip::add_address(luid, ADDRESS_V4.into(), 32).unwrap();
+    adapter
+}
+
+#[test]
+#[ignore]
+fn strict_dns_blocks_other_port_53_only_while_alive() {
+    let dll = dll();
+    let (dns_v4, dns_v6) = physical_dns();
+    assert!(
+        answered(dns_v4),
+        "{dns_v4} doesn't answer even without strict DNS"
+    );
+    let v6 = dns_v6.filter(|server| answered(*server));
+    eprintln!(
+        "physical DNS: {dns_v4}, {dns_v6:?}; IPv6 answers: {}",
+        v6.is_some()
+    );
+
+    let adapter = adapter_with_address(&dll);
+    let luid = adapter.luid();
+    // Our resolver's address: a query to it stays on the machine and must still pass.
+    let resolver = UdpSocket::bind(WINDOWS_RESOLVER).unwrap();
+    resolver.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+
+    let strict = strict_dns::start(luid).unwrap();
+    assert!(!answered(dns_v4), "{dns_v4} answered with strict DNS on");
+    if let Some(v6) = v6 {
+        assert!(!answered(v6), "{v6} answered with strict DNS on");
+    }
+    // Other traffic over the physical adapter is unaffected.
+    let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
+    TcpStream::connect_timeout(&target, Duration::from_secs(5))
+        .expect("TCP 1.1.1.1:443 blocked with strict DNS on");
+    // Port 53 on our own address is allowed.
+    let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+    client.send_to(&dns_query(1), WINDOWS_RESOLVER).unwrap();
+    let mut buf = [0u8; 512];
+    let (n, _) = resolver
+        .recv_from(&mut buf)
+        .expect("query to 198.18.0.1:53 blocked with strict DNS on");
+    assert_eq!(buf[..n], dns_query(1));
+
+    drop(strict);
+    assert!(answered(dns_v4), "{dns_v4} still blocked after drop");
+    if let Some(v6) = v6 {
+        assert!(answered(v6), "{v6} still blocked after drop");
+    }
+    drop(resolver);
+    ip::flush(luid).unwrap();
+    drop(adapter);
+    wait_for(|| !adapter_listed()).expect("adapter still listed after drop");
+}
+
+/// Hidden entry for `strict_dns_rules_vanish_when_the_process_dies`: does nothing unless
+/// CG_STRICT_CHILD=1.
+#[test]
+#[ignore]
+fn strict_child_entry() {
+    if std::env::var_os(STRICT_CHILD).is_none_or(|v| v != "1") {
+        return;
+    }
+    let dll = dll();
+    let adapter = adapter_with_address(&dll);
+    let strict = strict_dns::start(adapter.luid()).unwrap();
+    println!("{STRICT_READY}");
+    std::io::stdout().flush().unwrap();
+    // The parent kills us long before this; if it doesn't, Drop cleans up.
+    std::thread::sleep(Duration::from_secs(30));
+    drop(strict);
+    drop(adapter);
+}
+
+#[test]
+#[ignore]
+fn strict_dns_rules_vanish_when_the_process_dies() {
+    assert_absent(&dll());
+    let (dns_v4, _) = physical_dns();
+    assert!(
+        answered(dns_v4),
+        "{dns_v4} doesn't answer even without strict DNS"
+    );
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "strict_child_entry",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STRICT_CHILD, "1")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+    let stdout = child.0.stdout.take().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { return };
+            if line.contains(STRICT_READY) {
+                let _ = ready_tx.send(());
+            }
+        }
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("child never became ready");
+    assert!(!answered(dns_v4), "{dns_v4} answered while the child runs");
+
+    // Child::kill is TerminateProcess.
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let killed = Instant::now();
+    assert!(
+        answered(dns_v4),
+        "{dns_v4} still blocked 2 s after TerminateProcess"
+    );
+    eprintln!("answered {:?} after TerminateProcess", killed.elapsed());
+    wait_for(|| !adapter_listed()).expect("adapter still listed after the child was killed");
 }

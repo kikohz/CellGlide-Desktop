@@ -157,6 +157,25 @@ pktmon stop; pktmon etl2txt ... -o target\w0dns\pktmon-<模式>.txt
 - `fec0:0:0:ffff::1-3`：本任务 12 次 `dns_probe` 测量运行中，cellglide0 的 IPv6 DNS 列表都是**空**（`Get-DnsClientServerAddress` 的 IPv6 项无地址），没有出现 Task 4 见过的 fec0 占位；所有抓包（含 `--comp all`）里 fec0 出现 0 次。建议：**无害，不需要处理**。显式设 IPv6 服务器 `fd6c:6779:6465::1` 也挡不住泄漏（上表 9 个包），反而要求解析器同时监听 `[fd6c:6779:6465::1]:53`，所以维持「网卡 DNS 只设 `198.18.0.1`」。
 - cellglide0 的 `Get-NetAdapterBinding`（已启用）：`ms_lldp`、`ms_tcpip`、`ms_server`、`ms_lltdio`、`ms_tcpip6`、`ms_rspndr`、`ms_msclient`。与 Tailscale 网卡的已启用项完全相同，是 Windows 对新网卡的默认绑定，没有第三方过滤驱动等意外绑定。
 
+#### 严格 DNS 复测（Task 11b，2026-10-30）
+
+用户已同意严格 DNS。实现：`cg_platform::windows::strict_dns`，`FwpmEngineOpen0` 带 `FWPM_SESSION_FLAG_DYNAMIC`，一个事务里加子层（固定 GUID `{C151ED32-5A98-401F-B5CA-06705DB34EBA}`）和 `FWPM_LAYER_ALE_AUTH_CONNECT_V4` / `_V6` 上各三条规则：允许本地接口 == cellglide0 的 LUID（权重 15）、允许回环（权重 14）、拦截远端端口 53（不限协议，权重 0，硬拦截）。句柄关闭或进程结束，BFE 删除全部规则。
+
+复测：`dns_probe --answer --strict`（`--strict` 在绑好套接字后开启严格 DNS；不带 `--upstream`），同一机器、同一 Wi-Fi，pktmon 命令与计数口径同上（5 个 `probe-*` 名字，`--comp nics`，过滤 `-p 53`）。同一会话里先后各跑一次有无严格 DNS 作对照：
+
+| 模式 | 物理网卡上 53 端口的包（全部，含 Rx 和系统后台查询） | 其中 probe 查询包 | `Resolve-DnsName` |
+| --- | --- | --- | --- |
+| `--answer`（对照，无严格 DNS） | 28 | 9（发往 `fd1e:f1ee:8b51::1.53`） | 我们的 A `192.0.2.1`，1–199 ms |
+| `--answer --strict` | **0** | **0** | 我们的 A `192.0.2.1`，1–201 ms |
+
+另有特权测试（`crates/cg-platform/tests/windows_privileged.rs`）：
+
+- `strict_dns_blocks_other_port_53_only_while_alive`：开启后向 Wi-Fi 的 `10.10.10.1` 和 `fd1e:f1ee:8b51::1` 发 UDP 查询 2 s 内都无应答（`send_to` 本身成功，包在 ALE 层被丢弃）；同时 TCP 连 `1.1.1.1:443` 成功、发往 `198.18.0.1:53` 的查询照常到达；drop 后同一查询立即有应答。
+- `strict_dns_rules_vanish_when_the_process_dies`：子进程开启后被 `TerminateProcess`，Wi-Fi DNS 的查询在杀进程后约 3 ms 就恢复应答（两次运行 2.6 ms、2.9 ms）。
+- `start_finish_stop_leaves_nothing`：真实隧道（加 /1 路由）下 `RunningTunnel::strict_dns()` 为真，Wi-Fi 的 `10.10.10.1`（同链路，不走隧道）查询被挡。
+
+结论：严格 DNS 开启时，物理网卡上没有任何 53 端口出站，Windows 的并行查询被挡在本机；解析结果不受影响（Windows 采用 cellglide0 的应答）。测试结束后 `netsh wfp show filters` 和 `netsh wfp show state`（只读导出）里都找不到 CellGlide 的过滤器或子层 GUID。
+
 ### 绑定
 
 | 场景 | 结果 |

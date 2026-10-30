@@ -1,10 +1,11 @@
 //! wintun + IP Helper + per-interface DNS + cg-netstack behind `TunnelBackend`.
 //!
 //! `start` brings up cellglide0 and its addresses only; the controller then binds the
-//! resolver on 198.18.0.1 and calls `finish`, which sets the DNS, adds the routes and
-//! starts the engine. `stop` (or dropping the tunnel without it) undoes everything in
-//! WireGuard's order. A crash needs nothing: the adapter, its addresses, routes and DNS
-//! go with the process's wintun handle.
+//! resolver on 198.18.0.1 and calls `finish`, which sets the DNS, adds the routes, turns on
+//! strict DNS and starts the engine. `stop` (or dropping the tunnel without it) undoes
+//! everything in WireGuard's order, strict DNS first. A crash needs nothing: the adapter,
+//! its addresses, routes and DNS go with the process's wintun handle, and the strict DNS
+//! rules with its dynamic WFP session.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -22,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use super::device::{self, JoinHandles};
 use super::dns;
 use super::ip::{self, Family};
+use super::strict_dns::{self, StrictDns};
 use super::wintun::{Adapter, SESSION_CAPACITY, Session, Wintun};
 
 /// Engine worker threads; the engine is one poll loop plus a task per flow.
@@ -116,9 +118,10 @@ struct Running {
 }
 
 struct Inner {
-    /// Task 11b's strict DNS (a dynamic WFP session) goes here once `finish` has set the
-    /// DNS and routes; teardown drops it first.
-    strict_dns: Option<Box<dyn Send>>,
+    /// Strict DNS (a dynamic WFP session blocking port 53 off cellglide0), set once
+    /// `finish` has set the DNS and routes; `None` when it could not be set up. Teardown
+    /// drops it first.
+    strict_dns: Option<StrictDns>,
     engine: Option<Engine>,
     /// Ends after the DNS, routes and addresses are gone, before the adapter closes.
     session: Option<Arc<Session>>,
@@ -207,6 +210,7 @@ impl Running {
             ip::add_route(self.luid, route)
                 .map_err(|e| TunnelError(format!("can't add route {route}: {e}")))?;
         }
+        self.start_strict_dns(inner);
         let adapter = inner
             .adapter
             .as_ref()
@@ -221,6 +225,26 @@ impl Running {
                 .map_err(|e| TunnelError(format!("can't start the forwarding engine: {e}")))?,
         );
         Ok(())
+    }
+
+    /// Blocks port 53 off cellglide0 for as long as `inner.strict_dns` lives. A failure
+    /// leaves DNS working through cellglide0, but Windows may also ask the physical
+    /// adapters' servers. Skipped when our DNS servers weren't applied: the blocked
+    /// servers would then be the only ones left.
+    fn start_strict_dns(&self, inner: &mut Inner) {
+        if !inner.dns_managed {
+            tracing::warn!("strict DNS off: {INTERFACE_NAME}'s DNS servers aren't managed");
+            return;
+        }
+        match strict_dns::start(self.luid) {
+            Ok(strict) => {
+                tracing::info!("strict DNS on: port 53 only through {INTERFACE_NAME}");
+                inner.strict_dns = Some(strict);
+            }
+            Err(error) => tracing::warn!(
+                "strict DNS off ({error}); DNS queries may also go to other adapters' servers"
+            ),
+        }
     }
 
     /// Undoes `finish` after one of its steps failed, leaving what `start` did.
@@ -301,6 +325,14 @@ impl RunningTunnel for Running {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .dns_managed
+    }
+
+    fn strict_dns(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .strict_dns
+            .is_some()
     }
 }
 

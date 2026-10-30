@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! dns_probe --answer | --delay <ms> | --servfail | --silent
-//!           [--seconds N] [--stop-file P] [--upstream IP:PORT] [--v6-dns]
+//!           [--seconds N] [--stop-file P] [--upstream IP:PORT] [--v6-dns] [--strict]
 //! dns_probe --bind-only        set up cellglide0, try UDP+TCP 198.18.0.1:53, report, exit
 //! dns_probe --hold-wildcard    bind 0.0.0.0:53 UDP+TCP with SO_EXCLUSIVEADDRUSE, hold N s
 //! ```
@@ -18,7 +18,9 @@
 //! Only names starting with `probe-` get the mode's treatment; every other query (the
 //! system's own background lookups) is forwarded to `--upstream`, so the machine keeps
 //! resolving and no fake answer lands in its cache. `--v6-dns` also serves
-//! `[fd6c:6779:6465::1]:53` and lists it as cellglide0's IPv6 server.
+//! `[fd6c:6779:6465::1]:53` and lists it as cellglide0's IPv6 server. `--strict` turns on
+//! strict DNS (Task 11b: a dynamic WFP session blocking port 53 off cellglide0) once the
+//! sockets are bound; queries forwarded to an upstream off cellglide0 are then blocked too.
 
 #[cfg(windows)]
 fn main() {
@@ -40,9 +42,9 @@ mod probe {
         ADDRESS_V4, ADDRESS_V6, INTERFACE_NAME, WINDOWS_ADAPTER_GUID, WINDOWS_RESOLVER,
         WINDOWS_TUNNEL_TYPE,
     };
-    use cg_platform::windows::dns;
     use cg_platform::windows::ip::{self, Family};
     use cg_platform::windows::wintun::{Adapter, SESSION_CAPACITY, Session, Wintun};
+    use cg_platform::windows::{dns, strict_dns};
     use windows::Win32::Networking::WinSock::{
         AF_INET, IPPROTO_TCP, IPPROTO_UDP, SO_EXCLUSIVEADDRUSE, SOCK_DGRAM, SOCK_STREAM, SOCKADDR,
         SOCKADDR_IN, SOCKET, SOL_SOCKET, WINSOCK_SOCKET_TYPE, WSADATA, WSAGetLastError, WSAStartup,
@@ -68,6 +70,7 @@ mod probe {
         stop_file: Option<PathBuf>,
         upstream: Option<SocketAddr>,
         v6_dns: bool,
+        strict: bool,
     }
 
     fn args() -> Args {
@@ -76,6 +79,7 @@ mod probe {
         let mut stop_file = None;
         let mut upstream = None;
         let mut v6_dns = false;
+        let mut strict = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -95,6 +99,7 @@ mod probe {
                     );
                 }
                 "--v6-dns" => v6_dns = true,
+                "--strict" => strict = true,
                 other => usage(other),
             }
         }
@@ -104,6 +109,7 @@ mod probe {
             stop_file,
             upstream,
             v6_dns,
+            strict,
         }
     }
 
@@ -114,7 +120,7 @@ mod probe {
 
     fn usage(problem: &str) -> ! {
         eprintln!(
-            "{problem}\nusage: dns_probe --answer|--delay <ms>|--servfail|--silent|--bind-only|--hold-wildcard [--seconds N] [--stop-file PATH] [--upstream IP:PORT] [--v6-dns]"
+            "{problem}\nusage: dns_probe --answer|--delay <ms>|--servfail|--silent|--bind-only|--hold-wildcard [--seconds N] [--stop-file PATH] [--upstream IP:PORT] [--v6-dns] [--strict]"
         );
         std::process::exit(2)
     }
@@ -207,6 +213,13 @@ mod probe {
             )?;
             println!("{} DNS now 198.18.0.1 and {ADDRESS_V6}", stamp(start));
         }
+        let _strict = if args.strict {
+            let strict = strict_dns::start(luid)?;
+            println!("{} strict DNS on", stamp(start));
+            Some(strict)
+        } else {
+            None
+        };
         println!(
             "{} ready mode={:?} upstream={:?}",
             stamp(start),
