@@ -1,6 +1,6 @@
 //! Which interface carries this computer's own default route: the Wi‑Fi or Ethernet leg the
-//! speed test compares the phone with. Read from `/proc/net/route` and `/sys/class/net`;
-//! nothing is changed.
+//! speed test compares the phone with. Read from `/proc/net/route` and `/sys/class/net` on
+//! Linux, from the IP Helper route and interface tables on Windows; nothing is changed.
 
 /// CellGlide's own TUN, never the comparison leg.
 pub const OURS: &str = "cellglide0";
@@ -77,6 +77,7 @@ pub fn physical_from(
 }
 
 /// The driver of a network interface, from `/sys/class/net/<iface>/device`.
+#[cfg(not(windows))]
 fn sysfs_driver(iface: &str) -> Option<String> {
     let device = std::path::Path::new("/sys/class/net")
         .join(iface)
@@ -93,10 +94,155 @@ fn sysfs_driver(iface: &str) -> Option<String> {
 }
 
 /// The Wi‑Fi or Ethernet interface to compare the phone with; `None` when only the phone (or
-/// USB tethering) is connected, or this is not Linux.
+/// USB tethering) is connected, or this is neither Linux nor Windows.
+#[cfg(not(windows))]
 pub fn physical_uplink() -> Option<String> {
     let text = std::fs::read_to_string("/proc/net/route").ok()?;
     physical_from(&text, OURS, sysfs_driver)
+}
+
+/// USB tethering adapters on Windows, matched case-insensitively anywhere in the adapter's
+/// description: the iPhone personal hotspot ("Apple Mobile Device Ethernet") and Android RNDIS
+/// ("Remote NDIS based Internet Sharing Device"). They are hardware Ethernet, but a comparison
+/// through them measures a phone's cellular network again.
+pub const WINDOWS_TETHERING: [&str; 2] = ["Apple Mobile Device Ethernet", "Remote NDIS"];
+
+/// `IF_TYPE_ETHERNET_CSMACD`
+const IF_TYPE_ETHERNET: u32 = 6;
+/// `IF_TYPE_IEEE80211` (Wi‑Fi)
+const IF_TYPE_WIFI: u32 = 71;
+
+/// One Windows IPv4 default route with what `GetIfEntry2` and `GetIpInterfaceEntry` say about
+/// its interface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IfRoute {
+    /// The interface alias, as localized ("Wi-Fi", "WLAN 2", "以太网").
+    pub alias: String,
+    /// The adapter's driver description ("Intel(R) Wi-Fi 6 AX201").
+    pub description: String,
+    /// `IFTYPE`: 6 is Ethernet, 71 is Wi‑Fi.
+    pub if_type: u32,
+    /// `InterfaceAndOperStatusFlags.HardwareInterface`.
+    pub hardware: bool,
+    /// `OperStatus == IfOperStatusUp`.
+    pub up: bool,
+    /// Route metric plus interface metric: the sum Windows compares between default routes.
+    pub metric: u32,
+}
+
+impl IfRoute {
+    fn is_tethering(&self) -> bool {
+        let description = self.description.to_lowercase();
+        WINDOWS_TETHERING
+            .iter()
+            .any(|t| description.contains(&t.to_lowercase()))
+    }
+}
+
+/// The Windows comparison leg: among default routes on hardware Ethernet or Wi‑Fi that is up,
+/// is not `ours` and is not USB tethering, the alias with the lowest metric; on a tie the
+/// first. A VPN holding a better default route doesn't hide the Wi‑Fi, as on Linux.
+pub fn physical_from_rows(rows: &[IfRoute], ours: &str) -> Option<String> {
+    let mut best: Option<&IfRoute> = None;
+    for row in rows.iter().filter(|row| {
+        row.up
+            && row.hardware
+            && matches!(row.if_type, IF_TYPE_ETHERNET | IF_TYPE_WIFI)
+            && row.alias != ours
+            && !row.is_tethering()
+    }) {
+        if best.is_none_or(|b| row.metric < b.metric) {
+            best = Some(row);
+        }
+    }
+    best.map(|b| b.alias.clone())
+}
+
+/// Windows: the IPv4 default routes (`0.0.0.0/0` in `GetIpForwardTable2`), each with its
+/// interface from `GetIfEntry2` and `GetIpInterfaceEntry`, through `physical_from_rows`.
+#[cfg(windows)]
+pub fn physical_uplink() -> Option<String> {
+    physical_from_rows(&windows_rows::default_routes()?, OURS)
+}
+
+#[cfg(windows)]
+mod windows_rows {
+    use super::IfRoute;
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIfEntry2, GetIpForwardTable2, GetIpInterfaceEntry,
+        InitializeIpInterfaceEntry, MIB_IF_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    };
+    use windows::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
+    use windows::Win32::Networking::WinSock::AF_INET;
+
+    /// `InterfaceAndOperStatusFlags`: bit 0 is `HardwareInterface`.
+    const HARDWARE_INTERFACE: u8 = 0x1;
+
+    /// Every IPv4 default route with its interface; `None` when the route table can't be read.
+    /// A route whose interface vanished between the calls is left out.
+    pub(super) fn default_routes() -> Option<Vec<IfRoute>> {
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        // SAFETY: on success the function stores a table that `Table` frees once.
+        if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != NO_ERROR {
+            return None;
+        }
+        let table = Table(table);
+        // SAFETY: the table holds NumEntries rows and lives until `table` drops.
+        let routes = unsafe {
+            std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
+        };
+        Some(
+            routes
+                .iter()
+                .filter(|route| route.DestinationPrefix.PrefixLength == 0)
+                .filter_map(|route| interface(route.InterfaceLuid, route.Metric))
+                .collect(),
+        )
+    }
+
+    fn interface(luid: NET_LUID_LH, route_metric: u32) -> Option<IfRoute> {
+        let mut entry = MIB_IF_ROW2 {
+            InterfaceLuid: luid,
+            ..Default::default()
+        };
+        // SAFETY: the row is valid and writable; InterfaceLuid selects the interface.
+        if unsafe { GetIfEntry2(&mut entry) } != NO_ERROR {
+            return None;
+        }
+        let mut ip = MIB_IPINTERFACE_ROW::default();
+        // SAFETY: the row is valid and writable.
+        unsafe { InitializeIpInterfaceEntry(&mut ip) };
+        ip.Family = AF_INET;
+        ip.InterfaceLuid = luid;
+        // SAFETY: as above; Family and InterfaceLuid select the row.
+        if unsafe { GetIpInterfaceEntry(&mut ip) } != NO_ERROR {
+            return None;
+        }
+        Some(IfRoute {
+            // An alias that isn't valid UTF-16 couldn't be bound by name: leave it out.
+            alias: String::from_utf16(until_nul(&entry.Alias)).ok()?,
+            description: String::from_utf16_lossy(until_nul(&entry.Description)),
+            if_type: entry.Type,
+            hardware: entry.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE != 0,
+            up: entry.OperStatus == IfOperStatusUp,
+            metric: route_metric.saturating_add(ip.Metric),
+        })
+    }
+
+    fn until_nul(s: &[u16]) -> &[u16] {
+        &s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]
+    }
+
+    /// The table from `GetIpForwardTable2`, freed with `FreeMibTable`.
+    struct Table(*mut MIB_IPFORWARD_TABLE2);
+
+    impl Drop for Table {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from GetIpForwardTable2 and is freed once.
+            unsafe { FreeMibTable(self.0.cast()) };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +348,75 @@ wlp2s0\t0000A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n";
         assert_eq!(
             physical_from(&text, OURS, |_| Some(String::new())).as_deref(),
             Some("enp9s0")
+        );
+    }
+
+    /// A Windows default route on a hardware Wi‑Fi card that is up.
+    fn row(alias: &str, metric: u32) -> IfRoute {
+        IfRoute {
+            alias: alias.into(),
+            description: "Intel(R) Wi-Fi 6 AX201".into(),
+            if_type: 71,
+            hardware: true,
+            up: true,
+            metric,
+        }
+    }
+
+    #[test]
+    fn picks_the_lowest_metric_physical_route() {
+        let vpn = IfRoute {
+            hardware: false,
+            if_type: 53,
+            ..row("Tailscale", 5)
+        };
+        let ours = IfRoute {
+            hardware: false,
+            if_type: 53,
+            ..row("cellglide0", 0)
+        };
+        assert_eq!(
+            physical_from_rows(&[ours, vpn, row("Wi-Fi", 45), row("以太网", 25)], OURS).as_deref(),
+            Some("以太网")
+        );
+    }
+
+    #[test]
+    fn tethering_is_never_the_comparison() {
+        let iphone = IfRoute {
+            description: "Apple Mobile Device Ethernet".into(),
+            if_type: 6,
+            ..row("以太网 3", 5)
+        };
+        let rndis = IfRoute {
+            description: "Remote NDIS based Internet Sharing Device".into(),
+            ..row("以太网 4", 6)
+        };
+        assert_eq!(
+            physical_from_rows(&[iphone, rndis, row("WLAN", 50)], OURS).as_deref(),
+            Some("WLAN")
+        );
+    }
+
+    #[test]
+    fn down_or_virtual_rows_give_none() {
+        let down = IfRoute {
+            up: false,
+            ..row("Wi-Fi", 10)
+        };
+        let virtual_eth = IfRoute {
+            hardware: false,
+            if_type: 6,
+            ..row("vEthernet (Default Switch)", 5)
+        };
+        assert_eq!(physical_from_rows(&[down, virtual_eth], OURS), None);
+    }
+
+    #[test]
+    fn non_ascii_alias_survives() {
+        assert_eq!(
+            physical_from_rows(&[row("WLAN 2 无线", 10)], OURS).as_deref(),
+            Some("WLAN 2 无线")
         );
     }
 }

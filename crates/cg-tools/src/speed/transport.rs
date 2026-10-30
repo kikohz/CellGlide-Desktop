@@ -157,6 +157,16 @@ pub enum Stream {
     Tls(Box<TlsStream<TcpStream>>),
 }
 
+impl Stream {
+    /// The local end of the TCP connection: which interface's address it went out from.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Stream::Plain(s) => s.local_addr(),
+            Stream::Tls(s) => s.get_ref().0.local_addr(),
+        }
+    }
+}
+
 impl AsyncRead for Stream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -290,10 +300,7 @@ fn bind_device(
         ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex,
     };
     use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-    use windows::Win32::Networking::WinSock::{
-        IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SOCKET, WSAGetLastError,
-        setsockopt,
-    };
+    use windows::Win32::Networking::WinSock::{SOCKET, WSAGetLastError, setsockopt};
     use windows::core::PCWSTR;
 
     let alias: Vec<u16> = device.encode_utf16().chain([0]).collect();
@@ -307,11 +314,7 @@ fn bind_device(
     if !found || index == 0 {
         return Err(missing(route, device));
     }
-    let (level, name, value) = if address.is_ipv6() {
-        (IPPROTO_IPV6.0, IPV6_UNICAST_IF, index)
-    } else {
-        (IPPROTO_IP.0, IP_UNICAST_IF, index.to_be())
-    };
+    let (level, name, value) = unicast_if_option(index, address.is_ipv6());
     let raw = SOCKET(socket.as_raw_socket() as usize);
     // SAFETY: `raw` is the open socket `socket` owns; both options take a 4-byte DWORD.
     if unsafe { setsockopt(raw, level, name, Some(&value.to_ne_bytes())) } != 0 {
@@ -320,6 +323,21 @@ fn bind_device(
         return Err(io::Error::from_raw_os_error(code.0).into());
     }
     Ok(())
+}
+
+/// The `setsockopt` that holds a socket to interface `index`: `(level, optname, value)`. The
+/// value is written as its native-endian bytes, so `IP_UNICAST_IF` gets the index in network
+/// byte order (Winsock reads it that way) and `IPV6_UNICAST_IF` in host byte order.
+#[cfg(windows)]
+pub(crate) fn unicast_if_option(index: u32, ipv6: bool) -> (i32, i32, u32) {
+    use windows::Win32::Networking::WinSock::{
+        IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF,
+    };
+    if ipv6 {
+        (IPPROTO_IPV6.0, IPV6_UNICAST_IF, index)
+    } else {
+        (IPPROTO_IP.0, IP_UNICAST_IF, index.to_be())
+    }
 }
 
 /// Elsewhere a bound route can't be honoured, so it fails rather than measure an unbound
@@ -501,6 +519,26 @@ pub(crate) mod tests {
     async fn missing_uplink_fails_without_falling_back() {
         let r = connect(&Route::Interface("cg-no-such0".into()), &local_server()).await;
         assert!(matches!(r, Err(SpeedError::NoInterface(name)) if name == "cg-no-such0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ipv4_index_is_network_order_and_ipv6_is_not() {
+        use windows::Win32::Networking::WinSock::{
+            IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF,
+        };
+        let (level, name, v4) = unicast_if_option(12, false);
+        assert_eq!((level, name), (IPPROTO_IP.0, IP_UNICAST_IF));
+        assert_eq!(v4.to_ne_bytes(), [0, 0, 0, 12]);
+        let (level, name, v6) = unicast_if_option(12, true);
+        assert_eq!((level, name, v6), (IPPROTO_IPV6.0, IPV6_UNICAST_IF, 12));
+    }
+
+    #[tokio::test]
+    async fn local_addr_is_the_connection_s_own_end() {
+        let fake = FakeServer::start(Mode::Normal).await;
+        let stream = connect(&Route::Unbound, &fake.server()).await.unwrap();
+        assert!(stream.local_addr().unwrap().ip().is_loopback());
     }
 
     #[cfg(target_os = "linux")]
