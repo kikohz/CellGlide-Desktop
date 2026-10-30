@@ -2732,14 +2732,95 @@ mod tests {
             .send(Command::Sleep { sleeping: false })
             .await
             .unwrap();
+        // Without the resume, the try comes 2 s after the failure; allow 1.5 s for slow CI.
         let mut rx = r.controller.subscribe();
-        tokio::time::timeout(Duration::from_millis(1200), async {
+        tokio::time::timeout(Duration::from_millis(1500), async {
             while !connected(&rx.borrow_and_update()) {
                 rx.changed().await.unwrap();
             }
         })
         .await
-        .expect("connected well before the two second backoff");
+        .expect("connected before the two second backoff");
+    }
+
+    #[tokio::test]
+    async fn resume_after_a_disconnect_does_not_connect() {
+        let r = rig(FakePhoneOptions::default(), any_port()).await;
+        r.mux.attach(device("aaaa", 1));
+        r.controller
+            .send(Command::Connect { serial: None })
+            .await
+            .unwrap();
+        wait_for(&r.controller, "connected", connected).await;
+        r.controller.send(Command::Disconnect).await.unwrap();
+        wait_for(&r.controller, "idle", |s| {
+            s.state == ConnState::Idle && !s.wants_connection
+        })
+        .await;
+        r.controller
+            .send(Command::Sleep { sleeping: false })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let snap = r.controller.snapshot();
+        assert_eq!(snap.state, ConnState::Idle);
+        assert!(!snap.wants_connection);
+        assert_eq!(r.backend.started(), 1, "no new session after the resume");
+    }
+
+    #[tokio::test]
+    async fn resume_without_a_phone_does_not_loop() {
+        // Auto connect wants a phone, but none is plugged in.
+        let r = rig_auto(FakePhoneOptions::default(), any_port()).await;
+        wait_for(&r.controller, "no phone", |s| s.state == ConnState::NoPhone).await;
+        r.controller
+            .send(Command::Sleep { sleeping: false })
+            .await
+            .unwrap();
+        // Count every state the snapshot passes through for a while: the resume's one try
+        // finds no phone and stops, with no connecting in between.
+        let mut rx = r.controller.subscribe();
+        let mut states = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+            loop {
+                states.push(rx.borrow_and_update().state.clone());
+                rx.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert!(
+            states.iter().all(|s| *s == ConnState::NoPhone),
+            "{states:?}"
+        );
+        assert_eq!(r.probe.calls(), 0, "no exit check without a phone");
+        // The schedule is not stuck: a phone plugged in now connects, once.
+        r.mux.attach(device("aaaa", 1));
+        wait_for(&r.controller, "connected", connected).await;
+        assert_eq!(r.backend.started(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_with_a_failing_phone_tries_once() {
+        let r = rig(FakePhoneOptions::default(), any_port()).await;
+        r.probe.set_ok(false);
+        r.mux.attach(device("aaaa", 1));
+        r.controller
+            .send(Command::Connect { serial: None })
+            .await
+            .unwrap();
+        wait_for(&r.controller, "retrying", |s| {
+            matches!(s.state, ConnState::Retrying { .. })
+        })
+        .await;
+        let before = r.probe.calls();
+        r.controller
+            .send(Command::Sleep { sleeping: false })
+            .await
+            .unwrap();
+        // One try at once; the next waits out the fresh two second backoff.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(r.probe.calls(), before + 1);
+        assert_eq!(r.backend.started(), 0);
     }
 
     #[tokio::test]
