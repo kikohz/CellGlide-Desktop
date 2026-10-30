@@ -42,18 +42,18 @@ async fn connect(endpoint: &Endpoint) -> Result<(Reader, Writer), ClientError> {
     }
 }
 
-/// Only the service's own pipe name is checked; tests serve pipes of their own. Every
-/// spelling Windows opens as that pipe counts: `/` for `\`, `\\localhost\` for `\\.\`, any case.
+/// Every pipe's server is checked except the tests' own ([`crate::TEST_PIPE_PREFIX`]). This
+/// fails closed: Windows opens the service's pipe under many spellings (`/` for `\`,
+/// `\\localhost\`, `\\?\`, `\\.\GLOBALROOT\Device\NamedPipe\`, any case), and a list of
+/// them could miss one and skip the check. The service only ever serves [`crate::PIPE_NAME`],
+/// so no other pipe a user names has a reason to pass unchecked.
 #[cfg(windows)]
 fn verifies(name: &str) -> bool {
-    let name = name.replace('/', "\\");
-    let name = match name.get(..12) {
-        Some(host) if host.eq_ignore_ascii_case(r"\\localhost\") => {
-            format!(r"\\.\{}", &name[12..])
-        }
-        _ => name,
-    };
-    name.eq_ignore_ascii_case(crate::PIPE_NAME)
+    let prefix = crate::TEST_PIPE_PREFIX;
+    let is_test = name
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix));
+    !is_test
 }
 
 /// Opens a pipe, retrying for up to a second while every instance is busy. With `verify`, a
@@ -297,7 +297,8 @@ mod tests {
             .as_nanos();
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         format!(
-            r"\\.\pipe\cellglide-test-{}-{nanos}-{n}",
+            "{}{}-{nanos}-{n}",
+            crate::TEST_PIPE_PREFIX,
             std::process::id()
         )
     }
@@ -473,12 +474,17 @@ mod tests {
         }
     }
 
-    /// The system pipe is only trusted from the service's own name.
+    /// Only the tests' own pipes skip the identity check.
     #[cfg(windows)]
     #[test]
-    fn only_the_system_pipe_is_verified() {
+    fn only_test_pipes_skip_verification() {
         assert!(verifies(crate::PIPE_NAME));
-        assert!(!verifies(r"\\.\pipe\cellglide-test"));
+        assert!(!verifies(&random_pipe_name()));
+        assert!(!verifies(r"\\.\PIPE\CellGlide-Test-1"));
+        // Near misses of the prefix are checked.
+        assert!(verifies(r"\\.\pipe\cellglide-test"));
+        assert!(verifies(r"\\?\pipe\cellglide-test-1"));
+        assert!(verifies(r"\\.\pipe\other"));
     }
 
     #[cfg(windows)]
@@ -489,10 +495,34 @@ mod tests {
             r"\\.\PIPE\CellGlide-Control",
             r"\\localhost\pipe\cellglide-control",
             "//./pipe/cellglide-control",
+            r"\\?\pipe\cellglide-control",
+            r"\\?\PIPE\CELLGLIDE-CONTROL",
+            r"\\.\GLOBALROOT\Device\NamedPipe\cellglide-control",
+            r"\\?\globalroot\device\namedpipe\cellglide-control",
         ] {
             assert!(verifies(name), "{name}");
         }
-        assert!(!verifies(r"\\.\pipe\other"));
+    }
+
+    /// The `\\?\` and GLOBALROOT spellings really open the service's pipe name, so they must
+    /// be verified: here they reach a pipe served under a test name.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn other_spellings_reach_the_same_pipe() {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let name = random_pipe_name();
+        let leaf = name.strip_prefix(r"\\.\pipe\").unwrap();
+        for spelling in [
+            format!(r"\\?\pipe\{leaf}"),
+            format!(r"\\.\GLOBALROOT\Device\NamedPipe\{leaf}"),
+        ] {
+            let server = ServerOptions::new().create(&name).unwrap();
+            let _client = ClientOptions::new()
+                .open(&spelling)
+                .unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            server.connect().await.unwrap();
+            assert!(verifies(&spelling), "{spelling}");
+        }
     }
 
     /// The text for `key` in either language: other tests may switch the language meanwhile.

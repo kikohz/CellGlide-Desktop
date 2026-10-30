@@ -1249,5 +1249,7 @@ mod windows_tests {
             environment(&snapshot, &[], Path::new(""))["StrictDns"],
             "off (BFE unavailable)"
         );
+        snapshot.strict_dns = StrictDns::Unknown;
+        assert!(!environment(&snapshot, &[], Path::new("")).contains_key("StrictDns"));
     }
 }

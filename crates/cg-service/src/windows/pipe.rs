@@ -260,7 +260,8 @@ pub(crate) mod tests {
             .as_nanos();
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         format!(
-            r"\\.\pipe\cellglide-test-{}-{nanos}-{n}",
+            "{}{}-{nanos}-{n}",
+            cg_ipc::TEST_PIPE_PREFIX,
             std::process::id()
         )
     }

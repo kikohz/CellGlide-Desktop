@@ -28,6 +28,10 @@ pub const SOCKET_PATH: &str = "/run/cellglide/control.sock";
 /// from session 0 (see [`pipe_identity`]).
 #[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\cellglide-control";
+/// Pipes the tests serve themselves start with this; they are the only pipes a client
+/// connects to without checking the server's identity.
+#[cfg(windows)]
+pub const TEST_PIPE_PREFIX: &str = r"\\.\pipe\cellglide-test-";
 /// The control pipe's security descriptor: owned by LocalSystem (the owner is what clients
 /// check), full access for SYSTEM and administrators, read/write for interactive users:
 /// `0x12019b` is FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES,
@@ -630,6 +634,16 @@ mod tests {
     fn unknown_strict_dns_state_parses() {
         let s: StrictDns = serde_json::from_str(r#"{"state":"something_new"}"#).unwrap();
         assert_eq!(s, StrictDns::Unknown);
+        // A new state with fields of its own (the tagged shape: fields beside `state`).
+        let s: StrictDns =
+            serde_json::from_str(r#"{"state":"disabled","reason":"x","n":3}"#).unwrap();
+        assert_eq!(s, StrictDns::Unknown);
+        // Inside a whole snapshot, too.
+        let line = br#"{"state":{"state":"no_phone"},"devices":[],"selected":null,"wants_connection":false,"strict_dns":{"state":"disabled","reason":"x"}}"#;
+        assert_eq!(
+            from_line::<Snapshot>(line).unwrap().strict_dns,
+            StrictDns::Unknown
+        );
     }
 
     #[test]
