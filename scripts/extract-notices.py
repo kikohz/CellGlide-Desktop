@@ -48,7 +48,7 @@ for d in dirs:
         found = block_of(path.read_text(errors="replace"))
         if not found or any(s and s in found[1] for s in skipped):
             continue
-        groups.setdefault(found[1], (found[0], []))[1].append(str(path.relative_to(root)))
+        groups.setdefault(found[1], (found[0], []))[1].append(path.relative_to(root).as_posix())
 
 print(f"{len(groups)} distinct notices", file=sys.stderr)
 for text, files in sorted(groups.values(), key=lambda g: (-len(g[1]), g[0])):
