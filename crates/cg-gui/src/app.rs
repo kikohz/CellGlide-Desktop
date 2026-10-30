@@ -9,19 +9,19 @@ use crate::pages::{
 };
 use crate::panel::{self, PanelAction, PanelState};
 use crate::prefs::{self, PrefChange, Prefs};
-use crate::section::{self, Badge, GROUPS, Section};
-use crate::tray::ServiceDown;
 use crate::widgets::kit::{self, Tone};
 use crate::writer::Writer;
 use cg_i18n::tr;
-use cg_ipc::{ConnState, Request, Snapshot, describe};
+use cg_ipc::describe::ui::{
+    self, Badge, GROUPS, KnownDevices, Section, ServiceDown, is_connected, plugged_in, version_line,
+};
+use cg_ipc::{Request, Snapshot, describe};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
 use iced::{
     Alignment, Background, Border, Element, Length, Size, Subscription, Task, Theme, keyboard,
     window,
 };
 use jiff::Timestamp;
-use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -91,60 +91,6 @@ pub struct App {
     writer: Writer,
 }
 
-/// How long an iPhone must have been missing before its return counts as plugging it in.
-/// usbmuxd can lose a phone for a moment and find it again: after resume it came back 26 s
-/// later once resume-check restarted usbmuxd (validation l), and a relock can empty the list
-/// briefly. `Instant` doesn't advance while suspended, so sleeping doesn't count as missing.
-/// The cost: unplugging and replugging within a minute doesn't open the window.
-pub const REPLUG_AFTER: Duration = Duration::from_secs(60);
-
-/// The iPhones seen in the last snapshot, and when each that has gone since went missing.
-#[derive(Clone, Debug, Default)]
-pub struct KnownDevices {
-    present: BTreeSet<String>,
-    missing: std::collections::BTreeMap<String, Instant>,
-}
-
-impl KnownDevices {
-    /// What the first snapshot shows: already there, so not plugged in.
-    fn new(devices: &[String]) -> KnownDevices {
-        KnownDevices {
-            present: devices.iter().cloned().collect(),
-            missing: Default::default(),
-        }
-    }
-
-    /// Takes the next snapshot's iPhones; true when one was plugged in: one that wasn't in the
-    /// last snapshot and was never seen or has been missing for at least [`REPLUG_AFTER`].
-    pub fn update(&mut self, devices: &[String], now: Instant) -> bool {
-        for gone in self.present.iter().filter(|s| !devices.contains(s)) {
-            self.missing.entry(gone.clone()).or_insert(now);
-        }
-        self.missing
-            .retain(|_, since| now.saturating_duration_since(*since) < REPLUG_AFTER);
-        let mut plugged = false;
-        for serial in devices {
-            if !self.present.contains(serial) && self.missing.remove(serial).is_none() {
-                plugged = true;
-            }
-        }
-        self.present = devices.iter().cloned().collect();
-        plugged
-    }
-}
-
-/// Whether the snapshot's `devices` has an iPhone that was plugged in, updating `known`.
-/// Without a previous list (first snapshot, service restarted) nothing was plugged in.
-pub fn plugged_in(known: &mut Option<KnownDevices>, devices: &[String], now: Instant) -> bool {
-    match known {
-        Some(known) => known.update(devices, now),
-        None => {
-            *known = Some(KnownDevices::new(devices));
-            false
-        }
-    }
-}
-
 /// A connect or disconnect press until the service has acted on it.
 #[derive(Clone, Copy, Debug)]
 struct Command {
@@ -179,29 +125,6 @@ fn uplink_message() -> Message {
 /// Started by autostart rather than by the user.
 pub fn background_launch() -> bool {
     std::env::args().any(|a| a == "--background")
-}
-
-/// What the sidebar footer and the tray tooltip say; the workspace version, so it cannot drift.
-pub fn version_line() -> String {
-    format!("CellGlide {}", env!("CARGO_PKG_VERSION"))
-}
-
-/// The overview's and the panel's main button, after what the user asked for rather than the
-/// state reached: "disconnect and go back" while a connection is wanted, else "connect".
-pub fn button_label(snapshot: Option<&Snapshot>) -> String {
-    let wants = snapshot.is_some_and(|s| s.wants_connection);
-    tr(
-        if wants {
-            "gui.disconnect_long"
-        } else {
-            "gui.connect"
-        },
-        &[],
-    )
-}
-
-pub fn is_connected(snapshot: Option<&Snapshot>) -> bool {
-    snapshot.is_some_and(|s| matches!(s.state, ConnState::Connected { .. }))
 }
 
 fn open_window() -> (window::Id, Task<Message>) {
@@ -746,7 +669,7 @@ impl App {
 
     fn sidebar_row(&self, section: Section) -> Element<'_, Message> {
         let dot: Element<'_, Message> =
-            match section::badge(section, self.snapshot.as_ref(), self.service.as_ref()) {
+            match ui::badge(section, self.snapshot.as_ref(), self.service.as_ref()) {
                 Badge::None => space().into(),
                 Badge::Warning => kit::dot(Tone::Orange, 7.0),
                 Badge::Critical => kit::dot(Tone::Red, 7.0),
@@ -820,7 +743,6 @@ mod tests {
     use super::*;
     use crate::effect::Reply;
     use crate::pages::{fixtures, history};
-    use cg_ipc::{ConnState, DnsMode};
     use std::path::Path;
 
     fn down(text: &str) -> ServiceDown {
@@ -864,31 +786,6 @@ mod tests {
     }
 
     #[test]
-    fn version_line_names_the_workspace_version() {
-        assert_eq!(
-            version_line(),
-            format!("CellGlide {}", env!("CARGO_PKG_VERSION"))
-        );
-    }
-
-    #[test]
-    fn button_follows_wish_not_state() {
-        let _guard = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::ZhCn);
-        let mut snapshot = Snapshot {
-            state: ConnState::Retrying {
-                reason: cg_ipc::Reason::NoExit,
-            },
-            wants_connection: true,
-            ..Snapshot::default()
-        };
-        assert_eq!(button_label(Some(&snapshot)), "断开，回到原来的网络");
-        snapshot.wants_connection = false;
-        assert_eq!(button_label(Some(&snapshot)), "连接");
-        assert_eq!(button_label(None), "连接");
-    }
-
-    #[test]
     fn command_error_survives_snapshots() {
         let mut app = App::default();
         let _ = app.update(Message::Snapshot(Box::default()));
@@ -901,20 +798,6 @@ mod tests {
         let _ = app.update(Message::CommandDone(Err("y".into())));
         let _ = app.update(Message::CommandDone(Ok(())));
         assert_eq!(app.command_error, None);
-    }
-
-    #[test]
-    fn title_shows_connection() {
-        let connected = Snapshot {
-            state: ConnState::Connected {
-                phone_version: "2.2.0".into(),
-                dns: DnsMode::Phone,
-            },
-            ..Snapshot::default()
-        };
-        assert!(is_connected(Some(&connected)));
-        assert!(!is_connected(Some(&Snapshot::default())));
-        assert!(!is_connected(None));
     }
 
     #[test]
@@ -1063,7 +946,7 @@ mod tests {
         }));
         assert!(app.snapshot.is_none());
         assert_eq!(
-            section::badge(
+            ui::badge(
                 Section::Settings,
                 app.snapshot.as_ref(),
                 app.service.as_ref()
@@ -1078,7 +961,7 @@ mod tests {
         assert!(app.service.is_none());
         assert!(app.snapshot.is_some());
         assert_eq!(
-            section::badge(
+            ui::badge(
                 Section::Settings,
                 app.snapshot.as_ref(),
                 app.service.as_ref()
@@ -1127,22 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn plug_detection_ignores_first_snapshot_and_service_restarts() {
-        let a = vec!["aaaa".to_string()];
-        let t0 = Instant::now();
-        let mut known = None;
-        assert!(!plugged_in(&mut known, &a, t0));
-        assert!(!plugged_in(&mut known, &a, t0));
-        let mut empty = Some(KnownDevices::default());
-        assert!(plugged_in(&mut empty, &a, t0));
-        // Missing for a moment, then back: not plugged in.
-        assert!(!plugged_in(&mut known, &[], t0));
-        assert!(!plugged_in(&mut known, &a, t0 + REPLUG_AFTER / 2));
-        // Missing for longer: plugged in, even if no snapshot came in between.
-        let back = t0 + REPLUG_AFTER;
-        assert!(!plugged_in(&mut known, &[], back));
-        assert!(plugged_in(&mut known, &a, back + REPLUG_AFTER));
-
+    fn plugging_in_opens_the_window_only_when_asked() {
         let with_phone = |serials: &[&str]| {
             let mut snapshot = fixtures::disconnected_snapshot();
             snapshot.devices = serials.iter().map(|s| s.to_string()).collect();
@@ -1164,10 +1032,14 @@ mod tests {
         // Unplugged, then plugged back in a minute later.
         let _ = app.update(with_phone(&[]));
         assert!(app.window.is_none());
-        let known = app.known_devices.as_mut().unwrap();
-        for since in known.missing.values_mut() {
-            *since -= REPLUG_AFTER;
-        }
+        // As if it went missing a minute ago (`plugged_in` keeps when, privately).
+        let a_minute_ago = Instant::now()
+            .checked_sub(ui::REPLUG_AFTER)
+            .expect("the clock has run for a minute");
+        let mut known = None;
+        plugged_in(&mut known, &["aaaa".into()], a_minute_ago);
+        plugged_in(&mut known, &[], a_minute_ago);
+        app.known_devices = known;
         let _ = app.update(with_phone(&["aaaa"]));
         assert!(app.window.is_some());
         assert_eq!(app.section, Section::Overview);
@@ -1196,27 +1068,6 @@ mod tests {
         assert!(raised.units() >= 1);
         assert!(app.window.is_some());
         assert_eq!(app.section, Section::SpeedTest);
-    }
-
-    #[test]
-    fn a_phone_usbmuxd_lost_for_a_moment_is_not_plugged_in() {
-        // After resume (or a relock) usbmuxd can drop the phone and find it again seconds later.
-        let (mut app, _) = boot(false);
-        app.window = None;
-        app.tray_up = true;
-        app.prefs.open_on_plug = true;
-        let with_phone = |serials: &[&str]| {
-            let mut snapshot = fixtures::disconnected_snapshot();
-            snapshot.devices = serials.iter().map(|s| s.to_string()).collect();
-            Message::Snapshot(Box::new(snapshot))
-        };
-        let _ = app.update(with_phone(&["aaaa"]));
-        let _ = app.update(with_phone(&[]));
-        let _ = app.update(with_phone(&["aaaa"]));
-        assert!(app.window.is_none());
-        // A second iPhone that was never here still counts.
-        let _ = app.update(with_phone(&["aaaa", "bbbb"]));
-        assert!(app.window.is_some());
     }
 
     #[test]

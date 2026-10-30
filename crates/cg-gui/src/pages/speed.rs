@@ -7,7 +7,7 @@ use super::Ctx;
 use crate::effect::{Effect, HistoryOp};
 use crate::prefs::PrefChange;
 use crate::widgets::curve::{self, Curve};
-use crate::widgets::kit::{self, Tone};
+use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::tr;
 use cg_ipc::describe;
 use cg_tools::speed::session::{self, Run};

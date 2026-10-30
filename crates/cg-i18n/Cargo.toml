@@ -14,3 +14,7 @@ rust-i18n.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Globalization"] }
+
+[features]
+# `testing`: the key scan other crates' tests use.
+testing = []

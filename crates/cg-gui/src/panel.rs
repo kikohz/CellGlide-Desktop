@@ -6,14 +6,15 @@
 //! opening if it never got focus; it is never left on screen with no way to close it.
 
 use crate::app::{App, Message};
-use crate::section::Section;
-use crate::widgets::kit::{self, SEMIBOLD, Tone};
+use crate::widgets::kit::{self, SEMIBOLD, Tone, ToneColor};
 use crate::widgets::phone_card;
 use cg_i18n::tr;
-use cg_ipc::{ConnState, Snapshot, describe};
+use cg_ipc::describe::ui::{
+    Section, button_label, connected_health_line, health_tone, status_tone,
+};
+use cg_ipc::{Snapshot, describe};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
 use iced::{Alignment, Background, Border, Element, Length, Size, Task, Theme, window};
-use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use std::time::{Duration, Instant};
 
@@ -211,35 +212,6 @@ pub fn open_panel() -> (window::Id, Task<Message>) {
     (id, task.map(Message::PanelOpened))
 }
 
-/// Green only while the computer really uses the phone; orange while it waits on the user.
-pub fn status_tone(snapshot: Option<&Snapshot>) -> Tone {
-    match snapshot.map(|s| &s.state) {
-        Some(ConnState::Connected { .. }) => Tone::Green,
-        Some(ConnState::Retrying { .. } | ConnState::ChoosePhone) => Tone::Orange,
-        _ => Tone::Gray,
-    }
-}
-
-/// The health line the panel and the overview show: only while connected, as the Mac's
-/// `PanelView` and `OverviewPage` show their health row only while the tunnel runs. (The CLI's
-/// `status` also shows an open issue or a recent drop when not connected.)
-pub fn health_line(snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> Option<String> {
-    if matches!(snapshot.state, ConnState::Connected { .. }) {
-        describe::status_health_line(snapshot, now, tz)
-    } else {
-        None
-    }
-}
-
-/// The colour of the health dot: the issue's, or green when there is none.
-pub fn health_tone(snapshot: &Snapshot) -> Tone {
-    match snapshot.health.cause {
-        Some(cause) if cause.is_severe() => Tone::Red,
-        Some(_) => Tone::Orange,
-        None => Tone::Green,
-    }
-}
-
 /// A dot, a line and a chevron, as one flat button.
 pub fn health_row<'a, M: Clone + 'a>(tone: Tone, line: String, on_press: M) -> Element<'a, M> {
     button(
@@ -316,7 +288,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         {
             body = body.push(phone_card::compact(card));
         }
-        if let Some(line) = health_line(snapshot, app.now(), &TimeZone::system()) {
+        if let Some(line) = connected_health_line(snapshot, app.now(), &TimeZone::system()) {
             body = body.push(health_row(
                 health_tone(snapshot),
                 line,
@@ -339,7 +311,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 /// Full width: "disconnect and go back" while a connection is wanted, else a prominent "connect".
 /// Not pressable while the last press is still being carried out.
 fn primary_button<'a>(snapshot: Option<&Snapshot>, pending: bool) -> Element<'a, Message> {
-    let label = crate::app::button_label(snapshot);
+    let label = button_label(snapshot);
     button(container(text(label).size(13)).center_x(Length::Fill))
         .width(Length::Fill)
         .padding([6, 10])
@@ -362,9 +334,6 @@ pub fn main_button_style(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::fixtures;
-    use cg_ipc::Reason;
-    use cg_ipc::health::IssueCause;
 
     /// Clicks the tray and lets the window appear.
     fn open(panel: &mut PanelState, now: Instant) -> window::Id {
@@ -377,35 +346,6 @@ mod tests {
 
     fn unfocused(panel: &mut PanelState, id: window::Id, now: Instant) -> PanelAction {
         panel.on_window(id, &window::Event::Unfocused, now)
-    }
-
-    #[test]
-    fn health_line_shows_only_while_connected_like_the_mac() {
-        use cg_ipc::health::{HealthStatus, LastIssue};
-        let _guard = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::En);
-        let now = jiff::Timestamp::now();
-        let utc = jiff::tz::TimeZone::UTC;
-        let mut snapshot = fixtures::disconnected_snapshot();
-        // A drop that ended an hour ago: `cellglide status` shows it, the GUI doesn't.
-        snapshot.health = HealthStatus {
-            last_issue: Some(LastIssue {
-                cause: IssueCause::Channel,
-                ended: now - jiff::SignedDuration::from_hours(1),
-                duration: Some(45),
-            }),
-            ..Default::default()
-        };
-        assert!(describe::status_health_line(&snapshot, now, &utc).is_some());
-        assert_eq!(health_line(&snapshot, now, &utc), None);
-        snapshot.state = ConnState::Connected {
-            phone_version: "2.4.0".into(),
-            dns: cg_ipc::DnsMode::Phone,
-        };
-        assert_eq!(
-            health_line(&snapshot, now, &utc),
-            describe::status_health_line(&snapshot, now, &utc)
-        );
     }
 
     #[test]
@@ -555,27 +495,5 @@ mod tests {
         let _ = open(&mut panel, t0);
         let _ = panel.on_escape();
         assert_eq!(panel.toggle(t0), PanelAction::Open);
-    }
-
-    #[test]
-    fn dot_colours() {
-        let connected = fixtures::connected_snapshot();
-        assert_eq!(status_tone(Some(&connected)), Tone::Green);
-        let mut waiting = fixtures::disconnected_snapshot();
-        assert_eq!(status_tone(Some(&waiting)), Tone::Gray);
-        waiting.state = ConnState::Retrying {
-            reason: Reason::NoExit,
-        };
-        assert_eq!(status_tone(Some(&waiting)), Tone::Orange);
-        waiting.state = ConnState::ChoosePhone;
-        assert_eq!(status_tone(Some(&waiting)), Tone::Orange);
-        assert_eq!(status_tone(None), Tone::Gray);
-
-        let mut health = fixtures::connected_snapshot();
-        assert_eq!(health_tone(&health), Tone::Green);
-        health.health.cause = Some(IssueCause::Channel);
-        assert_eq!(health_tone(&health), Tone::Red);
-        health.health.cause = Some(IssueCause::PhoneUnstable);
-        assert_eq!(health_tone(&health), Tone::Orange);
     }
 }

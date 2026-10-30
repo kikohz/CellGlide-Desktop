@@ -1,10 +1,13 @@
 //! The tray icon and the service's snapshots, as one stream of app messages.
-// The pure look/menu logic compiles everywhere for tests; only the Linux tray uses it.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// The tray itself is Linux-only; the rest compiles on any Unix for tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use crate::app::Message;
+#[cfg(target_os = "linux")]
 use cg_i18n::tr;
-use cg_ipc::{Check, CheckId, Endpoint, Reason, Request, Response, Snapshot, client, describe};
+use cg_ipc::Endpoint;
+use cg_ipc::client::{self, Update};
+use cg_ipc::describe::ui::{MenuEntry, TrayLook, down_look, menu_layout, tray_look, version_line};
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream};
 use std::time::Duration;
@@ -13,38 +16,6 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
     time::Instant,
 };
-
-/// What the tray shows for a snapshot: the icon's two bits, the wish for the menu, and the tooltip text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrayLook {
-    /// Routing through the phone.
-    pub active: bool,
-    /// An issue is open (the orange dot).
-    pub alert: bool,
-    /// A connection is wanted, so the menu offers to disconnect.
-    pub wants: bool,
-    pub title: String,
-}
-
-pub fn tray_look(snapshot: Option<&Snapshot>) -> TrayLook {
-    TrayLook {
-        active: crate::app::is_connected(snapshot),
-        alert: snapshot.is_some_and(|s| s.health.cause.is_some()),
-        wants: snapshot.is_some_and(|s| s.wants_connection),
-        title: snapshot.map_or_else(
-            || tr("gui.waiting_service", &[]),
-            |s| describe::gui_state(s).title,
-        ),
-    }
-}
-
-/// What the tray shows while there are no snapshots: nothing connected, and why.
-pub fn down_look(down: &ServiceDown) -> TrayLook {
-    TrayLook {
-        title: down.text.clone(),
-        ..tray_look(None)
-    }
-}
 
 /// Hands the tray a new look, waking it only when the look changed.
 fn show(state: &tokio::sync::watch::Sender<TrayLook>, look: TrayLook) {
@@ -65,32 +36,6 @@ pub fn icon_name(active: bool, alert: bool) -> &'static str {
         (false, true) => "cellglide-tray-alert-symbolic",
         (true, true) => "cellglide-tray-active-alert-symbolic",
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuEntry {
-    Version,
-    Separator,
-    Toggle { disconnect: bool },
-    Open,
-    Quit,
-}
-
-/// The right-click menu in order (spec 4.2) with each entry's enabled state.
-pub fn menu_layout(look: &TrayLook) -> Vec<(MenuEntry, bool)> {
-    vec![
-        (MenuEntry::Version, false),
-        (MenuEntry::Separator, true),
-        (
-            MenuEntry::Toggle {
-                disconnect: look.wants,
-            },
-            true,
-        ),
-        (MenuEntry::Open, true),
-        (MenuEntry::Separator, true),
-        (MenuEntry::Quit, true),
-    ]
 }
 
 #[cfg(target_os = "linux")]
@@ -128,7 +73,7 @@ impl ksni::Tray for Tray {
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: crate::app::version_line(),
+            title: version_line(),
             description: self.look.title.clone(),
             ..Default::default()
         }
@@ -146,7 +91,7 @@ impl ksni::Tray for Tray {
             .map(|(entry, enabled)| {
                 let (label, message) = match entry {
                     MenuEntry::Separator => return ksni::MenuItem::Separator,
-                    MenuEntry::Version => (crate::app::version_line(), None),
+                    MenuEntry::Version => (version_line(), None),
                     MenuEntry::Toggle { disconnect } => (
                         tr(
                             if disconnect {
@@ -174,44 +119,6 @@ impl ksni::Tray for Tray {
                 .into()
             })
             .collect()
-    }
-}
-
-/// Why the app has no snapshots: the text to show, and whether it is because the user isn't in
-/// the `cellglide` group (Settings then shows a dot).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServiceDown {
-    pub text: String,
-    pub not_in_group: bool,
-}
-
-impl ServiceDown {
-    fn other(text: String) -> ServiceDown {
-        ServiceDown {
-            text,
-            not_in_group: false,
-        }
-    }
-}
-
-/// Whether the service speaks our protocol; otherwise why not.
-async fn handshake(endpoint: &Endpoint) -> Result<(), ServiceDown> {
-    match client::request(endpoint, &Request::Hello).await {
-        Ok(Response::Hello { protocol, .. }) if protocol == cg_ipc::PROTOCOL_VERSION => Ok(()),
-        Ok(Response::Hello { protocol, .. }) => Err(ServiceDown::other(
-            describe::version_mismatch(&protocol.to_string()),
-        )),
-        Ok(Response::Error {
-            reason: Reason::NotInGroup,
-        }) => Err(ServiceDown {
-            text: describe::checks(&[Check::new(CheckId::Group, false)])
-                .trim_end()
-                .into(),
-            not_in_group: true,
-        }),
-        // A v1 reply this client can parse but doesn't expect; unparsable ones are covered by `unreachable`.
-        Ok(_) => Err(ServiceDown::other(describe::version_mismatch("1"))),
-        Err(error) => Err(ServiceDown::other(describe::unreachable(&error))),
     }
 }
 
@@ -308,6 +215,9 @@ async fn run_tray(tx: Sender<Message>, mut state: tokio::sync::watch::Receiver<T
     }
 }
 
+/// How long to wait before subscribing again after the service went away.
+const RETRY: Duration = Duration::from_secs(2);
+
 pub fn events() -> impl Stream<Item = Message> {
     iced::stream::channel(32, |mut output: Sender<Message>| async move {
         #[cfg(target_os = "linux")]
@@ -316,36 +226,23 @@ pub fn events() -> impl Stream<Item = Message> {
             tokio::spawn(run_tray(output.clone(), state_rx));
             state_tx
         };
-        let endpoint = Endpoint::system();
-        loop {
-            let subscribed = match handshake(&endpoint).await {
-                Ok(()) => client::subscribe(&endpoint)
-                    .await
-                    .map_err(|e| ServiceDown::other(describe::unreachable(&e))),
-                Err(problem) => Err(problem),
-            };
-            let down = match subscribed {
-                Ok(mut updates) => {
-                    while let Some(snapshot) = updates.recv().await {
-                        #[cfg(target_os = "linux")]
-                        show(&tray_state, tray_look(Some(&snapshot)));
-                        if output
-                            .send(Message::Snapshot(Box::new(snapshot)))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
+        let mut updates = client::watch(Endpoint::system(), RETRY);
+        while let Some(update) = updates.recv().await {
+            match update {
+                Update::Snapshot(snapshot) => {
+                    #[cfg(target_os = "linux")]
+                    show(&tray_state, tray_look(Some(&snapshot)));
+                    if output.send(Message::Snapshot(snapshot)).await.is_err() {
+                        return;
                     }
-                    ServiceDown::other(tr("gui.service_gone", &[]))
                 }
-                Err(problem) => problem,
-            };
-            // The last snapshot no longer holds: the tray stops saying "connected".
-            #[cfg(target_os = "linux")]
-            show(&tray_state, down_look(&down));
-            let _ = output.send(Message::ServiceDown(down)).await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+                Update::Down(down) => {
+                    // The last snapshot no longer holds: the tray stops saying "connected".
+                    #[cfg(target_os = "linux")]
+                    show(&tray_state, down_look(&down));
+                    let _ = output.send(Message::ServiceDown(down)).await;
+                }
+            }
         }
     })
 }
@@ -353,47 +250,10 @@ pub fn events() -> impl Stream<Item = Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cg_ipc::describe::ui::ServiceDown;
     use cg_ipc::health::{HealthStatus, IssueCause};
-    use cg_ipc::{ConnState, DnsMode};
+    use cg_ipc::{ConnState, DnsMode, Snapshot};
     use std::path::Path;
-
-    #[test]
-    fn tray_look_follows_connection_and_health() {
-        let _guard = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::ZhCn);
-        let none = tray_look(None);
-        assert!(!none.active && !none.alert && !none.wants);
-        assert_eq!(none.title, tr("gui.waiting_service", &[]));
-
-        let connected = Snapshot {
-            state: ConnState::Connected {
-                phone_version: "2.4.0".into(),
-                dns: DnsMode::Phone,
-            },
-            wants_connection: true,
-            health: HealthStatus {
-                cause: Some(IssueCause::PhoneUnstable),
-                ..Default::default()
-            },
-            ..Snapshot::default()
-        };
-        let look = tray_look(Some(&connected));
-        assert!(look.active && look.alert && look.wants);
-        assert_eq!(look.title, describe::gui_state(&connected).title);
-
-        for wants in [true, false] {
-            let retrying = Snapshot {
-                state: ConnState::Retrying {
-                    reason: Reason::NoExit,
-                },
-                wants_connection: wants,
-                ..Snapshot::default()
-            };
-            let look = tray_look(Some(&retrying));
-            assert!(!look.active && !look.alert);
-            assert_eq!(look.wants, wants);
-        }
-    }
 
     #[test]
     fn four_icon_names_match_the_packaged_files() {
@@ -469,7 +329,10 @@ mod tests {
         show(&state, tray_look(Some(&connected)));
         assert!(!seen.has_changed().unwrap());
 
-        let down = ServiceDown::other("服务已停止".into());
+        let down = ServiceDown {
+            text: "服务已停止".into(),
+            not_in_group: false,
+        };
         show(&state, down_look(&down));
         let look = seen.borrow_and_update().clone();
         assert!(!look.active && !look.alert && !look.wants);
@@ -477,31 +340,6 @@ mod tests {
         assert_eq!(
             menu_layout(&look)[2].0,
             MenuEntry::Toggle { disconnect: false }
-        );
-    }
-
-    #[test]
-    fn menu_order_and_enabled_state() {
-        let mut look = tray_look(None);
-        let layout = menu_layout(&look);
-        let entries: Vec<_> = layout.iter().map(|(e, _)| *e).collect();
-        assert_eq!(
-            entries,
-            [
-                MenuEntry::Version,
-                MenuEntry::Separator,
-                MenuEntry::Toggle { disconnect: false },
-                MenuEntry::Open,
-                MenuEntry::Separator,
-                MenuEntry::Quit,
-            ]
-        );
-        assert_eq!(layout.iter().filter(|(_, on)| !on).count(), 1);
-        assert!(!layout[0].1);
-        look.wants = true;
-        assert_eq!(
-            menu_layout(&look)[2].0,
-            MenuEntry::Toggle { disconnect: true }
         );
     }
 }

@@ -1,9 +1,11 @@
-//! Every key the window's code names is listed in `cg_i18n::KEYS` and has both languages.
-//! Keys must be written as literals (`tr("settings.proxy", …)`), never built with `format!`.
+//! For tests in other crates: every key a crate's code names is listed in [`crate::KEYS`] and
+//! has both languages. Keys must be written as literals (`tr("settings.proxy", …)`), never
+//! built with `format!`.
 
 use std::path::{Path, PathBuf};
 
-const NAMESPACES: &[&str] = &[
+/// The namespaces of the window's keys; a literal in one of them is taken for a key.
+pub const NAMESPACES: &[&str] = &[
     "nav", "gui", "panel", "overview", "speed", "leak", "history", "diag", "settings", "about",
     "common", "tray", "phone",
 ];
@@ -12,7 +14,8 @@ const NAMESPACES: &[&str] = &[
 const FILE_SUFFIXES: &[&str] = &[".json", ".desktop", ".svg", ".rs", ".txt", ".yml"];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    for entry in entries {
         let path = entry.unwrap().path();
         if path.is_dir() {
             sources(&path, out);
@@ -95,81 +98,80 @@ fn is_key(literal: &str) -> bool {
         && !FILE_SUFFIXES.iter().any(|s| literal.ends_with(s))
 }
 
-fn all_sources() -> Vec<(PathBuf, String)> {
+/// Scans the `.rs` files under `dirs` (recursively) for string literals in [`NAMESPACES`] and
+/// returns each, with its file, that is not in [`crate::KEYS`] or lacks a language. Panics when
+/// a directory can't be read or the scan finds almost no keys, so a wrong path never passes.
+pub fn unlisted_keys(dirs: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let _guard = crate::lock_for_tests();
     let mut files = Vec::new();
-    sources(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
-    );
-    assert!(files.len() > 3, "no sources found");
-    files
-        .into_iter()
-        .map(|p| {
-            let text = std::fs::read_to_string(&p).unwrap();
-            (p, text)
-        })
-        .collect()
-}
-
-#[test]
-fn every_key_the_gui_uses_is_listed() {
-    let _guard = cg_i18n::lock_for_tests();
+    for dir in dirs {
+        sources(dir, &mut files);
+    }
+    assert!(!files.is_empty(), "no sources found in {dirs:?}");
     let mut seen = 0;
-    // This file names keys only as examples.
-    let this = Path::new(file!()).file_name().unwrap();
-    for (path, text) in all_sources() {
-        if path.file_name() == Some(this) {
-            continue;
-        }
+    let mut unlisted = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
         for literal in literals(&text).into_iter().filter(|l| is_key(l)) {
             seen += 1;
-            let where_ = path.display();
-            assert!(
-                cg_i18n::KEYS.contains(&literal),
-                "{literal} in {where_} is not in KEYS"
-            );
-            for lang in [cg_i18n::Lang::ZhCn, cg_i18n::Lang::En] {
-                assert_ne!(
-                    cg_i18n::tr_in(lang, literal, &[]),
-                    literal,
-                    "{literal} has no {lang:?} text"
-                );
+            let listed = crate::KEYS.contains(&literal)
+                && [crate::Lang::ZhCn, crate::Lang::En]
+                    .into_iter()
+                    .all(|lang| crate::tr_in(lang, literal, &[]) != literal);
+            if !listed {
+                unlisted.push((path.clone(), literal.to_string()));
             }
         }
     }
-    assert!(seen > 10, "the scan found only {seen} keys");
+    assert!(seen > 10, "the scan found only {seen} keys in {dirs:?}");
+    unlisted
 }
 
-#[test]
-fn the_scan_skips_file_names_and_other_strings() {
-    assert!(is_key("nav.overview"));
-    assert!(is_key("gui.state.connected.title"));
-    assert!(!is_key("gui.json"));
-    assert!(!is_key("cellglide.desktop"));
-    assert!(!is_key("cli.unexpected_reply"));
-    assert!(!is_key("CellGlide"));
-    assert!(!is_key("nav."));
-    assert_eq!(literals(r#"tr("a.b", &[]) + "c""#), ["a.b", "c"]);
-    assert_eq!(literals(r#""x\"y" "nav.about""#), [r#"x\"y"#, "nav.about"]);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn keys_after_char_literals_and_raw_strings_are_still_found() {
-    let source = r##"
+    #[test]
+    fn the_scan_skips_file_names_and_other_strings() {
+        assert!(is_key("nav.overview"));
+        assert!(is_key("gui.state.connected.title"));
+        assert!(!is_key("gui.json"));
+        assert!(!is_key("cellglide.desktop"));
+        assert!(!is_key("cli.unexpected_reply"));
+        assert!(!is_key("CellGlide"));
+        assert!(!is_key("nav."));
+        assert_eq!(literals(r#"tr("a.b", &[]) + "c""#), ["a.b", "c"]);
+        assert_eq!(literals(r#""x\"y" "nav.about""#), [r#"x\"y"#, "nav.about"]);
+    }
+
+    #[test]
+    fn keys_after_char_literals_and_raw_strings_are_still_found() {
+        let source = r##"
         let q = '"'; let e = '\''; let b = b'"'; fn f<'a>(x: &'a str) {}
         let r = r#"say "hi" here"#; let s = r"plain";
         tr("nav.history", &[]);
     "##;
-    assert_eq!(
-        literals(source),
-        [r#"say "hi" here"#, "plain", "nav.history"]
-    );
-}
+        assert_eq!(
+            literals(source),
+            [r#"say "hi" here"#, "plain", "nav.history"]
+        );
+    }
 
-#[test]
-fn gui_never_names_the_unbound_route() {
-    let word = ["Un", "bound"].concat();
-    for (path, text) in all_sources() {
-        assert!(!text.contains(&word), "{} names {word}", path.display());
+    #[test]
+    fn a_missing_key_is_reported_with_its_file() {
+        let dir = std::env::temp_dir().join(format!("cg-i18n-scan-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let listed: Vec<String> = crate::KEYS
+            .iter()
+            .filter(|k| is_key(k))
+            .take(11)
+            .map(|k| format!("tr(\"{k}\", &[]);\n"))
+            .collect();
+        std::fs::write(dir.join("a.rs"), listed.concat()).unwrap();
+        let file = dir.join("sub").join("b.rs");
+        std::fs::write(&file, "tr(\"nav.no_such_key\", &[]); \"gui.json\";").unwrap();
+        let found = unlisted_keys(std::slice::from_ref(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, [(file, "nav.no_such_key".to_string())]);
     }
 }

@@ -3,6 +3,9 @@
 
 rust_i18n::i18n!("locales", fallback = "en");
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
     ZhCn,

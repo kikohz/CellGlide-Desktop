@@ -7,64 +7,15 @@ use super::Ctx;
 use crate::effect::{AfterMsg, DoctorFor, Effect, Reply, SettingField};
 use crate::prefs::PrefChange;
 use crate::widgets::checks::{self, Run};
-use crate::widgets::kit::{self, Tone};
+use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::tr;
-use cg_ipc::{Check, DnsMode, PhoneChoice, Request, Snapshot, describe};
+use cg_ipc::describe::ui::{
+    AutoConnectSwitch, DnsLine, PhoneOption, auto_connect_switch, dns_line, phone_options,
+};
+use cg_ipc::{Check, PhoneChoice, Request, Snapshot};
 use iced::widget::{button, column, container, pick_list, row, rule, text, toggler};
 use iced::{Alignment, Background, Border, Element, Font, Length, Theme};
-use std::fmt;
 use std::time::Duration;
-
-/// One entry of the phone chooser.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PhoneOption {
-    pub choice: PhoneChoice,
-    pub label: String,
-}
-
-impl fmt::Display for PhoneOption {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.label)
-    }
-}
-
-/// The chooser's entries and the one that is selected now. First "automatic"; a remembered
-/// phone that isn't plugged in comes next; then every plugged-in phone by name and model.
-pub fn phone_options(snapshot: &Snapshot) -> (Vec<PhoneOption>, PhoneOption) {
-    let auto = PhoneOption {
-        choice: PhoneChoice::Auto,
-        label: tr("settings.auto_discover", &[]),
-    };
-    let mut options = vec![auto.clone()];
-    let chosen = snapshot.settings.chosen_serial.as_deref();
-    if let Some(serial) = chosen
-        && !snapshot.devices.iter().any(|d| d == serial)
-    {
-        options.push(PhoneOption {
-            choice: PhoneChoice::Serial {
-                serial: serial.to_string(),
-            },
-            label: tr("settings.remembered_offline", &[]),
-        });
-    }
-    for serial in &snapshot.devices {
-        options.push(PhoneOption {
-            choice: PhoneChoice::Serial {
-                serial: serial.clone(),
-            },
-            label: describe::device_label(snapshot, serial),
-        });
-    }
-    let selected = chosen
-        .and_then(|serial| {
-            options
-                .iter()
-                .find(|o| matches!(&o.choice, PhoneChoice::Serial { serial: s } if s == serial))
-        })
-        .cloned()
-        .unwrap_or(auto);
-    (options, selected)
-}
 
 /// Changes of one control sent to the service and not answered yet, and the last refusal.
 #[derive(Debug, Default)]
@@ -239,16 +190,6 @@ pub fn update(state: &mut State, message: Msg, ctx: &Ctx) -> Effect {
     }
 }
 
-/// The DNS line for the connection's mode, and its colour.
-pub fn dns_line(mode: Option<DnsMode>) -> (String, Tone) {
-    match mode {
-        Some(DnsMode::Phone) => (tr("settings.dns_phone", &[]), Tone::Green),
-        Some(DnsMode::Public) => (tr("settings.dns_public", &[]), Tone::Gray),
-        Some(DnsMode::Unmanaged) => (tr("settings.dns_unmanaged", &[]), Tone::Orange),
-        None => (tr("settings.dns_idle", &[]), Tone::Gray),
-    }
-}
-
 fn switch<'a>(on: bool, message: impl Fn(bool) -> Msg + 'a) -> Element<'a, Msg> {
     toggler(on).on_toggle(message).into()
 }
@@ -264,24 +205,6 @@ fn error_line<'a>(error: &Option<String>) -> Option<Element<'a, Msg>> {
             .color(Tone::Red.color())
             .into()
     })
-}
-
-/// How the auto-connect switch is drawn.
-#[derive(Debug, PartialEq, Eq)]
-pub enum AutoConnectSwitch {
-    /// No snapshot, so no value to show.
-    Hidden,
-    /// Showing the service's value while the last change is on its way.
-    Busy(bool),
-    On(bool),
-}
-
-pub fn auto_connect_switch(snapshot: Option<&Snapshot>, saving: bool) -> AutoConnectSwitch {
-    match snapshot {
-        None => AutoConnectSwitch::Hidden,
-        Some(s) if saving => AutoConnectSwitch::Busy(s.settings.auto_connect),
-        Some(s) => AutoConnectSwitch::On(s.settings.auto_connect),
-    }
 }
 
 fn phone_card<'a>(state: &State, snapshot: Option<&Snapshot>) -> Element<'a, Msg> {
@@ -386,7 +309,7 @@ fn advanced<'a>(state: &State, ctx: &Ctx<'a>) -> Element<'a, Msg> {
     ]
     .spacing(8);
 
-    let (line, tone) = dns_line(ctx.dns());
+    let DnsLine { text: line, tone } = dns_line(ctx.dns());
     let checking = state.doctor.checking;
     let mut run = button(small(tr(
         if checking {
@@ -439,67 +362,14 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> Element<'a, Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::fixtures::{SERIAL, connected_snapshot, disconnected_snapshot};
+    use crate::pages::fixtures::{connected_snapshot, disconnected_snapshot};
     use cg_i18n::Lang;
-    use cg_ipc::phone::PhoneLabel;
-
-    fn zh() -> std::sync::MutexGuard<'static, ()> {
-        let guard = cg_i18n::lock_for_tests();
-        cg_i18n::set(Lang::ZhCn);
-        guard
-    }
+    use cg_ipc::DnsMode;
 
     fn en() -> std::sync::MutexGuard<'static, ()> {
         let guard = cg_i18n::lock_for_tests();
         cg_i18n::set(Lang::En);
         guard
-    }
-
-    #[test]
-    fn options_list_auto_remembered_offline_and_labelled_phones() {
-        let _lang = zh();
-        let mut snapshot = disconnected_snapshot();
-        snapshot.devices = vec!["aaaa".into()];
-        snapshot.settings.chosen_serial = Some("bbbb".into());
-        snapshot.labels = [(
-            "aaaa".to_string(),
-            PhoneLabel {
-                name: Some("Alice 的 iPhone".into()),
-                model: Some("iPhone17,5".into()),
-            },
-        )]
-        .into();
-        let (options, selected) = phone_options(&snapshot);
-        let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            [
-                "自动发现 / 等待已选设备",
-                "已记住的 iPhone（离线）",
-                "Alice 的 iPhone · iPhone 16e"
-            ]
-        );
-        assert_eq!(selected, options[1]);
-        assert_eq!(
-            options[1].choice,
-            PhoneChoice::Serial {
-                serial: "bbbb".into()
-            }
-        );
-        assert_eq!(options[0].choice, PhoneChoice::Auto);
-    }
-
-    #[test]
-    fn a_plugged_in_choice_is_selected_without_an_offline_entry() {
-        let _lang = en();
-        let mut snapshot = disconnected_snapshot();
-        snapshot.settings.chosen_serial = Some(SERIAL.into());
-        let (options, selected) = phone_options(&snapshot);
-        assert_eq!(options.len(), 2);
-        assert_eq!(selected, options[1]);
-        snapshot.settings.chosen_serial = None;
-        let (options, selected) = phone_options(&snapshot);
-        assert_eq!(selected, options[0]);
     }
 
     #[test]
@@ -580,22 +450,6 @@ mod tests {
         let _ = update(&mut state, Msg::Saved(AutoConnect, Ok(())), &ctx);
         assert!(!state.is_saving(AutoConnect));
         let _ = view(&state, &ctx);
-    }
-
-    #[test]
-    fn auto_connect_has_no_value_without_a_snapshot() {
-        assert_eq!(auto_connect_switch(None, false), AutoConnectSwitch::Hidden);
-        assert_eq!(auto_connect_switch(None, true), AutoConnectSwitch::Hidden);
-        let mut snapshot = disconnected_snapshot();
-        snapshot.settings.auto_connect = false;
-        assert_eq!(
-            auto_connect_switch(Some(&snapshot), false),
-            AutoConnectSwitch::On(false)
-        );
-        assert_eq!(
-            auto_connect_switch(Some(&snapshot), true),
-            AutoConnectSwitch::Busy(false)
-        );
     }
 
     #[test]
@@ -693,18 +547,6 @@ mod tests {
         let _ = update(&mut state, Msg::Checks(1, Err("down".into())), &ctx);
         assert!(!state.doctor.checking);
         assert_eq!(state.doctor.checks, Some(Err("down".into())));
-    }
-
-    #[test]
-    fn dns_line_follows_the_mode() {
-        let _lang = en();
-        assert_eq!(dns_line(Some(DnsMode::Unmanaged)).1, Tone::Orange);
-        assert_eq!(dns_line(Some(DnsMode::Phone)).1, Tone::Green);
-        assert_ne!(
-            dns_line(Some(DnsMode::Phone)).0,
-            dns_line(Some(DnsMode::Public)).0
-        );
-        assert_ne!(dns_line(None).0, dns_line(Some(DnsMode::Public)).0);
     }
 
     #[test]

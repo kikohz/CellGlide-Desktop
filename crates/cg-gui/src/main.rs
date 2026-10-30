@@ -6,16 +6,12 @@ mod autostart;
 mod effect;
 #[cfg(unix)]
 mod ipc;
-#[cfg(all(unix, test))]
-mod key_scan;
 #[cfg(unix)]
 mod pages;
 #[cfg(unix)]
 mod panel;
 #[cfg(unix)]
 mod prefs;
-#[cfg(unix)]
-mod section;
 #[cfg(unix)]
 mod single;
 #[cfg(unix)]
@@ -28,7 +24,7 @@ mod writer;
 #[cfg(unix)]
 fn main() -> iced::Result {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("{}", app::version_line());
+        println!("{}", cg_ipc::describe::ui::version_line());
         return Ok(());
     }
     cg_i18n::init();

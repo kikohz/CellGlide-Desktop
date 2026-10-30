@@ -12,6 +12,8 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use std::fmt::Write as _;
 
+pub mod ui;
+
 fn tr_args(key: &str, args: &[(&str, String)]) -> String {
     let borrowed: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
     tr_os(key, &borrowed)

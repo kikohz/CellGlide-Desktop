@@ -6,7 +6,7 @@
 use super::Ctx;
 use crate::effect::{DoctorFor, Effect};
 use crate::widgets::checks::{self, Run};
-use crate::widgets::kit::{self, Tone};
+use crate::widgets::kit::{self, Tone, ToneColor};
 use cg_i18n::{Lang, tr};
 use cg_ipc::DnsMode;
 use cg_tools::ToolError;

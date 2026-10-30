@@ -31,5 +31,6 @@ ksni.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+cg-i18n = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

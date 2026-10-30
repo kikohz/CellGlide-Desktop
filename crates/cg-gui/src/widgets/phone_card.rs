@@ -3,30 +3,14 @@
 //! `cg_ipc::describe::card_text`; this only lays it out. No frame of its own: the overview puts
 //! it in a titled card, the panel shows it bare, as on the Mac.
 
-use super::kit::{SEMIBOLD, Tone, secondary_color};
+use super::kit::{SEMIBOLD, Tone, ToneColor, secondary_color};
 use super::trail;
 use cg_i18n::tr;
-use cg_ipc::describe::{self, BatteryBadge, CardText};
+use cg_ipc::describe::ui::{Speeds, speeds};
+use cg_ipc::describe::{self, BatteryBadge};
 use cg_ipc::phone::PhoneCard;
 use iced::widget::{column, container, row, rule, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme};
-
-/// What the speed line of the card shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Speeds {
-    /// No frame from the phone app: no speed line at all.
-    Hidden,
-    NotShared,
-    Shared,
-}
-
-pub fn speeds(card: &PhoneCard, text: &CardText) -> Speeds {
-    match (&card.frame, text.sharing) {
-        (None, _) => Speeds::Hidden,
-        (Some(_), Some(true)) => Speeds::Shared,
-        (Some(_), _) => Speeds::NotShared,
-    }
-}
 
 /// The main window's layout: bigger speed, a wider trail, a rule between the blocks.
 pub fn full<'a, M: 'a>(card: &'a PhoneCard) -> Element<'a, M> {
@@ -176,7 +160,7 @@ fn radio_tag<'a, M: 'a>(radio: String, alpha: f32) -> Element<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cg_ipc::phone::{PhoneFrame, SpeedPoint, UsbPhone};
+    use cg_ipc::phone::{PhoneFrame, SpeedPoint};
 
     fn frame(sharing: Option<bool>) -> PhoneCard {
         PhoneCard {
@@ -197,20 +181,6 @@ mod tests {
             ],
             ..PhoneCard::default()
         }
-    }
-
-    #[test]
-    fn the_speed_line_follows_sharing_and_the_frame() {
-        let pick = |c: &PhoneCard| speeds(c, &describe::card_text(c));
-        assert_eq!(pick(&frame(Some(true))), Speeds::Shared);
-        assert_eq!(pick(&frame(Some(false))), Speeds::NotShared);
-        assert_eq!(pick(&frame(None)), Speeds::NotShared);
-        let usb_only = PhoneCard {
-            usb: Some(UsbPhone::default()),
-            ..PhoneCard::default()
-        };
-        assert_eq!(pick(&usb_only), Speeds::Hidden);
-        assert_eq!(pick(&PhoneCard::default()), Speeds::Hidden);
     }
 
     #[test]

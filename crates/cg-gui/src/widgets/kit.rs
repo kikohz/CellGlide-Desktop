@@ -3,19 +3,16 @@
 use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, font};
 
-/// The Mac's system colours, so dots and badges read the same on both platforms.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tone {
-    Green,
-    Orange,
-    Red,
-    Blue,
-    Purple,
-    Gray,
+pub use cg_ipc::describe::ui::Tone;
+
+/// A tone as iced draws it: the Mac's system colours, so dots and badges read the same on
+/// both platforms.
+pub trait ToneColor {
+    fn color(self) -> Color;
 }
 
-impl Tone {
-    pub fn color(self) -> Color {
+impl ToneColor for Tone {
+    fn color(self) -> Color {
         match self {
             Tone::Green => Color::from_rgb8(0x34, 0xC7, 0x59),
             Tone::Orange => Color::from_rgb8(0xFF, 0x95, 0x00),

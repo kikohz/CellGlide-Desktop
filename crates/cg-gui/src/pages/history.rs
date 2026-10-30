@@ -5,12 +5,15 @@
 
 use super::Ctx;
 use crate::effect::{Effect, Reply};
-use crate::widgets::kit::{self, SEMIBOLD, Tone};
-use crate::widgets::strip::{self, DayStrip};
+use crate::widgets::kit::{self, SEMIBOLD, Tone, ToneColor};
+use crate::widgets::strip;
 use cg_i18n::tr;
 use cg_ipc::Request;
-use cg_ipc::describe::{self, EventTone};
-use cg_ipc::health::{HealthEvent, HistoryDay, day_bounds, day_spans, hour_marks};
+use cg_ipc::describe::{
+    self,
+    ui::{EventRow, day_strip, legend as legend_items, neighbor, row_texts, tick_gaps},
+};
+use cg_ipc::health::{HealthEvent, HistoryDay};
 use iced::widget::{button, column, container, row, space, text};
 use iced::{Alignment, Element, Font, Length};
 use jiff::Timestamp;
@@ -49,13 +52,6 @@ impl State {
     pub fn is_loading(&self) -> bool {
         self.loading
     }
-}
-
-/// The day `step` days from `current` among the days on record; `None` past either end.
-pub fn neighbor(days: &[String], current: &str, step: i8) -> Option<String> {
-    let at = days.iter().position(|d| d == current)?;
-    let to = at.checked_add_signed(isize::from(step))?;
-    days.get(to).cloned()
 }
 
 fn request(state: &mut State) -> Effect {
@@ -195,72 +191,16 @@ fn can_page(state: &State, step: i8) -> bool {
     current.is_some_and(|current| neighbor(&loaded.days, current, step).is_some())
 }
 
-/// The strip of a day: its spans between local midnights, up to now.
-pub fn strip_for(day: &HistoryDay, now: Timestamp, tz: &TimeZone) -> DayStrip {
-    let (begin, next) = day
-        .day
-        .parse::<Date>()
-        .ok()
-        .and_then(|date| day_bounds(date, tz))
-        .unwrap_or_else(|| {
-            let next = day
-                .begin
-                .checked_add(jiff::SignedDuration::from_hours(24))
-                .unwrap_or(day.end);
-            (day.begin, next)
-        });
-    DayStrip {
-        spans: day_spans(&day.events, day.start, day.begin, day.end.min(now)),
-        begin,
-        next,
-    }
-}
-
-/// The space between the five hour labels, in thousandths of the strip, so the labels sit under
-/// the hours even on a 23- or 25-hour day.
-pub fn tick_gaps(day: &Date, tz: &TimeZone) -> Vec<u16> {
-    let marks = hour_marks(*day, tz);
-    marks
-        .windows(2)
-        .map(|pair| ((pair[1].1 - pair[0].1) * 1000.0).round().max(1.0) as u16)
-        .collect()
-}
-
-fn tone(tone: EventTone) -> Tone {
-    match tone {
-        EventTone::Green => Tone::Green,
-        EventTone::Orange => Tone::Orange,
-        EventTone::Red => Tone::Red,
-        EventTone::Gray => Tone::Gray,
-    }
-}
-
-/// One row's local time, title (which already carries the duration of an end) and dot.
-pub fn row_texts(event: &HealthEvent, tz: &TimeZone) -> (String, String, Tone) {
-    (
-        describe::clock(event.t, tz),
-        describe::event_title(event),
-        tone(describe::event_tone(event)),
-    )
-}
-
-pub fn legend_labels() -> [String; 4] {
-    [
-        tr("history.legend.ok", &[]),
-        tr("history.legend.unstable", &[]),
-        tr("history.legend.down", &[]),
-        tr("history.legend.not_sharing", &[]),
-    ]
-}
-
 fn legend<'a>() -> Element<'a, Msg> {
-    let tones = [Tone::Green, Tone::Orange, Tone::Red, Tone::Gray];
     let mut items = row![].spacing(12).align_y(Alignment::Center);
-    for (label, t) in legend_labels().into_iter().zip(tones) {
+    for item in legend_items() {
         items = items.push(
-            row![kit::dot(t, 8.0), kit::secondary(label).size(11)]
-                .spacing(4)
-                .align_y(Alignment::Center),
+            row![
+                kit::dot(item.tone, 8.0),
+                kit::secondary(item.label).size(11)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
         );
     }
     items.into()
@@ -318,7 +258,11 @@ fn detail_grid<'a>(event: &HealthEvent) -> Element<'a, Msg> {
 }
 
 fn event_row<'a>(index: usize, event: &HealthEvent, open: bool, tz: &TimeZone) -> Element<'a, Msg> {
-    let (time, title, dot_tone) = row_texts(event, tz);
+    let EventRow {
+        time,
+        title,
+        tone: dot_tone,
+    } = row_texts(event, tz);
     let expandable = event.snapshot.is_some();
     let chevron = match (expandable, open) {
         (false, _) => "",
@@ -385,7 +329,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> Element<'a, Msg> {
     if let Some(day) = &state.loaded {
         body = body.push(
             column![
-                container(strip::view(strip_for(day, ctx.now, &tz), 28.0))
+                container(strip::view(day_strip(day, ctx.now, &tz), 28.0))
                     .clip(true)
                     .style(|_| container::Style {
                         border: iced::Border {
@@ -429,8 +373,8 @@ mod tests {
     use cg_i18n::Lang;
     use cg_ipc::Request;
     use cg_ipc::health::{DayStart, EventKind, EventPhase, HealthEvent, HealthSnapshot};
+    use jiff::Timestamp;
     use jiff::tz::TimeZone;
-    use jiff::{SignedDuration, Timestamp};
 
     fn days(from: i64, to: i64) -> Vec<String> {
         (from..=to).map(|d| format!("2026-10-{d}")).collect()
@@ -491,18 +435,6 @@ mod tests {
         let guard = cg_i18n::lock_for_tests();
         cg_i18n::set(Lang::En);
         guard
-    }
-
-    #[test]
-    fn paging_stays_within_the_seven_days() {
-        let days = days(13, 19);
-        assert_eq!(neighbor(&days, "2026-10-19", 1), None);
-        assert_eq!(
-            neighbor(&days, "2026-10-19", -1).as_deref(),
-            Some("2026-10-18")
-        );
-        assert_eq!(neighbor(&days, "2026-10-13", -1), None);
-        assert_eq!(neighbor(&days, "2026-10-01", 1), None);
     }
 
     #[test]
@@ -658,43 +590,6 @@ mod tests {
         update(&mut state, Msg::Loaded(Ok(stale)), &ctx);
         assert!(state.loading);
         assert_eq!(state.loaded.as_ref().unwrap().day, "2026-10-18");
-    }
-
-    #[test]
-    fn the_strip_covers_the_day_and_ticks_follow_the_hours() {
-        let tz = TimeZone::UTC;
-        let begin = Timestamp::from_second(0).unwrap();
-        let mut record = day(
-            "1970-01-01",
-            vec!["1970-01-01".into()],
-            vec![event(3600, EventKind::TunnelStarted)],
-        );
-        record.begin = begin;
-        record.end = begin + SignedDuration::from_hours(2);
-        let strip = strip_for(&record, begin + SignedDuration::from_hours(5), &tz);
-        assert_eq!(strip.begin, begin);
-        assert_eq!(strip.next, begin + SignedDuration::from_hours(24));
-        // Sharing from 01:00 to the end of the record (02:00).
-        assert_eq!((strip.spans.len(), strip.spans[0].to), (1, record.end));
-        assert_eq!(tick_gaps(&"1970-01-01".parse().unwrap(), &tz), [250; 4]);
-    }
-
-    #[test]
-    fn rows_show_clock_and_event_title_only() {
-        let _lock = en();
-        let tz = TimeZone::UTC;
-        let mut end = event(3 * 3600 + 5 * 60, EventKind::Issue);
-        end.phase = Some(EventPhase::End);
-        end.cause = Some(cg_ipc::health::IssueCause::Channel);
-        end.duration = Some(65);
-        let (time, title, tone) = row_texts(&end, &tz);
-        assert_eq!(time, "03:05");
-        assert_eq!(title, "Recovered: Cable connection dropped · 1 min 5 sec");
-        assert_eq!(tone, Tone::Green);
-        assert_eq!(
-            legend_labels(),
-            ["OK", "Unstable", "Interrupted", "Not sharing"]
-        );
     }
 
     #[test]

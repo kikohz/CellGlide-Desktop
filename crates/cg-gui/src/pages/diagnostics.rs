@@ -9,11 +9,12 @@
 
 use super::Ctx;
 use crate::effect::{AfterMsg, Effect, Reply};
-use crate::widgets::kit::{self, SEMIBOLD, Tone};
+use crate::widgets::kit::{self, SEMIBOLD, Tone, ToneColor};
 use crate::widgets::pager::{self, Pager};
 use cg_diag::upload::UploadError;
 use cg_i18n::tr;
-use cg_ipc::{Contact, DiagRange, Request, describe};
+use cg_ipc::describe::{self, ui::contact};
+use cg_ipc::{DiagRange, Request};
 use iced::widget::{
     button, column, container, keyed_column, opaque, row, rule, scrollable, space, stack, text,
     text_editor, text_input,
@@ -111,16 +112,6 @@ pub enum Msg {
     /// "Send Another": a new report with the same email and note.
     Again,
     Done,
-}
-
-/// The email and note as typed, trimmed; `None` when both are empty.
-pub fn contact(email: &str, note: &str) -> Option<Contact> {
-    let some = |s: &str| {
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.to_string())
-    };
-    let (email, note) = (some(email), some(note));
-    (email.is_some() || note.is_some()).then_some(Contact { email, note })
 }
 
 /// Send works only for the bundle that was opened in the preview, and not while busy.
@@ -1055,25 +1046,6 @@ mod tests {
         assert!(reports > 5 && after_report > 5, "{reports} {after_report}");
         // The walk did reach Send with consent, so the check above was exercised.
         assert!(uploads > 20, "{uploads}");
-    }
-
-    #[test]
-    fn contact_is_trimmed() {
-        assert_eq!(contact("  ", " \n"), None);
-        assert_eq!(
-            contact(" a@b.c ", "\n"),
-            Some(Contact {
-                email: Some("a@b.c".into()),
-                note: None
-            })
-        );
-        assert_eq!(
-            contact("", "  断网了 \n"),
-            Some(Contact {
-                email: None,
-                note: Some("断网了".into())
-            })
-        );
     }
 
     #[test]

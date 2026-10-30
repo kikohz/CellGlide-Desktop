@@ -1,13 +1,14 @@
 //! The main window's first page, after the Mac's `OverviewPage`: the state and the connect
 //! switch, the phone, and the connection (its health and the USB device in use).
 
-use crate::app::{Message, button_label};
+use crate::app::Message;
 use crate::panel;
-use crate::section::Section;
-use crate::tray::ServiceDown;
-use crate::widgets::kit::{self, SEMIBOLD, Tone};
+use crate::widgets::kit::{self, SEMIBOLD, Tone, ToneColor};
 use crate::widgets::phone_card;
 use cg_i18n::tr;
+use cg_ipc::describe::ui::{
+    Section, ServiceDown, button_label, connected_health_line, device_subtitle, health_tone,
+};
 use cg_ipc::{Snapshot, describe};
 use iced::Element;
 use iced::widget::{button, column, rule, text};
@@ -21,14 +22,6 @@ pub struct View<'a> {
     /// The last connect / disconnect press is still being carried out.
     pub command_pending: bool,
     pub now: Timestamp,
-}
-
-/// The USB device row's subtitle: the chosen phone, or that any phone will do.
-pub fn device_subtitle(snapshot: Option<&Snapshot>) -> String {
-    match snapshot.and_then(|s| s.selected.as_deref().map(|serial| (s, serial))) {
-        Some((snapshot, serial)) => describe::device_label(snapshot, serial),
-        None => tr("overview.auto_device", &[]),
-    }
 }
 
 pub fn view<'a>(page: View<'a>) -> Element<'a, Message> {
@@ -66,11 +59,11 @@ pub fn view<'a>(page: View<'a>) -> Element<'a, Message> {
 
     let mut connection = column![].spacing(10);
     if let Some(snapshot) = page.snapshot
-        && let Some(line) = panel::health_line(snapshot, page.now, &jiff::tz::TimeZone::system())
+        && let Some(line) = connected_health_line(snapshot, page.now, &jiff::tz::TimeZone::system())
     {
         connection = connection
             .push(panel::health_row(
-                panel::health_tone(snapshot),
+                health_tone(snapshot),
                 line,
                 Message::Navigate(Section::History),
             ))
@@ -92,21 +85,6 @@ pub fn view<'a>(page: View<'a>) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use crate::pages::fixtures;
-
-    #[test]
-    fn usb_device_names_the_chosen_phone_or_auto_discovery() {
-        let _guard = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::ZhCn);
-        let chosen = fixtures::disconnected_snapshot();
-        assert_eq!(
-            device_subtitle(Some(&chosen)),
-            describe::device_label(&chosen, fixtures::SERIAL)
-        );
-        let mut none = chosen.clone();
-        none.selected = None;
-        assert_eq!(device_subtitle(Some(&none)), "自动发现 / 等待已选设备");
-        assert_eq!(device_subtitle(None), "自动发现 / 等待已选设备");
-    }
 
     #[test]
     fn every_kind_of_state_builds() {

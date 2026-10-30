@@ -1,8 +1,12 @@
 //! Client side of the control socket (a named pipe on Windows), used by cellglide and the GUI.
 
+use crate::describe::{self, ui::ServiceDown};
 use crate::{
-    Endpoint, MAX_REPLY_LINE, Request, Response, Snapshot, from_line, read_line_limited, to_line,
+    Check, CheckId, Endpoint, MAX_REPLY_LINE, Reason, Request, Response, Snapshot, from_line,
+    read_line_limited, to_line,
 };
+use cg_i18n::tr;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -51,7 +55,6 @@ pub(crate) async fn connect_pipe(
     name: &str,
     verify: bool,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, ClientError> {
-    use std::time::Duration;
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows::Win32::Foundation::ERROR_PIPE_BUSY;
     const RETRY: Duration = Duration::from_millis(50);
@@ -105,39 +108,170 @@ pub async fn subscribe(endpoint: &Endpoint) -> Result<mpsc::Receiver<Snapshot>, 
     Ok(rx)
 }
 
+/// How long a reply may take before the window stops waiting.
+pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// The diagnostics bundle reads the journal, which can take a while.
+pub const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(90);
+
+pub fn timeout_for(request: &Request) -> Duration {
+    match request {
+        Request::Diagnostics { .. } => DIAGNOSTICS_TIMEOUT,
+        _ => TIMEOUT,
+    }
+}
+
+/// One request for a window. Every failure is text for the page that asked: the service's own
+/// refusal, an unreachable service, and one that never answers ([`timeout_for`]).
+pub async fn call(endpoint: &Endpoint, request: Request) -> Result<Response, String> {
+    match tokio::time::timeout(timeout_for(&request), self::request(endpoint, &request)).await {
+        Err(_elapsed) => Err(tr("gui.service_timeout", &[])),
+        Ok(Ok(Response::Error { reason })) => Err(describe::reason_text(&reason)),
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(describe::unreachable(&error)),
+    }
+}
+
+/// Whether the service speaks our protocol; otherwise why not.
+pub async fn handshake(endpoint: &Endpoint) -> Result<(), ServiceDown> {
+    match request(endpoint, &Request::Hello).await {
+        Ok(Response::Hello { protocol, .. }) if protocol == crate::PROTOCOL_VERSION => Ok(()),
+        Ok(Response::Hello { protocol, .. }) => Err(ServiceDown::other(
+            describe::version_mismatch(&protocol.to_string()),
+        )),
+        Ok(Response::Error {
+            reason: Reason::NotInGroup,
+        }) => Err(ServiceDown {
+            text: describe::checks(&[Check::new(CheckId::Group, false)])
+                .trim_end()
+                .into(),
+            not_in_group: true,
+        }),
+        // A v1 reply this client can parse but doesn't expect; unparsable ones are covered by `unreachable`.
+        Ok(_) => Err(ServiceDown::other(describe::version_mismatch("1"))),
+        Err(error) => Err(ServiceDown::other(describe::unreachable(&error))),
+    }
+}
+
+/// What a window hears from [`watch`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Update {
+    Snapshot(Box<Snapshot>),
+    /// No snapshots for now, and why; the last snapshot no longer holds.
+    Down(ServiceDown),
+}
+
+/// The service's snapshots for as long as the receiver is kept: handshake, subscribe, and each
+/// snapshot as it comes. When the subscription can't start or ends, a `Down` says why, and
+/// after `retry` it starts over. Dropping the receiver ends it.
+pub fn watch(endpoint: Endpoint, retry: Duration) -> mpsc::Receiver<Update> {
+    let (tx, rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        let gone = tx.clone();
+        tokio::select! {
+            () = gone.closed() => {}
+            () = watch_loop(&endpoint, retry, &tx) => {}
+        }
+    });
+    rx
+}
+
+async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Update>) {
+    loop {
+        let subscribed = match handshake(endpoint).await {
+            Ok(()) => subscribe(endpoint)
+                .await
+                .map_err(|e| ServiceDown::other(describe::unreachable(&e))),
+            Err(problem) => Err(problem),
+        };
+        let down = match subscribed {
+            Ok(mut updates) => {
+                while let Some(snapshot) = updates.recv().await {
+                    if tx.send(Update::Snapshot(Box::new(snapshot))).await.is_err() {
+                        return;
+                    }
+                }
+                ServiceDown::other(tr("gui.service_gone", &[]))
+            }
+            Err(problem) => problem,
+        };
+        if tx.send(Update::Down(down)).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(retry).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-    /// Answers every request with `Ok` and a subscription with two default snapshots.
-    async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S) {
+    /// How a test server answers.
+    #[derive(Clone, Copy)]
+    enum Behaviour {
+        /// Every request with `Ok`, a subscription with two default snapshots, kept open.
+        Plain,
+        /// Like the service: `Hello` with our protocol, and a subscription of two default
+        /// snapshots that then ends, as when the service stops.
+        Service,
+        /// Accepts and never answers; keeps the connection open.
+        Silent,
+    }
+
+    async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, behaviour: Behaviour) {
+        if let Behaviour::Silent = behaviour {
+            let _held = stream;
+            std::future::pending::<()>().await;
+            return;
+        }
         let (r, mut w) = tokio::io::split(stream);
         let mut r = BufReader::new(r);
         while let Ok(Some(line)) = crate::read_line(&mut r).await {
-            let reply = match crate::from_line::<Request>(&line).unwrap() {
+            let request = crate::from_line::<Request>(&line).unwrap();
+            let reply = match request {
                 Request::Subscribe => {
                     let status = crate::to_line(&Response::Status {
                         snapshot: Snapshot::default(),
                     });
                     [status.clone(), status].concat()
                 }
+                Request::Hello if matches!(behaviour, Behaviour::Service) => {
+                    crate::to_line(&Response::Hello {
+                        protocol: crate::PROTOCOL_VERSION,
+                        version: "test".into(),
+                    })
+                }
                 _ => crate::to_line(&Response::Ok),
             };
             if w.write_all(&reply).await.is_err() {
                 break;
             }
+            if matches!(
+                (behaviour, request),
+                (Behaviour::Service, Request::Subscribe)
+            ) {
+                break;
+            }
         }
     }
 
+    fn test_server() -> (Endpoint, Keep) {
+        test_server_as(Behaviour::Plain)
+    }
+
     #[cfg(unix)]
-    fn test_server() -> (Endpoint, tempfile::TempDir) {
+    type Keep = tempfile::TempDir;
+    #[cfg(windows)]
+    type Keep = ();
+
+    #[cfg(unix)]
+    fn test_server_as(behaviour: Behaviour) -> (Endpoint, Keep) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(stream));
+                tokio::spawn(serve(stream, behaviour));
             }
         });
         (Endpoint::Unix(path), dir)
@@ -161,7 +295,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn test_server() -> (Endpoint, ()) {
+    fn test_server_as(behaviour: Behaviour) -> (Endpoint, Keep) {
         use tokio::net::windows::named_pipe::ServerOptions;
         let name = random_pipe_name();
         let mut server = ServerOptions::new()
@@ -175,7 +309,7 @@ mod tests {
                     break;
                 }
                 let next = ServerOptions::new().create(&pipe_name).unwrap();
-                tokio::spawn(serve(std::mem::replace(&mut server, next)));
+                tokio::spawn(serve(std::mem::replace(&mut server, next), behaviour));
             }
         });
         (Endpoint::Pipe(name), ())
@@ -337,5 +471,71 @@ mod tests {
     fn only_the_system_pipe_is_verified() {
         assert!(verifies(crate::PIPE_NAME));
         assert!(!verifies(r"\\.\pipe\cellglide-test"));
+    }
+
+    /// The text for `key` in either language: other tests may switch the language meanwhile.
+    fn is_text_of(text: &str, key: &str) -> bool {
+        [cg_i18n::Lang::ZhCn, cg_i18n::Lang::En]
+            .iter()
+            .any(|&lang| text == cg_i18n::tr_in(lang, key, &[]))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_that_never_answers_times_out() {
+        let (endpoint, _keep) = test_server_as(Behaviour::Silent);
+        let started = tokio::time::Instant::now();
+        let result = call(&endpoint, Request::History { day: None }).await;
+        let text = result.unwrap_err();
+        assert!(is_text_of(&text, "gui.service_timeout"), "{text}");
+        assert_eq!(started.elapsed(), TIMEOUT);
+    }
+
+    #[test]
+    fn diagnostics_get_longer_to_answer() {
+        let diagnostics = Request::Diagnostics {
+            range: crate::DiagRange::Day,
+            contact: None,
+        };
+        assert_eq!(timeout_for(&diagnostics), Duration::from_secs(90));
+        assert_eq!(timeout_for(&Request::Doctor), Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn watch_hears_snapshots_then_the_service_going_and_comes_back() {
+        let (endpoint, _keep) = test_server_as(Behaviour::Service);
+        let mut updates = watch(endpoint, Duration::from_millis(10));
+        let snapshot = Update::Snapshot(Box::default());
+        for _ in 0..2 {
+            assert_eq!(updates.recv().await.unwrap(), snapshot);
+            assert_eq!(updates.recv().await.unwrap(), snapshot);
+            match updates.recv().await.unwrap() {
+                Update::Down(down) => {
+                    assert!(is_text_of(&down.text, "gui.service_gone"), "{down:?}");
+                    assert!(!down.not_in_group);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_says_why_a_service_is_unusable_and_keeps_trying() {
+        // A service of another protocol (it answers `Hello` with `Ok`).
+        let (endpoint, _keep) = test_server_as(Behaviour::Plain);
+        let mut updates = watch(endpoint, Duration::from_millis(10));
+        for _ in 0..2 {
+            let Some(Update::Down(down)) = updates.recv().await else {
+                panic!("expected Down");
+            };
+            assert!(!down.not_in_group && !down.text.is_empty(), "{down:?}");
+        }
+        // Nothing listening at all.
+        #[cfg(unix)]
+        let missing = Endpoint::parse("/nonexistent/cellglide.sock");
+        #[cfg(windows)]
+        let missing = Endpoint::parse(&random_pipe_name());
+        let mut updates = watch(missing, Duration::from_millis(10));
+        assert!(matches!(updates.recv().await, Some(Update::Down(_))));
+        assert!(matches!(updates.recv().await, Some(Update::Down(_))));
     }
 }

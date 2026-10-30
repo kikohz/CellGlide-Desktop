@@ -1,10 +1,11 @@
 //! The doctor's checks as a list: a green tick or a red cross with the sentence, and under a
 //! failed one the fix. Shared by the diagnostics page and the setup help.
 
-use super::kit::{Tone, secondary};
+use super::kit::{Tone, ToneColor, secondary};
 use crate::effect::{DoctorFor, Effect, Reply};
 use cg_i18n::tr;
-use cg_ipc::{Check, Request, describe};
+use cg_ipc::describe::ui::check_rows;
+use cg_ipc::{Check, Request};
 use iced::widget::{button, column, row, text};
 use iced::{Alignment, Element, Font, Length};
 
@@ -72,32 +73,6 @@ pub fn run_view<'a, M: Clone + 'a>(
     })
 }
 
-/// One check, ready to draw.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Row {
-    pub ok: bool,
-    pub line: String,
-    /// The bare fix (for copying), when the check failed.
-    pub fix: Option<String>,
-    /// This fix is the one just copied: its button says so.
-    pub copied: bool,
-}
-
-pub fn rows(checks: &[Check], copied: Option<&str>) -> Vec<Row> {
-    checks
-        .iter()
-        .map(|check| {
-            let (line, fix) = describe::check_lines(check);
-            Row {
-                copied: fix.as_deref().is_some() && fix.as_deref() == copied,
-                ok: check.ok,
-                line,
-                fix,
-            }
-        })
-        .collect()
-}
-
 /// The list. `on_copy` makes the message for copying a fix: the fix is shown as read-only
 /// monospace text (iced cannot select text) with a Copy button beside it.
 pub fn view<'a, M: Clone + 'a>(
@@ -106,7 +81,7 @@ pub fn view<'a, M: Clone + 'a>(
     on_copy: impl Fn(String) -> M,
 ) -> Element<'a, M> {
     let mut list = column![].spacing(8);
-    for item in rows(checks, copied) {
+    for item in check_rows(checks, copied) {
         let (mark, tone) = if item.ok {
             ("✓", Tone::Green)
         } else {
@@ -152,7 +127,6 @@ pub fn view<'a, M: Clone + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cg_ipc::CheckId;
 
     #[test]
     fn a_run_asks_once_and_ends_with_the_answer() {
@@ -192,41 +166,5 @@ mod tests {
         // Answered once only.
         assert!(!run.finish(3, Err("again".into())));
         assert_eq!(run.checks, Some(Ok(vec![])));
-    }
-
-    #[test]
-    fn a_failed_check_carries_its_fix_and_a_passed_one_does_not() {
-        let _lock = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::En);
-        let list = rows(
-            &[
-                Check::new(CheckId::Tun, true),
-                Check::new(CheckId::Tun, false),
-            ],
-            None,
-        );
-        assert!(list[0].ok && list[0].fix.is_none());
-        assert!(!list[1].ok);
-        assert!(list[1].fix.as_deref().is_some_and(|f| !f.is_empty()));
-        assert_ne!(list[0].line, list[1].line);
-    }
-
-    #[test]
-    fn only_the_copied_fix_is_marked() {
-        let _lock = cg_i18n::lock_for_tests();
-        cg_i18n::set(cg_i18n::Lang::En);
-        let checks = [
-            Check::new(CheckId::Tun, false),
-            Check::new(CheckId::Service, false),
-            Check::new(CheckId::Phone, true),
-        ];
-        let fix = rows(&checks, None)[0].fix.clone().unwrap();
-        let marked: Vec<bool> = rows(&checks, Some(&fix)).iter().map(|r| r.copied).collect();
-        assert_eq!(marked, [true, false, false]);
-        assert!(
-            rows(&checks, Some("something else"))
-                .iter()
-                .all(|r| !r.copied)
-        );
     }
 }
