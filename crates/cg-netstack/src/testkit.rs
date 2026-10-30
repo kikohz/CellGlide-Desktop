@@ -10,6 +10,7 @@ use cg_protocol::socks::{address_rest_len, parse_address, parse_udp_datagram};
 use etherparse::{NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -293,8 +294,7 @@ async fn connect(
             tokio::select! {
                 _ = async { let _ = held.wait_for(|released| *released).await; } => break,
                 _ = tokio::time::sleep(Duration::from_millis(20)) => {
-                    let peeked = tokio::time::timeout(Duration::from_millis(1), reader.peek(&mut peek)).await;
-                    if matches!(peeked, Ok(Err(_))) {
+                    if reset_seen(&mut reader, &mut peek).await {
                         return mark_closed(&record, target);
                     }
                 }
@@ -414,7 +414,7 @@ type Flows = Arc<Mutex<HashMap<(SocketAddr, SocketAddr), mpsc::UnboundedSender<S
 /// window), and UDP datagrams.
 pub struct PacketDriver {
     out: mpsc::UnboundedSender<Vec<u8>>,
-    flows: Flows,
+    routes: Routes,
     udp: tokio::sync::Mutex<mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -423,14 +423,14 @@ impl PacketDriver {
     pub fn new(mut device: PacketChannel) -> PacketDriver {
         let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (udp_tx, udp_rx) = mpsc::unbounded_channel();
-        let flows: Flows = Arc::default();
-        let routes = flows.clone();
+        let routes = Routes::default();
+        let owned = routes.clone();
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     packet = device.recv() => {
                         let Some(packet) = packet else { return };
-                        dispatch(&packet, &routes, &udp_tx);
+                        dispatch(&packet, &owned, &udp_tx);
                     }
                     packet = out_rx.recv() => {
                         let Some(packet) = packet else { return };
@@ -443,7 +443,7 @@ impl PacketDriver {
         });
         PacketDriver {
             out,
-            flows,
+            routes,
             udp: tokio::sync::Mutex::new(udp_rx),
             task,
         }
@@ -459,7 +459,7 @@ impl PacketDriver {
     /// SYN and SYN-ACK only: the connection waits for `TcpFlow::complete`.
     pub async fn tcp_syn(&self, src: SocketAddr, dst: SocketAddr) -> TcpFlow {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.flows.lock().unwrap().insert((src, dst), tx);
+        self.routes.flows.lock().unwrap().insert((src, dst), tx);
         let mut flow = TcpFlow {
             src,
             dst,
@@ -487,6 +487,7 @@ impl PacketDriver {
     }
 
     pub async fn udp_send(&self, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
+        self.routes.udp_clients.lock().unwrap().insert(src);
         let packet = match (src.ip(), dst.ip()) {
             (IpAddr::V4(s), IpAddr::V4(d)) => {
                 PacketBuilder::ipv4(s.octets(), d.octets(), 64).udp(src.port(), dst.port())
@@ -499,6 +500,11 @@ impl PacketDriver {
         let mut bytes = Vec::new();
         packet.write_to_vec(&mut bytes, payload).unwrap();
         self.out.send(bytes).unwrap();
+    }
+
+    /// Packets from the engine that no flow of this driver owned (dropped).
+    pub fn ignored(&self) -> usize {
+        self.routes.ignored.load(Ordering::Relaxed)
     }
 
     /// The next UDP datagram for the client: its source and payload.
@@ -532,11 +538,32 @@ impl Flags {
     const RST: u8 = 16;
 }
 
-/// Checks checksums (a bad one is a test failure) and routes the packet.
-fn dispatch(packet: &[u8], flows: &Flows, udp: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>) {
-    let sliced = SlicedPacket::from_ip(packet).expect("engine sent a valid IP packet");
-    let (src, dst, pseudo): (IpAddr, IpAddr, Pseudo) = match sliced.net.expect("ip header") {
-        NetSlice::Ipv4(ip) => {
+/// Where the driver's packets go: its TCP flows, the client addresses it sent UDP from,
+/// and a count of packets it does not own.
+#[derive(Clone, Default)]
+struct Routes {
+    flows: Flows,
+    udp_clients: Arc<Mutex<HashSet<SocketAddr>>>,
+    ignored: Arc<AtomicUsize>,
+}
+
+impl Routes {
+    fn ignore(&self, what: &str) {
+        self.ignored.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!("driver ignored a packet it does not own: {what}");
+    }
+}
+
+/// Routes a packet to the flow it belongs to, checking its checksum (a bad one there is
+/// a test failure). Packets no flow owns (ICMPv6 neighbour discovery and MLD, IGMP,
+/// segments or datagrams for unknown flows, unparsable packets) are counted and dropped:
+/// a real kernel stack sends those on its own.
+fn dispatch(packet: &[u8], routes: &Routes, udp: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>) {
+    let Ok(sliced) = SlicedPacket::from_ip(packet) else {
+        return routes.ignore("unparsable");
+    };
+    let (src, dst, pseudo): (IpAddr, IpAddr, Pseudo) = match sliced.net {
+        Some(NetSlice::Ipv4(ip)) => {
             let h = ip.header();
             (
                 h.source_addr().into(),
@@ -544,7 +571,7 @@ fn dispatch(packet: &[u8], flows: &Flows, udp: &mpsc::UnboundedSender<(SocketAdd
                 Pseudo::V4(h.source(), h.destination()),
             )
         }
-        NetSlice::Ipv6(ip) => {
+        Some(NetSlice::Ipv6(ip)) => {
             let h = ip.header();
             (
                 h.source_addr().into(),
@@ -552,20 +579,23 @@ fn dispatch(packet: &[u8], flows: &Flows, udp: &mpsc::UnboundedSender<(SocketAdd
                 Pseudo::V6(h.source(), h.destination()),
             )
         }
-        NetSlice::Arp(_) => panic!("arp on an ip link"),
+        _ => return routes.ignore("not ip"),
     };
     match sliced.transport {
         Some(TransportSlice::Tcp(tcp)) => {
+            let key = (
+                SocketAddr::new(dst, tcp.destination_port()),
+                SocketAddr::new(src, tcp.source_port()),
+            );
+            let Some(flow) = routes.flows.lock().unwrap().get(&key).cloned() else {
+                return routes.ignore("tcp for an unknown flow");
+            };
             let expected = match pseudo {
                 Pseudo::V4(s, d) => tcp.calc_checksum_ipv4(s, d).unwrap(),
                 Pseudo::V6(s, d) => tcp.calc_checksum_ipv6(s, d).unwrap(),
             };
             assert_eq!(tcp.checksum(), expected, "tcp checksum");
-            let key = (
-                SocketAddr::new(dst, tcp.destination_port()),
-                SocketAddr::new(src, tcp.source_port()),
-            );
-            let segment = Segment {
+            let _ = flow.send(Segment {
                 seq: tcp.sequence_number(),
                 syn: tcp.syn(),
                 ack: tcp.ack(),
@@ -574,12 +604,13 @@ fn dispatch(packet: &[u8], flows: &Flows, udp: &mpsc::UnboundedSender<(SocketAdd
                 ack_number: tcp.acknowledgment_number(),
                 window: tcp.window_size(),
                 payload: tcp.payload().to_vec(),
-            };
-            if let Some(flow) = flows.lock().unwrap().get(&key) {
-                let _ = flow.send(segment);
-            }
+            });
         }
         Some(TransportSlice::Udp(datagram)) => {
+            let to = SocketAddr::new(dst, datagram.destination_port());
+            if !routes.udp_clients.lock().unwrap().contains(&to) {
+                return routes.ignore("udp for an unknown flow");
+            }
             let header = datagram.to_header();
             let expected = match pseudo {
                 Pseudo::V4(s, d) => header.calc_checksum_ipv4_raw(s, d, datagram.payload()),
@@ -590,7 +621,7 @@ fn dispatch(packet: &[u8], flows: &Flows, udp: &mpsc::UnboundedSender<(SocketAdd
             let from = SocketAddr::new(src, datagram.source_port());
             let _ = udp.send((from, datagram.payload().to_vec()));
         }
-        other => panic!("unexpected packet from the engine: {other:?}"),
+        _ => routes.ignore("not tcp or udp"),
     }
 }
 
@@ -816,4 +847,18 @@ impl TcpFlow {
             Event::Fin => panic!("expected RST, got FIN"),
         }
     }
+}
+
+/// Whether an RST has reached `reader`, without taking data. Windows drops queued data
+/// on RST and `peek` fails; Linux keeps it readable (so `peek` succeeds) and reports
+/// the reset as the socket's pending error.
+async fn reset_seen(reader: &mut tokio::net::tcp::OwnedReadHalf, buf: &mut [u8]) -> bool {
+    let is_reset = |e: &std::io::Error| e.kind() == std::io::ErrorKind::ConnectionReset;
+    if let Ok(Some(error)) = AsRef::<TcpStream>::as_ref(reader).take_error() {
+        return is_reset(&error);
+    }
+    matches!(
+        tokio::time::timeout(Duration::from_millis(1), reader.peek(buf)).await,
+        Ok(Err(error)) if is_reset(&error)
+    )
 }
