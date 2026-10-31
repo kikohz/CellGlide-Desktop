@@ -53,6 +53,7 @@ public sealed record ReplyErr(string Message) : ReplyResult;
 [JsonDerivedType(typeof(SentValue), "sent")]
 [JsonDerivedType(typeof(SavedValue), "saved")]
 [JsonDerivedType(typeof(PrefsValue), "prefs")]
+[JsonDerivedType(typeof(AboutValue), "about")]
 public abstract record ReplyValue;
 
 public sealed record DoneValue : ReplyValue;
@@ -69,3 +70,6 @@ public sealed record SentValue(string Code) : ReplyValue;
 public sealed record SavedValue(string Path) : ReplyValue;
 
 public sealed record PrefsValue(Prefs Prefs) : ReplyValue;
+
+/// <summary>For the About page; <c>Licenses</c> is the Rust list then the NuGet list, each without its generator's header line.</summary>
+public sealed record AboutValue(string Version, string TelegramUrl, string Licenses) : ReplyValue;

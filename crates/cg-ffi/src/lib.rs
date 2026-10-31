@@ -4,6 +4,7 @@
 //! crate's integration tests; the hooks they use (module and feature `testing`) are not in the
 //! DLL.
 
+mod about;
 pub mod api;
 mod diagnostics;
 pub mod ffi;

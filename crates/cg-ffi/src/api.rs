@@ -64,6 +64,8 @@ pub enum Command {
         lang: String,
     },
     GetPrefs,
+    /// The version, the Telegram channel and the third-party licenses, for the About page.
+    GetAbout,
     SetPrefs {
         prefs: Prefs,
     },
@@ -151,6 +153,13 @@ pub enum ReplyValue {
     },
     Prefs {
         prefs: Prefs,
+    },
+    /// `licenses` is the Rust list followed by the NuGet list, each without its generator's
+    /// header line.
+    About {
+        version: String,
+        telegram_url: String,
+        licenses: String,
     },
 }
 

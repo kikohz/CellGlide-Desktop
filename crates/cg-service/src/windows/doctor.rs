@@ -123,14 +123,22 @@ fn signature_is_valid(path: &Path) -> bool {
 /// "couldn't check" rather than pass, unless another table already names an owner.
 fn dns() -> Check {
     let (rows, unread) = bindings();
-    dns_check(&port_53_owners(&rows, std::process::id()), &unread)
+    dns_check(
+        &port_53_owners(&rows, std::process::id()),
+        &unread,
+        system::process_name,
+    )
 }
 
-/// The check from the owners found and the tables that couldn't be read.
-fn dns_check(owners: &[u32], unread: &[String]) -> Check {
+/// The check from the owners found and the tables that couldn't be read. The first owner is
+/// named by `name_of`, or else sent as `pid` for the reader to put in their own language.
+fn dns_check(owners: &[u32], unread: &[String], name_of: impl Fn(u32) -> Option<String>) -> Check {
     if let Some(&pid) = owners.first() {
-        let owner = system::process_name(pid).unwrap_or_else(|| format!("PID {pid}"));
-        return Check::new(CheckId::Dns, false).with("owner", owner);
+        let check = Check::new(CheckId::Dns, false);
+        return match name_of(pid) {
+            Some(name) => check.with("owner", name),
+            None => check.with("pid", pid.to_string()),
+        };
     }
     if unread.is_empty() {
         return Check::new(CheckId::Dns, true);
@@ -449,14 +457,27 @@ mod tests {
     #[test]
     fn an_unreadable_table_is_not_a_pass() {
         let unread = ["TCP (IPv6): error 87".to_string()];
-        let check = dns_check(&[], &unread);
+        let check = dns_check(&[], &unread, |_| None);
         assert!(!check.ok);
         assert_eq!(check.args["cause"], "unreadable");
         assert_eq!(check.args["error"], "TCP (IPv6): error 87");
         // An owner found in another table still names it.
-        let check = dns_check(&[u32::MAX], &unread);
-        assert!(!check.ok && check.args.contains_key("owner"));
-        assert!(dns_check(&[], &[]).ok);
+        let check = dns_check(&[u32::MAX], &unread, |_| None);
+        assert!(!check.ok && check.args.contains_key("pid"));
+        assert!(dns_check(&[], &[], |_| None).ok);
+    }
+
+    #[test]
+    fn dns_check_sends_the_pid_when_the_name_is_unknown() {
+        let c = dns_check(&[4242], &[], |_| None);
+        assert_eq!(c.args.get("pid").map(String::as_str), Some("4242"));
+        assert!(!c.args.contains_key("owner"));
+        let named = dns_check(&[7], &[], |_| Some("svchost.exe".into()));
+        assert_eq!(
+            named.args.get("owner").map(String::as_str),
+            Some("svchost.exe")
+        );
+        assert!(!named.args.contains_key("pid"));
     }
 
     #[test]

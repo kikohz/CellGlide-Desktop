@@ -45,7 +45,7 @@
         "label": "Wi‑Fi or Ethernet (Wi-Fi)",
         "phone": false,
         "stage": "download",
-        "stage_text": "Testing Download… 4 / 10 s",
+        "stage_text": "Testing Download… 4 / 5 s",
         "error": null,
         "numbers": "Latency 38 ms · Download 87.3 Mbps",
         "latency": 38.5,

@@ -12,6 +12,7 @@
     "strict_dns": null,
     "phone": null,
     "chrome": {
+      "window_title": "CellGlide",
       "tray": {
         "active": false,
         "alert": false,

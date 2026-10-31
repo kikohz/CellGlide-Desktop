@@ -810,7 +810,7 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         (true, _) => "ok",
         (false, _) => "fail",
     };
-    let args: Vec<(&str, String)> = args
+    let mut args: Vec<(&str, String)> = args
         .into_iter()
         .map(|(k, v)| match (check.id, k) {
             // Which Apple package provides the service, as words.
@@ -826,6 +826,14 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
             _ => (k, v),
         })
         .collect();
+    // A port-53 owner whose name the service couldn't read comes as a process number, put
+    // into words here so it reads in the user's language.
+    if check.id == CheckId::Dns
+        && !check.args.contains_key("owner")
+        && let Some(pid) = check.args.get("pid")
+    {
+        args.push(("owner", tr("check.dns.owner_pid", &[("pid", pid)])));
+    }
     let line = tr_args(&format!("check.{name}.{state}"), &args);
     let fix = (!check.ok).then(|| tr_os(&fix_key(check), &[]));
     (line, fix)
@@ -991,6 +999,28 @@ mod tests {
     /// The language is process-wide: tests that switch it take turns (the shared lock).
     fn language() -> MutexGuard<'static, ()> {
         cg_i18n::lock_for_tests()
+    }
+
+    #[test]
+    fn a_port_53_owner_without_a_name_is_a_localized_process_number() {
+        let _lang = language();
+        let check = Check::new(CheckId::Dns, false).with("pid", "4242");
+        cg_i18n::set(Lang::En);
+        assert_eq!(
+            check_lines(&check).0,
+            "Another program is using DNS port 53: process 4242"
+        );
+        cg_i18n::set(Lang::ZhCn);
+        assert_eq!(
+            check_lines(&check).0,
+            "DNS 端口 53 被其他程序占用：进程 4242"
+        );
+        // A name, when the service has one, wins.
+        let named = check.with("owner", "svchost.exe");
+        assert_eq!(
+            check_lines(&named).0,
+            "DNS 端口 53 被其他程序占用：svchost.exe"
+        );
     }
 
     #[test]

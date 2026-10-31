@@ -57,6 +57,7 @@
       ]
     },
     "chrome": {
+      "window_title": "CellGlide · Connected",
       "tray": {
         "active": true,
         "alert": true,

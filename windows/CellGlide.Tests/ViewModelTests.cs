@@ -67,6 +67,30 @@ public class ViewModelTests
     }
 
     [Fact]
+    public async Task About_takes_the_reply()
+    {
+        var reply = Assert.IsType<ReplyEvent>(Samples.Event("reply_about.json"));
+        var (core, hub) = Fake(autoReply: reply.Result);
+        var about = new AboutViewModel(hub);
+        Assert.Null(about.About);
+        await about.LoadCommand.ExecuteAsync(null);
+        Assert.IsType<GetAboutCommand>(Assert.Single(core.Sent));
+        Assert.Equal("https://t.me/cellglide", about.About!.TelegramUrl);
+        Assert.Contains("CommunityToolkit.Mvvm", about.About.Licenses);
+        Assert.Null(about.Error);
+    }
+
+    [Fact]
+    public async Task About_failure_leaves_it_unset_with_the_sentence()
+    {
+        var (_, hub) = Fake(autoReply: new ReplyErr("服务已停止"));
+        var about = new AboutViewModel(hub);
+        await about.LoadCommand.ExecuteAsync(null);
+        Assert.Null(about.About);
+        Assert.Equal("服务已停止", about.Error);
+    }
+
+    [Fact]
     public async Task Speed_start_takes_include_wifi_from_the_prefs()
     {
         var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));

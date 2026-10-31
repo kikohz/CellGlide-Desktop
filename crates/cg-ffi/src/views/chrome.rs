@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ChromeView {
+    /// The main window's title; it says so while connected (as cg-gui's `App::title`).
+    pub window_title: String,
     pub tray: ui::TrayLook,
     /// The tray's right-click menu, in order.
     pub menu: Vec<MenuItemView>,
@@ -67,7 +69,13 @@ pub fn chrome(snapshot: Option<&Snapshot>, down: Option<&ServiceDown>) -> Chrome
         _ => ui::tray_look(snapshot),
     };
     let badge = |section| ui::badge(section, snapshot, down);
+    let title_key = if ui::is_connected(snapshot) {
+        "gui.title_connected"
+    } else {
+        "gui.title"
+    };
     ChromeView {
+        window_title: tr(title_key, &[]),
         menu: menu(&tray),
         tray,
         badges: BadgesView {
@@ -187,5 +195,23 @@ mod tests {
         let waiting = chrome(None, None);
         assert_eq!(waiting.tray.title, tr("gui.waiting_service", &[]));
         assert_eq!(crate::testing::plain_shape(&c), Ok(()));
+    }
+
+    #[test]
+    fn the_window_title_follows_the_connection() {
+        let _g = en();
+        assert_eq!(
+            chrome(Some(&connected_snapshot()), None).window_title,
+            tr("gui.title_connected", &[])
+        );
+        assert_eq!(
+            chrome(Some(&disconnected_snapshot()), None).window_title,
+            tr("gui.title", &[])
+        );
+        assert_eq!(
+            chrome(None, Some(&ServiceDown::new(DownReason::Gone))).window_title,
+            tr("gui.title", &[])
+        );
+        assert_ne!(tr("gui.title_connected", &[]), tr("gui.title", &[]));
     }
 }

@@ -29,6 +29,7 @@
       "trail": []
     },
     "chrome": {
+      "window_title": "CellGlide · Connected",
       "tray": {
         "active": true,
         "alert": false,

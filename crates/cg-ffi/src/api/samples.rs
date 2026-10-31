@@ -168,6 +168,7 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             },
         ),
         ("get_prefs", Command::GetPrefs),
+        ("get_about", Command::GetAbout),
         ("set_prefs", Command::SetPrefs { prefs: prefs() }),
     ];
     for (_, command) in &samples {
@@ -196,6 +197,7 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             | Command::DiagnosticsSave { .. }
             | Command::SetLang { .. }
             | Command::GetPrefs
+            | Command::GetAbout
             | Command::SetPrefs { .. } => {}
         }
     }
@@ -274,6 +276,22 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
             ),
         ),
         ("reply_prefs", reply(8, ReplyValue::Prefs { prefs: prefs() })),
+        (
+            "reply_about",
+            reply(
+                10,
+                ReplyValue::About {
+                    version: "1.0.0".into(),
+                    telegram_url: "https://t.me/cellglide".into(),
+                    // A short stand-in: the real lists run to hundreds of kilobytes.
+                    licenses: "CellGlide third-party licenses\n\nMIT License\n  - tokio 1.48.0\n\
+                               # NuGet packages of windows/CellGlide.App (both RIDs): id version \
+                               license projectUrl\nCommunityToolkit.Mvvm 8.4.2 MIT \
+                               https://github.com/CommunityToolkit/dotnet\n"
+                        .into(),
+                },
+            ),
+        ),
         (
             "reply_err_already_running",
             Event::Reply {
@@ -418,7 +436,8 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
                             | ReplyValue::Diagnostics { .. }
                             | ReplyValue::Sent { .. }
                             | ReplyValue::Saved { .. }
-                            | ReplyValue::Prefs { .. },
+                            | ReplyValue::Prefs { .. }
+                            | ReplyValue::About { .. },
                     }
                     | ReplyResult::Err { .. },
                 ..
@@ -653,6 +672,8 @@ fn leg(phone: bool, stage: Stage, results: Results) -> SpeedLeg {
             stage,
             progress,
             elapsed: 4.5,
+            // Shorter than the default test, so the stage text shows the leg's own length.
+            duration: 5.0,
             result: SpeedResult {
                 latency,
                 download,
@@ -670,7 +691,7 @@ fn leg(phone: bool, stage: Stage, results: Results) -> SpeedLeg {
 fn confirming(mut leg: SpeedLeg) -> SpeedLeg {
     leg.progress.waiting = true;
     leg.progress.progress = 1.0;
-    leg.progress.elapsed = 10.0;
+    leg.progress.elapsed = leg.progress.duration;
     leg
 }
 

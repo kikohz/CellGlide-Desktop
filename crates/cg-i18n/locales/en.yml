@@ -125,6 +125,7 @@ check:
     fix: "turn off that program's DNS feature, such as Internet Connection Sharing (the SharedAccess service)"
     unknown: "Couldn't check whether another program is using DNS port 53 (%{error})"
     fix_unreadable: "run the check again; if it still can't check, restart the computer"
+    owner_pid: "process %{pid}"
 cli:
   disconnected: "Disconnected. This computer is back on its own network"
   still_connecting: "Still connecting. Run cellglide watch to follow progress"
@@ -217,7 +218,7 @@ speed:
   upload: "Upload"
   stage:
     latency: "Checking HTTPS latency…"
-    transfer: "Testing %{direction}… %{seconds} / 10 s"
+    transfer: "Testing %{direction}… %{seconds} / %{total} s"
     confirming: "Waiting for the server to confirm the upload…"
   done: "Speed test finished"
   cancelled: "Speed test cancelled"
@@ -397,6 +398,7 @@ settings:
   auto_connect_note: "Uses the phone's network as soon as an iPhone is plugged in and sharing; when off, click Connect."
   launch_at_login: "Start in the background at login"
   launch_note: "After you log in, CellGlide runs in the tray."
+  launch_disabled_by_system: "Turned off in Windows Settings › Apps › Startup. Turn it back on there."
   open_on_plug: "Open the window when an iPhone is plugged in"
   open_on_plug_note: "While CellGlide runs in the background, plugging in an iPhone opens its window. It can't open CellGlide when it isn't running."
   advanced: "Advanced"
@@ -408,6 +410,8 @@ settings:
   dns_public: "CellGlide DNS is off on the phone; using public DNS"
   dns_unmanaged: "The system didn't let CellGlide set DNS; lookups use your original network"
   dns_idle: "Not connected; using this computer's own DNS"
+  strict_dns: "Strict DNS"
+  strict_dns_note: "While connected, DNS queries can only go through the phone. Names only your router knows (such as *.lan) won't resolve, and a name that doesn't exist takes about 12 seconds to fail. Turn this off if you need those."
   run_checks: "Run Checks"
   checking: "Checking…"
   autostart_failed: "Couldn't change start at login: %{error}"

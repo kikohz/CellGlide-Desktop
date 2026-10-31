@@ -112,6 +112,9 @@ pub struct Progress {
     pub progress: f64,
     /// Seconds into the current direction.
     pub elapsed: f64,
+    /// Seconds each direction is planned to take (`Params::duration`); `elapsed` counts up to
+    /// it.
+    pub duration: f64,
     pub result: SpeedResult,
     /// Payload bytes moved by this measurement so far, both directions.
     pub payload_bytes: u64,
@@ -132,6 +135,7 @@ pub async fn measure(
 ) -> SpeedResult {
     progress.send_replace(Progress {
         stage: Stage::Latency,
+        duration: params.duration.as_secs_f64(),
         ..Progress::default()
     });
     let outcome = if let Err(error) = params.check() {
@@ -174,7 +178,11 @@ async fn run(
         p.stage = Stage::Download;
     });
     measure_direction(route, server, params, progress, false).await?;
-    progress.send_modify(|p| p.stage = Stage::Upload);
+    // Upload's own clock starts at 0: its first frame must not show download's end.
+    progress.send_modify(|p| {
+        p.stage = Stage::Upload;
+        p.elapsed = 0.0;
+    });
     measure_direction(route, server, params, progress, true).await?;
     Ok(())
 }
@@ -460,6 +468,7 @@ impl Direction {
         let shown = s.elapsed.min(self.duration);
         p.payload_bytes = self.before + s.moved;
         p.elapsed = shown;
+        p.duration = self.duration;
         p.progress = if self.uploading { 0.5 } else { 0.0 } + shown / self.duration / 2.0;
         if !self.uploading {
             p.result.download = Some(rate);
@@ -905,6 +914,40 @@ pub(crate) mod tests {
         (result, last)
     }
 
+    /// Like `run_against`, but returns every frame a watcher saw, in order.
+    async fn frames_against(fake: &FakeServer, params: Params) -> (SpeedResult, Vec<Progress>) {
+        let (tx, mut rx) = watch::channel(Progress::default());
+        let watcher = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while rx.changed().await.is_ok() {
+                frames.push(rx.borrow_and_update().clone());
+            }
+            frames
+        });
+        let result = measure(
+            Route::Unbound,
+            fake.server(),
+            params,
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+        (result, watcher.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn progress_carries_its_duration_and_each_direction_starts_at_zero() {
+        let fake = FakeServer::start(Mode::Normal).await;
+        let params = Params {
+            duration: Duration::from_secs(2),
+            ..small()
+        };
+        let (_, frames) = frames_against(&fake, params).await;
+        assert!(frames.iter().all(|p| p.duration == 2.0), "{frames:?}");
+        let first_upload = frames.iter().find(|p| p.stage == Stage::Upload).unwrap();
+        assert!(first_upload.elapsed < 1.0, "{}", first_upload.elapsed);
+    }
+
     #[tokio::test]
     async fn full_run_reports_latency_both_directions_and_a_series() {
         let fake = FakeServer::start(Mode::Normal).await;
@@ -1296,7 +1339,7 @@ pub(crate) mod tests {
         assert!(!p.waiting, "still within the 10 s");
         assert!(direction.tick(&mut p, at(10.0)).is_none());
         assert!(p.waiting, "time is up, requests in flight");
-        assert_eq!((p.elapsed, p.progress), (10.0, 1.0));
+        assert_eq!((p.elapsed, p.progress, p.duration), (10.0, 1.0, 10.0));
         // Once over, the measurement's end clears it.
         finish(&mut p, Some(Ok(())), false);
         assert!(!p.waiting);

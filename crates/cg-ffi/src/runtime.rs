@@ -407,6 +407,9 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
                 prefs: cg_tools::prefs::load(&config.prefs_path),
             },
         },
+        Command::GetAbout => ReplyResult::Ok {
+            value: crate::about::about(),
+        },
         // `dispatch` takes it: the reply is followed by `Event::Prefs`, which only it sends.
         Command::SetPrefs { .. } => unreachable!("dispatch handles SetPrefs"),
         Command::Request { request } => crate::requests::request(&config.endpoint, request).await,

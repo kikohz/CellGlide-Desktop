@@ -3,6 +3,7 @@
   "text": "The CellGlide service stopped",
   "not_in_group": false,
   "chrome": {
+    "window_title": "CellGlide",
     "tray": {
       "active": false,
       "alert": false,

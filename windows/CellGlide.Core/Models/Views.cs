@@ -71,8 +71,9 @@ public sealed record CurvePoint(float X, float Y);
 
 // ---- views/chrome.rs ----
 
-/// <summary>The tray, its menu, the sidebar and its dots.</summary>
+/// <summary>The main window's title, the tray, its menu, the sidebar and its dots.</summary>
 public sealed record ChromeView(
+    string WindowTitle,
     TrayLook Tray,
     IReadOnlyList<MenuItemView> Menu,
     BadgesView Badges,

@@ -19,6 +19,7 @@ namespace CellGlide.Core.Models;
 [JsonDerivedType(typeof(SetLangCommand), "set_lang")]
 [JsonDerivedType(typeof(GetPrefsCommand), "get_prefs")]
 [JsonDerivedType(typeof(SetPrefsCommand), "set_prefs")]
+[JsonDerivedType(typeof(GetAboutCommand), "get_about")]
 public abstract record Command;
 
 /// <summary>Keep sending state (and ServiceGone while the service is away).</summary>
@@ -55,6 +56,9 @@ public sealed record SetLangCommand(string Lang) : Command;
 public sealed record GetPrefsCommand : Command;
 
 public sealed record SetPrefsCommand(Prefs Prefs) : Command;
+
+/// <summary>The version, the Telegram channel and the third-party licenses, for the About page.</summary>
+public sealed record GetAboutCommand : Command;
 
 /// <summary>Limits for a small speed test.</summary>
 public sealed record SpeedCaps(ulong DownloadBytes, ulong UploadBytes, uint Seconds);

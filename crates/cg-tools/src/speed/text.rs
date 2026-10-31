@@ -71,6 +71,21 @@ pub fn verdict_line(phone: Option<f64>, wifi: Option<f64>) -> Option<String> {
     })
 }
 
+/// "Testing Download… 3 / 5 s": `elapsed` against the direction's own `duration`.
+fn transfer_text(progress: &Progress, uploading: bool) -> String {
+    // `max` also turns a NaN into 0, which `clamp` would panic on.
+    let total = progress.duration.max(0.0);
+    let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, total));
+    tr(
+        "speed.stage.transfer",
+        &[
+            ("direction", &direction(uploading)),
+            ("seconds", &seconds),
+            ("total", &format!("{total:.0}")),
+        ],
+    )
+}
+
 /// The one line that is rewritten while a leg runs: the leg, its stage, progress and the
 /// current rate.
 pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
@@ -83,14 +98,7 @@ pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
         Stage::Upload => (true, progress.result.upload),
         _ => return None,
     };
-    let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, 10.0));
-    let mut line = format!(
-        "{label}  {}",
-        tr(
-            "speed.stage.transfer",
-            &[("direction", &direction(uploading)), ("seconds", &seconds)],
-        )
-    );
+    let mut line = format!("{label}  {}", transfer_text(progress, uploading));
     if let Some(mbps) = rate {
         line.push_str(&format!("  {mbps:.1} Mbps"));
     }
@@ -103,19 +111,12 @@ pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
 
 /// What a leg is doing now, for the window; nothing once it finished or before its turn.
 pub fn stage_text(progress: &Progress) -> Option<String> {
-    let transfer = |uploading: bool| {
-        let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, 10.0));
-        tr(
-            "speed.stage.transfer",
-            &[("direction", &direction(uploading)), ("seconds", &seconds)],
-        )
-    };
     match progress.stage {
         Stage::Latency => Some(tr("speed.stage.latency", &[])),
-        Stage::Download => Some(transfer(false)),
+        Stage::Download => Some(transfer_text(progress, false)),
         // The grace period: time is up, the server has yet to confirm what was sent.
         Stage::Upload if progress.waiting => Some(tr("speed.stage.confirming", &[])),
-        Stage::Upload => Some(transfer(true)),
+        Stage::Upload => Some(transfer_text(progress, true)),
         Stage::Cancelled => Some(tr("speed.cancelled", &[])),
         Stage::Idle | Stage::Done | Stage::Failed(_) => None,
     }
@@ -190,10 +191,8 @@ mod tests {
         cg_i18n::set(cg_i18n::Lang::En);
         p.stage = Stage::Download;
         p.elapsed = 4.4;
-        assert_eq!(
-            stage_text(&p).as_deref(),
-            Some("Testing Download… 4 / 10 s")
-        );
+        p.duration = 8.0;
+        assert_eq!(stage_text(&p).as_deref(), Some("Testing Download… 4 / 8 s"));
         p.stage = Stage::Upload;
         p.elapsed = 10.0;
         p.progress = 1.0;
@@ -274,13 +273,59 @@ mod tests {
         );
         p.stage = Stage::Download;
         p.elapsed = 4.4;
+        p.duration = 6.0;
         p.progress = 0.2;
         p.result.download = Some(18.26);
         assert_eq!(
             progress_line("Wi‑Fi", &p).unwrap(),
-            "Wi‑Fi  Testing Download… 4 / 10 s  18.3 Mbps  20%"
+            "Wi‑Fi  Testing Download… 4 / 6 s  18.3 Mbps  20%"
         );
         p.stage = Stage::Done;
         assert_eq!(progress_line("iPhone", &p), None);
+    }
+
+    #[test]
+    fn stage_text_counts_to_the_tests_own_duration() {
+        let _lang = language(cg_i18n::Lang::En);
+        let p = Progress {
+            stage: Stage::Download,
+            elapsed: 3.2,
+            duration: 5.0,
+            ..Progress::default()
+        };
+        assert!(
+            stage_text(&p).unwrap().ends_with("3 / 5 s"),
+            "{:?}",
+            stage_text(&p)
+        );
+        let full = Progress {
+            stage: Stage::Upload,
+            elapsed: 12.0,
+            duration: 7.0,
+            ..Progress::default()
+        };
+        assert!(stage_text(&full).unwrap().ends_with("7 / 7 s"));
+        cg_i18n::set(cg_i18n::Lang::ZhCn);
+        assert!(
+            stage_text(&p).unwrap().ends_with("3 / 5 秒"),
+            "{:?}",
+            stage_text(&p)
+        );
+    }
+
+    #[test]
+    fn progress_line_counts_to_the_tests_own_duration() {
+        let _lang = language(cg_i18n::Lang::En);
+        let p = Progress {
+            stage: Stage::Download,
+            elapsed: 3.2,
+            duration: 5.0,
+            ..Progress::default()
+        };
+        assert!(
+            progress_line("iPhone", &p).unwrap().contains("3 / 5 s"),
+            "{:?}",
+            progress_line("iPhone", &p)
+        );
     }
 }

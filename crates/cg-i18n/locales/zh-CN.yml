@@ -125,6 +125,7 @@ check:
     fix: "停用该程序的 DNS 功能，例如「Internet 连接共享」（SharedAccess 服务）"
     unknown: "无法检查 DNS 端口 53 是否被其他程序占用（%{error}）"
     fix_unreadable: "再检查一次；如果仍然无法检查，请重启电脑"
+    owner_pid: "进程 %{pid}"
 cli:
   disconnected: "已断开，电脑回到原来的网络"
   still_connecting: "仍在连接，可运行 cellglide watch 查看进度"
@@ -217,7 +218,7 @@ speed:
   upload: "上传"
   stage:
     latency: "正在检测 HTTPS 延迟…"
-    transfer: "正在测试%{direction}… %{seconds} / 10 秒"
+    transfer: "正在测试%{direction}… %{seconds} / %{total} 秒"
     confirming: "正在等待服务器确认上传的数据…"
   done: "测速完成"
   cancelled: "测速已取消"
@@ -397,6 +398,7 @@ settings:
   auto_connect_note: "插上 iPhone 并开始共享后自动使用手机网络；关闭后要点「连接」。"
   launch_at_login: "登录后在后台启动"
   launch_note: "登录桌面后，CellGlide 在托盘里运行。"
+  launch_disabled_by_system: "已在 Windows 设置 › 应用 › 启动中关闭，请在那里重新打开。"
   open_on_plug: "插入 iPhone 时打开窗口"
   open_on_plug_note: "CellGlide 在后台运行时，插上 iPhone 会打开窗口；没在运行时不会自动打开。"
   advanced: "高级"
@@ -408,6 +410,8 @@ settings:
   dns_public: "手机上的 CellGlide DNS 已关闭，使用公共 DNS"
   dns_unmanaged: "系统没有让 CellGlide 设置 DNS，域名查询仍走原来的网络"
   dns_idle: "未连接，使用电脑原来的 DNS"
+  strict_dns: "严格 DNS"
+  strict_dns_note: "连接期间，DNS 查询只能经过手机。只有路由器认识的名字（例如 *.lan）解析不了，不存在的名字要约 12 秒才返回失败。需要时可以关掉。"
   run_checks: "运行检查"
   checking: "正在检查…"
   autostart_failed: "无法更改登录启动：%{error}"
