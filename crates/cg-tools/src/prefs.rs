@@ -69,13 +69,22 @@ pub fn load(path: &Path) -> Prefs {
 }
 
 /// Writes a temporary file beside the target and renames it over, so a crash never leaves half a file.
+/// The temporary file is unique per call (and never opened if it exists), so two saves at once
+/// never write into the same one.
 pub fn save(path: &Path, prefs: &Prefs) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let temp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let written = (|| {
-        let mut file = std::fs::File::create(&temp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         file.write_all(&serde_json::to_vec_pretty(prefs).map_err(io::Error::other)?)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
@@ -126,6 +135,36 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["gui.json"]);
+    }
+
+    #[test]
+    fn saves_at_the_same_time_each_succeed_and_leave_a_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let writers: Vec<_> = (0..8)
+            .map(|n| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let prefs = Prefs {
+                        include_wifi: n % 2 == 0,
+                        ..Prefs::default()
+                    };
+                    (0..25)
+                        .map(|_| save(&path, &prefs))
+                        .filter(Result::is_err)
+                        .count()
+                })
+            })
+            .collect();
+        let failed: usize = writers.into_iter().map(|w| w.join().unwrap()).sum();
+        assert_eq!(failed, 0);
+        let text = std::fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<Prefs>(&text).is_ok());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["prefs.json"]);
     }
 
     // XDG paths are a Unix rule: "/home/x" is not absolute on Windows.

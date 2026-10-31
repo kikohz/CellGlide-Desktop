@@ -125,6 +125,9 @@ pub(crate) struct Context {
     pub(crate) shared: Arc<Shared>,
     pub(crate) speed: Arc<crate::speed::Speed>,
     pub(crate) leak: Arc<crate::leak::Leak>,
+    /// Held while the preferences are saved and announced: two `SetPrefs` at once are written
+    /// one after the other, and their `Event::Prefs` go out in the order they were written.
+    pub(crate) prefs: Arc<tokio::sync::Mutex<()>>,
     /// Cancelled at shutdown; tasks that outlive their command stop with it.
     pub(crate) cancel: CancellationToken,
 }
@@ -210,6 +213,7 @@ impl Runtime {
                 shared: Arc::default(),
                 speed: Arc::default(),
                 leak: Arc::default(),
+                prefs: Arc::default(),
                 cancel,
             },
             queue,
@@ -371,6 +375,7 @@ async fn dispatch(id: u64, command: Command, context: Context) {
         Command::SetPrefs { prefs } => {
             let path = context.config.prefs_path.clone();
             let saved = prefs.clone();
+            let _one_at_a_time = context.prefs.lock().await;
             let result = run_guarded(id, events, async move { set_prefs(&path, &saved) }).await;
             if matches!(result, Some(ReplyResult::Ok { .. })) {
                 events.emit(Event::Prefs { prefs });

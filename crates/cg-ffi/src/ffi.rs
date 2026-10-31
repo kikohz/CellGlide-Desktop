@@ -33,7 +33,7 @@ pub type cg_event_fn = Option<unsafe extern "C" fn(ctx: *mut c_void, json: *cons
 /// looks, so it never waits for a stop.
 enum Lifecycle {
     Stopped,
-    Running(Runtime),
+    Running(Box<Runtime>),
     /// A `cg_shutdown` is stopping the runtime whose event thread and delivery these are.
     Stopping {
         event_thread: Option<ThreadId>,
@@ -157,10 +157,10 @@ pub unsafe extern "C" fn cg_init(
         }
         cg_i18n::set(lang_from(&lang));
         let callback = Callback { on_event, ctx };
-        *state = Lifecycle::Running(Runtime::start(
+        *state = Lifecycle::Running(Box::new(Runtime::start(
             Config::production(),
             Box::new(move |event| callback.call(&event)),
-        ));
+        )));
         CG_OK
     })
 }
@@ -276,7 +276,7 @@ pub unsafe extern "C" fn cg_shutdown() {
                         unreachable!("matched Running above");
                     };
                     finished.armed = true;
-                    break runtime;
+                    break *runtime;
                 }
             }
         };

@@ -81,6 +81,38 @@ async fn the_prefs_event_follows_the_reply() {
 }
 
 #[tokio::test]
+async fn prefs_set_at_once_end_as_the_last_event_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, events) = collect();
+    let rt = Runtime::start(config_at(missing_endpoint(dir.path()), dir.path()), sink);
+    for round in 0..10 {
+        events.lock().unwrap().clear();
+        let ids: Vec<u64> = (0..16)
+            .map(|n| {
+                rt.send(Command::SetPrefs {
+                    prefs: Prefs {
+                        include_wifi: n % 2 == 0,
+                        open_on_plug: n % 3 == 0,
+                        speed_confirmed: n % 5 == 0,
+                    },
+                })
+            })
+            .collect();
+        for id in ids {
+            assert_eq!(reply_of(&events, id).await, ReplyResult::done(), "{round}");
+        }
+        // Every save succeeded, and the last Prefs the app heard is what is on disk.
+        let last = events.lock().unwrap().iter().rev().find_map(|e| match e {
+            Event::Prefs { prefs } => Some(prefs.clone()),
+            _ => None,
+        });
+        let saved = cg_tools::prefs::load(&dir.path().join("prefs.json"));
+        assert_eq!(last, Some(saved), "round {round}");
+    }
+    rt.shutdown();
+}
+
+#[tokio::test]
 async fn prefs_that_cannot_be_saved_are_an_error_and_no_event() {
     let dir = tempfile::tempdir().unwrap();
     // A file where the preferences' directory should be.
