@@ -8,15 +8,16 @@
 //! - It runs on the DLL's own event thread, one event at a time, in order. It may call
 //!   `cg_send` and `cg_tr`, and even `cg_shutdown` (which then returns at once and leaves the
 //!   rest of the stop to another thread).
-//! - `cg_shutdown` waits for the event thread, so the callback must never wait synchronously
-//!   for the thread that calls `cg_shutdown` (for instance a blocking dispatch to the UI
+//! - `cg_shutdown` waits for the event thread, and so does a `cg_init` that arrives while a
+//!   shutdown is under way. The callback must therefore never wait synchronously for a thread
+//!   that is in `cg_shutdown` or `cg_init` (for instance a blocking dispatch to the UI
 //!   thread): hand events on asynchronously instead.
 //! - Call `cg_shutdown` before the DLL is unloaded or the process exits; until then the DLL's
 //!   threads keep running and may call the callback.
 #![allow(non_camel_case_types)]
 
 use crate::api::Event;
-use crate::runtime::{Config, Runtime, lang_from};
+use crate::runtime::{Config, EventGate, Runtime, lang_from};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::panic::UnwindSafe;
@@ -33,31 +34,46 @@ pub type cg_event_fn = Option<unsafe extern "C" fn(ctx: *mut c_void, json: *cons
 enum Lifecycle {
     Stopped,
     Running(Runtime),
-    /// A `cg_shutdown` is stopping the runtime whose event thread this was.
+    /// A `cg_shutdown` is stopping the runtime whose event thread and delivery these are.
     Stopping {
         event_thread: Option<ThreadId>,
+        gate: EventGate,
     },
 }
 
 static STATE: Mutex<Lifecycle> = Mutex::new(Lifecycle::Stopped);
 /// Signalled when a stop has finished.
 static STOPPED: Condvar = Condvar::new();
+/// How many threads wait in `cg_init` or `cg_shutdown` for a stop to finish (for tests).
+#[cfg(test)]
+static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn state() -> MutexGuard<'static, Lifecycle> {
     STATE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn wait(guard: MutexGuard<'static, Lifecycle>) -> MutexGuard<'static, Lifecycle> {
-    STOPPED.wait(guard).unwrap_or_else(PoisonError::into_inner)
+    #[cfg(test)]
+    WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let guard = STOPPED.wait(guard).unwrap_or_else(PoisonError::into_inner);
+    #[cfg(test)]
+    WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    guard
 }
 
-/// Marks the stop finished when dropped, even if stopping panicked, so no one waits forever.
-struct StopFinished;
+/// Marks the stop finished when dropped once armed, even if stopping panicked, so no one
+/// waits forever. Made before the state lock is taken (so on a panic it drops after the lock
+/// is released) and armed under the lock, as the state becomes `Stopping`.
+struct StopFinished {
+    armed: bool,
+}
 
 impl Drop for StopFinished {
     fn drop(&mut self) {
-        *state() = Lifecycle::Stopped;
-        STOPPED.notify_all();
+        if self.armed {
+            *state() = Lifecycle::Stopped;
+            STOPPED.notify_all();
+        }
     }
 }
 
@@ -65,7 +81,7 @@ impl Drop for StopFinished {
 /// announced.
 struct Stopping {
     runtime: Runtime,
-    _finished: StopFinished,
+    finished: StopFinished,
 }
 
 /// Runs `f`; a panic gives `fallback` instead of unwinding into the caller. The panic's
@@ -133,7 +149,7 @@ pub unsafe extern "C" fn cg_init(
                 Lifecycle::Stopped => break,
                 Lifecycle::Running(_) => return CG_ALREADY,
                 // Waiting here would wait for this very thread.
-                Lifecycle::Stopping { event_thread } if *event_thread == Some(me) => {
+                Lifecycle::Stopping { event_thread, .. } if *event_thread == Some(me) => {
                     return CG_ALREADY;
                 }
                 Lifecycle::Stopping { .. } => state = wait(state),
@@ -227,8 +243,9 @@ pub unsafe extern "C" fn cg_free(ptr: *mut u8, len: usize) {
 
 /// Stops the DLL: once this returns, no more events. cg_init may start it again. While
 /// another cg_shutdown is stopping, this waits until that stop has finished. Called from the
-/// callback, it returns at once: no events are delivered after that callback returns, and the
-/// stop finishes on another thread.
+/// callback, it returns at once, and no events are delivered after that callback returns;
+/// the stop then finishes without this thread (and, if it was this call that began it, is
+/// announced only after the callback has returned).
 ///
 /// # Safety
 /// Always safe to call; unsafe only to match the other exports.
@@ -236,19 +253,29 @@ pub unsafe extern "C" fn cg_free(ptr: *mut u8, len: usize) {
 pub unsafe extern "C" fn cg_shutdown() {
     guard_export((), || {
         let me = std::thread::current().id();
+        // Before the lock, so that on a panic it drops after the lock is released.
+        let mut finished = StopFinished { armed: false };
         let mut state = state();
         let runtime = loop {
             match &*state {
                 Lifecycle::Stopped => return,
-                // The callback of the runtime being stopped: the stopper waits for it.
-                Lifecycle::Stopping { event_thread } if *event_thread == Some(me) => return,
+                // The callback of the runtime another thread is stopping: that thread waits for
+                // this callback, so don't wait for it; just deliver nothing more.
+                Lifecycle::Stopping { event_thread, gate } if *event_thread == Some(me) => {
+                    gate.close();
+                    return;
+                }
                 Lifecycle::Stopping { .. } => state = wait(state),
                 Lifecycle::Running(runtime) => {
-                    let event_thread = runtime.event_thread();
-                    let old = std::mem::replace(&mut *state, Lifecycle::Stopping { event_thread });
-                    let Lifecycle::Running(runtime) = old else {
+                    let stopping = Lifecycle::Stopping {
+                        event_thread: runtime.event_thread(),
+                        gate: runtime.gate(),
+                    };
+                    let Lifecycle::Running(runtime) = std::mem::replace(&mut *state, stopping)
+                    else {
                         unreachable!("matched Running above");
                     };
+                    finished.armed = true;
                     break runtime;
                 }
             }
@@ -257,20 +284,33 @@ pub unsafe extern "C" fn cg_shutdown() {
         // waiting on it.
         drop(state);
         let reentrant = runtime.event_thread() == Some(me);
-        let stopping = Stopping {
-            runtime,
-            _finished: StopFinished,
-        };
-        if reentrant {
-            // This thread can't wait for itself: nothing more is delivered once this callback
-            // returns, and another thread finishes the stop. Without one, dropping `stopping`
-            // here still stops everything but this thread, and announces the stop.
-            stopping.runtime.drop_pending_events();
-            let _ = std::thread::Builder::new()
-                .name("cellglide-stop".into())
-                .spawn(move || drop(stopping));
-        } else {
+        let stopping = Stopping { runtime, finished };
+        if !reentrant {
             drop(stopping);
+            return;
+        }
+        // This thread can't wait for itself: nothing more is delivered once this callback
+        // returns, and another thread finishes the stop.
+        stopping.runtime.gate().close();
+        let slot = std::sync::Arc::new(Mutex::new(Some(stopping)));
+        let stopper_slot = slot.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cellglide-stop".into())
+            .spawn(move || {
+                let stopping = stopper_slot
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                drop(stopping);
+            });
+        if spawned.is_err() {
+            // No thread to spare: stop all but this thread now, and let the event thread
+            // announce the stop itself once this callback has returned and it has ended.
+            let stopping = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(Stopping { runtime, finished }) = stopping {
+                runtime.finish_on_event_thread(Box::new(move || drop(finished)));
+                drop(runtime);
+            }
         }
     })
 }
@@ -286,8 +326,9 @@ mod tests {
     use std::ptr::null_mut;
 
     /// These tests share the DLL's one lifecycle and the process-wide language.
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        cg_i18n::lock_for_tests()
+    /// Shuts the DLL down when dropped, so a failure here can't leave it running.
+    fn serial() -> super::callback_tests::Session {
+        super::callback_tests::Session::new()
     }
 
     unsafe extern "C" fn noop(_ctx: *mut c_void, _json: *const u8, _len: usize) {}

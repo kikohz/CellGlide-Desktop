@@ -13,7 +13,7 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -87,7 +87,8 @@ pub struct Events(Delivery);
 
 #[derive(Clone)]
 enum Delivery {
-    Queue(mpsc::Sender<Message>),
+    /// The event thread's queue, and how many events wait in it.
+    Queue(mpsc::Sender<Message>, Arc<AtomicUsize>),
     Direct(Arc<Mutex<Sink>>),
 }
 
@@ -95,8 +96,11 @@ impl Events {
     pub fn emit(&self, event: Event) {
         match &self.0 {
             // After shutdown the event thread is gone and the event is dropped, as it should be.
-            Delivery::Queue(queue) => {
-                let _ = queue.send(Message::Event(event));
+            Delivery::Queue(queue, queued) => {
+                queued.fetch_add(1, Ordering::SeqCst);
+                if queue.send(Message::Event(event)).is_err() {
+                    queued.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             Delivery::Direct(sink) => {
                 let sink = sink.lock().unwrap_or_else(PoisonError::into_inner);
@@ -118,6 +122,23 @@ struct Context {
     events: Events,
 }
 
+type Finisher = Box<dyn FnOnce() + Send + 'static>;
+
+/// Whether the event thread still delivers events.
+#[derive(Clone, Default)]
+pub(crate) struct EventGate(Arc<AtomicBool>);
+
+impl EventGate {
+    /// Nothing more is delivered, not even what is already queued.
+    pub(crate) fn close(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 pub struct Runtime {
     /// `None` only once shut down.
     tokio: Option<tokio::runtime::Runtime>,
@@ -125,8 +146,10 @@ pub struct Runtime {
     context: Context,
     queue: mpsc::Sender<Message>,
     event_thread: Option<JoinHandle<()>>,
-    /// Set when the event thread itself shuts down: it then drops what is still queued.
-    closed: Arc<AtomicBool>,
+    /// Once closed, the event thread drops what is still queued.
+    gate: EventGate,
+    /// Run by the event thread as it ends, after its last callback.
+    finisher: Arc<Mutex<Option<Finisher>>>,
     next_id: AtomicU64,
 }
 
@@ -134,8 +157,12 @@ impl Runtime {
     /// Starts the workers and the event thread, which calls `sink` for each event in order.
     pub fn start(config: Config, sink: Box<dyn Fn(Event) + Send + 'static>) -> Runtime {
         let (queue, received) = mpsc::channel::<Message>();
-        let closed = Arc::new(AtomicBool::new(false));
-        let thread_closed = closed.clone();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let thread_queued = queued.clone();
+        let gate = EventGate::default();
+        let thread_gate = gate.clone();
+        let finisher: Arc<Mutex<Option<Finisher>>> = Arc::default();
+        let thread_finisher = finisher.clone();
         let event_thread = std::thread::Builder::new()
             .name("cellglide-events".into())
             .spawn(move || {
@@ -143,11 +170,20 @@ impl Runtime {
                     let Message::Event(event) = message else {
                         break;
                     };
-                    if thread_closed.load(Ordering::SeqCst) {
+                    thread_queued.fetch_sub(1, Ordering::SeqCst);
+                    if thread_gate.is_closed() {
                         break;
                     }
                     // The app's callback must not take the event thread down with it.
                     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| sink(event)));
+                }
+                drop(sink);
+                let finish = thread_finisher
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let Some(finish) = finish {
+                    let _ = std::panic::catch_unwind(AssertUnwindSafe(finish));
                 }
             })
             .expect("the event thread starts");
@@ -162,11 +198,12 @@ impl Runtime {
             cancel: CancellationToken::new(),
             context: Context {
                 config: Arc::new(config),
-                events: Events(Delivery::Queue(queue.clone())),
+                events: Events(Delivery::Queue(queue.clone(), queued)),
             },
             queue,
             event_thread: Some(event_thread),
-            closed,
+            gate,
+            finisher,
             next_id: AtomicU64::new(1),
         }
     }
@@ -226,9 +263,25 @@ impl Runtime {
             .map(|thread| thread.thread().id())
     }
 
-    /// From now on the event thread delivers nothing more, not even what is already queued.
-    pub(crate) fn drop_pending_events(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+    /// Events waiting for the event thread (not counting one being delivered).
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> usize {
+        match &self.context.events.0 {
+            Delivery::Queue(_, queued) => queued.load(Ordering::SeqCst),
+            Delivery::Direct(_) => 0,
+        }
+    }
+
+    /// The switch that stops delivery to `sink`, even what is already queued; it keeps working
+    /// after the runtime itself has been handed elsewhere.
+    pub(crate) fn gate(&self) -> EventGate {
+        self.gate.clone()
+    }
+
+    /// Has the event thread run `finish` as it ends, after its last callback has returned and
+    /// `sink` is dropped. Only meaningful while that thread runs (e.g. from inside `sink`).
+    pub(crate) fn finish_on_event_thread(&self, finish: Finisher) {
+        *self.finisher.lock().unwrap_or_else(PoisonError::into_inner) = Some(finish);
     }
 
     fn stop(&mut self) {
@@ -242,8 +295,9 @@ impl Runtime {
         };
         if event_thread.thread().id() == std::thread::current().id() {
             // Called from the app's callback: the thread can't wait for itself, so it drops
-            // whatever is still queued once this callback returns.
-            self.drop_pending_events();
+            // whatever is still queued once this callback returns and ends at the next message.
+            self.gate.close();
+            let _ = self.queue.send(Message::Stop);
         } else {
             let _ = self.queue.send(Message::Stop);
             let _ = event_thread.join();

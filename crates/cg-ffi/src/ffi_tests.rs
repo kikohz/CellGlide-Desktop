@@ -1,15 +1,44 @@
 //! The C interface through a real C callback: what it receives, what it may call, and
 //! `cg_init`/`cg_shutdown` from several threads at once. Kept out of `ffi.rs` so csbindgen
-//! never sees the test callbacks.
+//! never sees the test callbacks. No test here sleeps to make a race come out right: a held
+//! callback and the lifecycle's own state say when each step has happened.
 
 use super::*;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 
-/// These tests share the DLL's one lifecycle and the process-wide language.
-fn serial() -> MutexGuard<'static, ()> {
-    cg_i18n::lock_for_tests()
+/// One test's hold on the DLL. Dropped (after a pass or a failure), it lets a held callback go
+/// and shuts the DLL down, so a failed test can't leave it running for the next one; then it
+/// releases the lock that serialises these tests (and other users of the language).
+pub(super) struct Session {
+    recorder: Option<&'static Recorder>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Session {
+    pub(super) fn new() -> Session {
+        Session {
+            recorder: None,
+            _lock: cg_i18n::lock_for_tests(),
+        }
+    }
+
+    fn with(recorder: &'static Recorder) -> Session {
+        Session {
+            recorder: Some(recorder),
+            _lock: cg_i18n::lock_for_tests(),
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(recorder) = self.recorder {
+            recorder.hold.store(false, SeqCst);
+        }
+        shutdown();
+    }
 }
 
 struct Seen {
@@ -24,8 +53,8 @@ struct Seen {
 #[derive(Default)]
 struct Recorder {
     seen: Mutex<Vec<Seen>>,
-    /// How long each callback takes, so events queue up behind it.
-    delay_ms: AtomicU64,
+    /// While set, the callback waits before returning, so events queue up behind it.
+    hold: AtomicBool,
     inside: AtomicUsize,
     /// Two callbacks ran at the same time.
     overlapped: AtomicBool,
@@ -34,16 +63,14 @@ struct Recorder {
     /// Call `cg_send` from the next callback.
     send_inside: AtomicBool,
     sent_inside: AtomicU64,
-    /// Call `cg_shutdown` from the next callback.
+    /// Call `cg_shutdown` from the next callback (after any hold).
     shutdown_inside: AtomicBool,
     shutdown_inside_took: Mutex<Option<Duration>>,
 }
 
 impl Recorder {
-    fn new(delay_ms: u64) -> &'static Recorder {
-        let recorder: &'static Recorder = Box::leak(Box::default());
-        recorder.delay_ms.store(delay_ms, SeqCst);
-        recorder
+    fn new() -> &'static Recorder {
+        Box::leak(Box::default())
     }
 
     fn ctx(&'static self) -> *mut c_void {
@@ -60,6 +87,13 @@ impl Recorder {
             .filter(|seen| seen.event["type"] == "reply")
             .filter_map(|seen| seen.event["id"].as_u64())
             .collect()
+    }
+
+    fn shutdown_inside_took(&self) -> Option<Duration> {
+        *self
+            .shutdown_inside_took
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -86,6 +120,9 @@ unsafe extern "C" fn record(ctx: *mut c_void, json: *const u8, len: usize) {
     if recorder.send_inside.swap(false, SeqCst) {
         recorder.sent_inside.store(send(), SeqCst);
     }
+    while recorder.hold.load(SeqCst) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     if recorder.shutdown_inside.swap(false, SeqCst) {
         let started = Instant::now();
         // SAFETY: always safe.
@@ -95,7 +132,6 @@ unsafe extern "C" fn record(ctx: *mut c_void, json: *const u8, len: usize) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(started.elapsed());
     }
-    std::thread::sleep(Duration::from_millis(recorder.delay_ms.load(SeqCst)));
     recorder.inside.fetch_sub(1, SeqCst);
 }
 
@@ -115,22 +151,51 @@ fn shutdown() {
     unsafe { cg_shutdown() }
 }
 
-/// Waits up to 5 s for `done`.
+fn is_stopping() -> bool {
+    matches!(*state(), Lifecycle::Stopping { .. })
+}
+
+/// Threads waiting in `cg_init` or `cg_shutdown` for a stop to finish.
+fn waiting() -> usize {
+    WAITING.load(SeqCst)
+}
+
+/// Waits up to 10 s for `done`.
 fn wait_until(done: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {
         if Instant::now() > deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(1));
     }
     true
 }
 
+/// Starts the DLL with the callback held inside the first of ten replies, the other nine
+/// queued behind it.
+fn start_held(recorder: &'static Recorder) {
+    recorder.hold.store(true, SeqCst);
+    assert_eq!(init(recorder), CG_OK);
+    for _ in 0..10 {
+        send();
+    }
+    assert!(wait_until(|| recorder.seen().len() == 1));
+    assert!(wait_until(|| queued() == 9));
+}
+
+/// Events waiting for the event thread of the running DLL.
+fn queued() -> usize {
+    match &*state() {
+        Lifecycle::Running(runtime) => runtime.queued(),
+        Lifecycle::Stopped | Lifecycle::Stopping { .. } => 0,
+    }
+}
+
 #[test]
 fn the_callback_gets_its_context_and_json_events() {
-    let _g = serial();
-    let recorder = Recorder::new(0);
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
     assert_eq!(init(recorder), CG_OK);
     let id = send();
     assert!(wait_until(|| recorder.reply_ids().contains(&id)));
@@ -145,21 +210,20 @@ fn the_callback_gets_its_context_and_json_events() {
 
 #[test]
 fn the_callback_can_send() {
-    let _g = serial();
-    let recorder = Recorder::new(0);
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
     recorder.send_inside.store(true, SeqCst);
     assert_eq!(init(recorder), CG_OK);
     send();
     assert!(wait_until(|| recorder.sent_inside.load(SeqCst) > 0));
     let inner = recorder.sent_inside.load(SeqCst);
     assert!(wait_until(|| recorder.reply_ids().contains(&inner)));
-    shutdown();
 }
 
 #[test]
 fn several_threads_send_at_once() {
-    let _g = serial();
-    let recorder = Recorder::new(0);
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
     assert_eq!(init(recorder), CG_OK);
     let threads: Vec<_> = (0..4)
         .map(|_| std::thread::spawn(|| (0..25).map(|_| send()).collect::<Vec<u64>>()))
@@ -180,50 +244,58 @@ fn several_threads_send_at_once() {
 
 #[test]
 fn concurrent_shutdowns_both_wait_for_the_stop() {
-    let _g = serial();
-    let recorder = Recorder::new(20);
-    assert_eq!(init(recorder), CG_OK);
-    for _ in 0..10 {
-        send();
-    }
-    assert!(wait_until(|| !recorder.seen().is_empty()));
-    // Events are still queued behind the slow callback while both shut down.
-    let stoppers: Vec<_> = (0..2)
-        .map(|_| {
-            std::thread::spawn(|| {
-                shutdown();
-                Instant::now()
-            })
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
+    start_held(recorder);
+    let stop = || {
+        std::thread::spawn(|| {
+            shutdown();
+            Instant::now()
         })
-        .collect();
-    let returned: Vec<Instant> = stoppers.into_iter().map(|t| t.join().unwrap()).collect();
-    let first_return = returned.iter().min().unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    };
+    let first = stop();
+    assert!(wait_until(is_stopping));
+    let second = stop();
+    assert!(wait_until(|| waiting() == 1));
+    // Both are in: the first stopping, the second waiting for it. Let the queue drain.
+    recorder.hold.store(false, SeqCst);
+    let returned = [first.join().unwrap(), second.join().unwrap()];
     let seen = recorder.seen();
-    assert!(seen.len() > 1, "nothing was queued: {}", seen.len());
-    assert!(seen.iter().all(|seen| seen.at < *first_return));
+    assert_eq!(
+        seen.len(),
+        10,
+        "queued events are delivered before the stop ends"
+    );
+    for back in returned {
+        assert!(seen.iter().all(|seen| seen.at < back));
+    }
 }
 
 #[test]
 fn init_during_a_shutdown_waits_for_it() {
-    let _g = serial();
-    let recorder = Recorder::new(20);
-    assert_eq!(init(recorder), CG_OK);
-    for _ in 0..10 {
-        send();
-    }
-    assert!(wait_until(|| !recorder.seen().is_empty()));
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
+    start_held(recorder);
     let old_thread = recorder.seen()[0].thread;
-    let stopper = std::thread::spawn(|| {
-        shutdown();
-        Instant::now()
+    let stopper = std::thread::spawn(shutdown);
+    assert!(wait_until(is_stopping));
+    let starter = std::thread::spawn(move || {
+        let code = init(recorder);
+        (code, Instant::now())
     });
-    std::thread::sleep(Duration::from_millis(30));
-    // The stop is still draining the old queue (about 200 ms of callbacks).
-    assert_eq!(init(recorder), CG_OK);
-    let started = Instant::now();
-    let stopped = stopper.join().unwrap();
-    assert!(started >= stopped);
+    assert!(wait_until(|| waiting() == 1));
+    recorder.hold.store(false, SeqCst);
+    stopper.join().unwrap();
+    let (code, started) = starter.join().unwrap();
+    assert_eq!(code, CG_OK);
+    // The old runtime was fully stopped before the new one started.
+    assert!(
+        recorder
+            .seen()
+            .iter()
+            .filter(|seen| seen.thread == old_thread)
+            .all(|seen| seen.at < started)
+    );
     // Numbers start again at 1 in the new runtime, so its reply is told apart by thread.
     let id = send();
     assert_eq!(id, 1);
@@ -236,40 +308,43 @@ fn init_during_a_shutdown_waits_for_it() {
     assert!(wait_until(from_new));
     shutdown();
     assert!(!recorder.overlapped.load(SeqCst));
-    assert!(
-        recorder
-            .seen()
-            .iter()
-            .filter(|seen| seen.thread == old_thread)
-            .all(|seen| seen.at < stopped)
-    );
 }
 
 #[test]
 fn shutdown_from_the_callback_returns_at_once() {
-    let _g = serial();
-    let recorder = Recorder::new(20);
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
     recorder.shutdown_inside.store(true, SeqCst);
-    assert_eq!(init(recorder), CG_OK);
-    for _ in 0..10 {
-        send();
-    }
-    let took = || {
-        *recorder
-            .shutdown_inside_took
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    };
-    assert!(wait_until(|| took().is_some()));
-    assert!(took().unwrap() < Duration::from_millis(500), "{:?}", took());
+    start_held(recorder);
+    recorder.hold.store(false, SeqCst);
+    assert!(wait_until(|| recorder.shutdown_inside_took().is_some()));
+    let took = recorder.shutdown_inside_took().unwrap();
+    assert!(took < Duration::from_millis(500), "{took:?}");
     // A new start waits for the stop to finish, then works.
     assert_eq!(init(recorder), CG_OK);
-    std::thread::sleep(Duration::from_millis(100));
     // Only the event whose callback shut down came from the first runtime.
     assert_eq!(recorder.seen().len(), 1);
     assert_eq!(send(), 1);
     shutdown();
     assert!(!recorder.overlapped.load(SeqCst));
+}
+
+#[test]
+fn shutdown_from_the_callback_during_another_shutdown_ends_delivery() {
+    let recorder = Recorder::new();
+    let _session = Session::with(recorder);
+    start_held(recorder);
+    let stopper = std::thread::spawn(shutdown);
+    assert!(wait_until(is_stopping));
+    // The held callback now shuts down too, while the other thread is stopping.
+    recorder.shutdown_inside.store(true, SeqCst);
+    recorder.hold.store(false, SeqCst);
+    stopper.join().unwrap();
+    let took = recorder.shutdown_inside_took().unwrap();
+    assert!(took < Duration::from_millis(500), "{took:?}");
+    // The nine queued events were dropped, not delivered after that callback returned.
+    assert_eq!(recorder.seen().len(), 1);
+    assert!(!is_stopping());
 }
 
 #[test]

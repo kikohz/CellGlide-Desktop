@@ -75,8 +75,9 @@ namespace CellGlide.Core.Native
         /// <summary>
         ///  Stops the DLL: once this returns, no more events. cg_init may start it again. While
         ///  another cg_shutdown is stopping, this waits until that stop has finished. Called from the
-        ///  callback, it returns at once: no events are delivered after that callback returns, and the
-        ///  stop finishes on another thread.
+        ///  callback, it returns at once, and no events are delivered after that callback returns;
+        ///  the stop then finishes without this thread (and, if it was this call that began it, is
+        ///  announced only after the callback has returned).
         ///
         ///  # Safety
         ///  Always safe to call; unsafe only to match the other exports.
