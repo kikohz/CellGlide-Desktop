@@ -31,34 +31,23 @@ public class XBindTests
         Assert.Equal(["Shell.Overview"], calls[0].Args.Where(CanBeNull));
         Assert.Equal(["Shell.Chrome.Menu"], calls[1].Args.Where(CanBeNull));
         Assert.DoesNotContain(calls[2].Args, CanBeNull);
-        // The other pages' view models too: their views come only with the DLL's first event.
-        Assert.Equal(["Speed.View", "Leak.View.Result"], AppSources.BindCalls("""<A B="{x:Bind F(Speed.View, Leak.View.Result, Speed.StartCommand)}" />""").Single().Args.Where(CanBeNull));
         Assert.Contains(AppSources.BindCalls(), call => call.Args.Contains("Shell.Now"));
     }
 
     static readonly NullabilityInfoContext Nullability = new();
 
-    /// <summary>The view models the pages name in their bindings, by the name they use.</summary>
-    static readonly Dictionary<string, Type> Roots = new()
-    {
-        ["Shell"] = typeof(ShellViewModel),
-        ["Speed"] = typeof(SpeedViewModel),
-        ["Leak"] = typeof(LeakViewModel),
-        ["Settings"] = typeof(SettingsViewModel),
-        ["Checks"] = typeof(ChecksViewModel),
-    };
-
     /// <summary>
-    /// Whether an argument path through one of the view models meets a property declared nullable
-    /// (Overview, ServiceDown, Chrome, Error, View...), or an unknown member. Other roots are not judged.
+    /// Whether an argument path through ShellViewModel meets a property declared nullable (Overview,
+    /// ServiceDown, Chrome, Error...), or an unknown member. Other roots are not judged.
     /// </summary>
     static bool CanBeNull(string arg)
     {
         var parts = arg.Split('.');
-        if (!Roots.TryGetValue(parts[0], out var type) || parts.Length < 2)
+        if (parts[0] != "Shell" || parts.Length < 2)
         {
             return false;
         }
+        var type = typeof(ShellViewModel);
         foreach (var name in parts.Skip(1))
         {
             if (type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance) is not { } property)

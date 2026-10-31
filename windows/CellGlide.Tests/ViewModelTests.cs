@@ -217,6 +217,49 @@ public class ViewModelTests
     }
 
     [Fact]
+    public async Task Continuing_with_dont_ask_again_saves_the_prefs_then_starts_confirmed()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var speed = new SpeedViewModel(hub, new SettingsViewModel(hub));
+        core.Raise(new PrefsEvent(new Prefs(false, true, false)));
+        await speed.AnswerDataWarningAsync(DataWarningAnswer.Continue, dontAskAgain: true);
+        Assert.Equal(
+            [new SetPrefsCommand(new Prefs(true, true, false)), new SpeedStartCommand(true, true, null)],
+            core.Sent);
+    }
+
+    [Fact]
+    public async Task Continuing_without_dont_ask_again_only_starts_confirmed()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var speed = new SpeedViewModel(hub, new SettingsViewModel(hub));
+        core.Raise(new PrefsEvent(new Prefs(false, false, false)));
+        await speed.AnswerDataWarningAsync(DataWarningAnswer.Continue, dontAskAgain: false);
+        Assert.Equal(new SpeedStartCommand(false, true, null), Assert.Single(core.Sent));
+    }
+
+    [Fact]
+    public async Task Dismissing_the_data_warning_cancels_and_saves_nothing()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var speed = new SpeedViewModel(hub, new SettingsViewModel(hub));
+        core.Raise(new PrefsEvent(new Prefs(false, true, false)));
+        // The box ticked, then Cancel or Esc: not a reason to stop asking.
+        await speed.AnswerDataWarningAsync(DataWarningAnswer.Dismiss, dontAskAgain: true);
+        Assert.IsType<SpeedCancelCommand>(Assert.Single(core.Sent));
+    }
+
+    [Fact]
+    public async Task A_warning_the_dll_withdrew_sends_nothing()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var speed = new SpeedViewModel(hub, new SettingsViewModel(hub));
+        core.Raise(new PrefsEvent(new Prefs(false, true, false)));
+        await speed.AnswerDataWarningAsync(DataWarningAnswer.Withdrawn, dontAskAgain: true);
+        Assert.Empty(core.Sent);
+    }
+
+    [Fact]
     public async Task Leak_start_cancel_and_view()
     {
         var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));

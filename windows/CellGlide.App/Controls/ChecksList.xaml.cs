@@ -51,6 +51,9 @@ public sealed partial class ChecksList : UserControl
         InitializeComponent();
         Loaded += (_, _) =>
         {
+            // Loaded can come twice in a row without Unloaded between: take any earlier subscription off first,
+            // so there is never more than one.
+            Show.Changed -= Repaint;
             Show.Changed += Repaint;
             Attach(null);
         };

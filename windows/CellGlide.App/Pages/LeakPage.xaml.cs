@@ -31,6 +31,9 @@ public sealed partial class LeakPage : Page
         leak.PropertyChanged += OnChanged;
         Loaded += (_, _) =>
         {
+            // Loaded can come twice in a row without Unloaded between: take any earlier subscription off first,
+            // so there is never more than one.
+            Show.Changed -= Render;
             Show.Changed += Render;
             Render();
         };
@@ -84,8 +87,6 @@ public sealed partial class LeakPage : Page
         {
             Groups.Children.Add(Group(group, result.Subnet));
         }
-        // As the CLI report: only when some network shows several addresses.
-        ManyIps.Visibility = Show.Visible(result.Groups.Any(group => group.Addresses.Count > 1));
         Subnet.Text = result.Subnet ?? "";
         Subnet.Visibility = Show.Visible(result.Subnet);
     }

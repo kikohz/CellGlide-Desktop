@@ -322,6 +322,14 @@ mod tests {
             ..page(&legs, &[])
         };
         assert!(!speed(&wifi_only, &TimeZone::UTC).offers_wifi);
+        // The phone connected but no Wi‑Fi or Ethernet of this computer's own: nothing to compare with.
+        let phone_only = SpeedPage {
+            uplink: None,
+            ..page(&legs, &[])
+        };
+        let view = speed(&phone_only, &TimeZone::UTC);
+        assert!(view.start_enabled);
+        assert!(!view.offers_wifi);
     }
 
     #[test]

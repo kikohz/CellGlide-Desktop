@@ -21,8 +21,9 @@ namespace CellGlide.App.Pages;
 /// the view's; the code only lays it out.
 /// <para>
 /// The data warning: the DLL puts it up (<see cref="SpeedViewModel.DataWarningRequested"/>), the page
-/// asks with a dialog. Continue sends <c>SetPrefs</c> first when "don't ask again" is ticked, then
-/// <c>SpeedStart</c> confirmed; Cancel or Esc sends <c>SpeedCancel</c>, which puts it away in the DLL.
+/// asks with a dialog. The answer goes to <see cref="SpeedViewModel.AnswerDataWarningAsync"/>, which decides what to
+/// send (Continue: SetPrefs first when "don't ask again" is ticked, then SpeedStart confirmed; Cancel or Esc:
+/// SpeedCancel, which puts it away in the DLL).
 /// When the DLL puts it away by itself (the phone left), the dialog closes without sending anything.
 /// </para>
 /// </summary>
@@ -53,6 +54,9 @@ public sealed partial class SpeedPage : Page
         speed.DataWarningRequested += OnDataWarning;
         Loaded += (_, _) =>
         {
+            // Loaded can come twice in a row without Unloaded between: take any earlier subscription off first,
+            // so there is never more than one.
+            Show.Changed -= Repaint;
             Show.Changed += Repaint;
             Render();
             if (_warningPending)
@@ -437,24 +441,20 @@ public sealed partial class SpeedPage : Page
         _warningWithdrawn = false;
         var answer = await ShowAsync(dialog);
         _warning = null;
-        if (_warningWithdrawn)
-        {
-            _warningWithdrawn = false;
-            return;
-        }
+        // What the answer sends is the view model's (Cancel, Esc or a dialog that could not be shown is a
+        // dismissal; a warning the DLL took back sends nothing).
+        var choice = _warningWithdrawn ? DataWarningAnswer.Withdrawn
+            : answer == ContentDialogResult.Primary ? DataWarningAnswer.Continue
+            : DataWarningAnswer.Dismiss;
+        _warningWithdrawn = false;
         _prefsError = null;
-        if (answer == ContentDialogResult.Primary)
+        var dontAskAgain = dontAsk.IsChecked == true;
+        await _speed.AnswerDataWarningAsync(choice, dontAskAgain);
+        if (choice == DataWarningAnswer.Continue && dontAskAgain && _settings.Error is { } failed)
         {
-            if (dontAsk.IsChecked == true)
-            {
-                await SetPrefsAsync(prefs => prefs with { SpeedConfirmed = true });
-            }
-            await _speed.StartCommand.ExecuteAsync(true);
-        }
-        else
-        {
-            // Cancel, Esc, or the dialog could not be shown: put the warning away in the DLL too.
-            await _speed.CancelCommand.ExecuteAsync(null);
+            // The preference could not be saved (the test started anyway): say so.
+            _prefsError = failed;
+            Render();
         }
     }
 

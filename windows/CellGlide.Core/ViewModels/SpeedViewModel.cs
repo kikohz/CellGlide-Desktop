@@ -58,6 +58,32 @@ public sealed class SpeedViewModel : CoreViewModel
         await RunAsync(new SpeedStartCommand(prefs.IncludeWifi, confirmed, Caps));
     }
 
+    /// <summary>
+    /// The user's answer to the data warning. Continue: with <paramref name="dontAskAgain"/>, first saves
+    /// the preference not to ask again (SetPrefs), then starts the test confirmed (whether or not the
+    /// preference could be saved; a failure stays in the settings' Error). Dismiss (Cancel or Esc):
+    /// SpeedCancel, which puts the warning away in the DLL; the box is ignored. Withdrawn: the DLL put
+    /// it away by itself (the phone left), so nothing is sent.
+    /// </summary>
+    public async Task AnswerDataWarningAsync(DataWarningAnswer choice, bool dontAskAgain)
+    {
+        switch (choice)
+        {
+            case DataWarningAnswer.Continue:
+                if (dontAskAgain && (_settings.Prefs ?? await _settings.LoadAsync()) is { } prefs)
+                {
+                    await _settings.SetPrefsCommand.ExecuteAsync(prefs with { SpeedConfirmed = true });
+                }
+                await StartCommand.ExecuteAsync(true);
+                break;
+            case DataWarningAnswer.Dismiss:
+                await CancelCommand.ExecuteAsync(null);
+                break;
+            case DataWarningAnswer.Withdrawn:
+                break;
+        }
+    }
+
     void OnProgress(SpeedView view)
     {
         var shown = _view?.Dialog == SpeedDialog.DataWarning;
@@ -67,4 +93,17 @@ public sealed class SpeedViewModel : CoreViewModel
             DataWarningRequested?.Invoke();
         }
     }
+}
+
+/// <summary>How the data warning was answered (<see cref="SpeedViewModel.AnswerDataWarningAsync"/>).</summary>
+public enum DataWarningAnswer
+{
+    /// <summary>The user chose to go on.</summary>
+    Continue,
+
+    /// <summary>The user said no: Cancel, Esc, or the dialog could not be shown.</summary>
+    Dismiss,
+
+    /// <summary>The DLL put the warning away by itself before the user answered.</summary>
+    Withdrawn,
 }

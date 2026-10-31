@@ -78,7 +78,8 @@
                             <TextBlock x:Name="NoneSeen" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="Collapsed"
                                        Text="{x:Bind h:L.T('leak.none_seen')}" />
                             <StackPanel x:Name="Groups" Spacing="8" />
-                            <TextBlock x:Name="ManyIps" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="Collapsed"
+                            <!-- Shown with every result, as cg-gui pages/leak.rs does: the page decides nothing about it. -->
+                            <TextBlock FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        Text="{x:Bind h:L.T('leak.many_ips')}" />
                             <TextBlock x:Name="Subnet" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="Collapsed" />
                         </StackPanel>
