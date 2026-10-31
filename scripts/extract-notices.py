@@ -17,6 +17,8 @@ while args and args[0] == "--skip":
     skip.append(args[1])
     args = args[2:]
 root, dirs = Path(args[0]), args[1:]
+# UTF-8 and LF whatever the platform (Git Bash on Windows would otherwise write CRLF).
+sys.stdout.reconfigure(encoding="utf-8", newline="\n")
 
 
 def norm(text):
@@ -39,13 +41,13 @@ def block_of(text):
     return None
 
 
-skipped = {norm(Path(s).read_text()) for s in skip}
+skipped = {norm(Path(s).read_text(encoding="utf-8")) for s in skip}
 groups = {}
 for d in dirs:
     for path in sorted((root / d).rglob("*")):
         if path.suffix not in (".c", ".h") or not path.is_file():
             continue
-        found = block_of(path.read_text(errors="replace"))
+        found = block_of(path.read_text(encoding="utf-8", errors="replace"))
         if not found or any(s and s in found[1] for s in skipped):
             continue
         groups.setdefault(found[1], (found[0], []))[1].append(path.relative_to(root).as_posix())

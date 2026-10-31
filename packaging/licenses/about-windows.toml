@@ -1,0 +1,21 @@
+# cargo-about configuration for the Windows third-party licence list
+# (packaging/licenses/windows-rust.txt, written by scripts/update-licenses.sh). The same accepted
+# licenses and exclusions as about.toml (dev- and build-dependencies and this repository's own
+# crates stay out), for what the Windows builds link.
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+private = { ignore = true }

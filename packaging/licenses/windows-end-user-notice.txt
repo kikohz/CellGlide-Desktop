@@ -1,0 +1,3 @@
+CellGlide includes Microsoft Windows App SDK and .NET components that are licensed to you under the Microsoft Software License Terms reproduced in this file; by installing or using CellGlide you agree to those terms for those components.
+
+CellGlide itself is licensed under the MIT License (see LICENSE.txt). The licenses of the other components it includes follow below, each with its full text.

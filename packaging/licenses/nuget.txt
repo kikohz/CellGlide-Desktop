@@ -45,15 +45,25 @@ System.Numerics.Tensors 9.0.0 MIT https://dot.net/
 #   Microsoft.WindowsAppSDK.Widgets 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
 #   Microsoft.WindowsAppSDK.WinUI 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
 #
-# Note for W4 (packaging): the Windows App SDK files ship under the Microsoft Software License
-# Terms, not a permissive license. The zip and the installer must carry the Windows App SDK license
-# text and an end-user terms notice (section 3.b.ii of those terms), and THIRD-PARTY-LICENSES must
-# list it.
-# THIRD-PARTY-LICENSES must also carry the full license text and copyright notice (not just the
-# one line above) of every NuGet package shipped with the app under MIT, BSD or a similar license
-# (CommunityToolkit.Mvvm, the H.NotifyIcon packages, System.Drawing.Common,
-# Microsoft.Win32.SystemEvents, Microsoft.Web.WebView2 (BSD-3-Clause), ...), which can be gathered
-# from each package's license file or licenseUrl; plus the notices of the .NET runtime that Native
-# AOT compiles into CellGlide.exe (the ILCompiler runtime packages: MIT, and their own
-# THIRD-PARTY-NOTICES) and of the Windows SDK projection / CsWinRT compiled in (MIT), which are not
-# in the lock files. Whether the About page shows the full texts too is decided in W4.
+# Not shipped (used while building, or none of their files built or published), so not in
+# nuget-notices.txt:
+#   Microsoft.DotNet.ILCompiler: the Native AOT compiler driver (MSBuild targets), run while publishing; what is compiled into CellGlide.exe is runtime.win-*.Microsoft.DotNet.ILCompiler and the Native AOT runtime pack (see below)
+#   Microsoft.NET.ILLink.Tasks: the trimmer, run while publishing; nothing of it is in the publish folder
+#   Microsoft.Windows.AI.MachineLearning: referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published
+#   Microsoft.Windows.SDK.BuildTools: Windows SDK build tools, run while building
+#   Microsoft.Windows.SDK.BuildTools.MSIX: MSIX build tools that make resources.pri, run while building
+#   Microsoft.WindowsAppSDK: metapackage: only MSBuild props and targets, no files of its own; its component packages have their own sections
+#   Microsoft.WindowsAppSDK.AI: referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published
+#   Microsoft.WindowsAppSDK.ML: referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published
+#   Microsoft.WindowsAppSDK.Search: referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published
+#
+# Compiled into CellGlide.exe without being in the lock file (found through
+# windows/CellGlide.App/obj/project.assets.json), so in nuget-notices.txt too:
+#   Microsoft.NETCore.App.Runtime.NativeAOT.win-arm64 10.0.14: MIT; the .NET runtime and libraries Native AOT compiles into CellGlide.exe (win-arm64)
+#   Microsoft.NETCore.App.Runtime.NativeAOT.win-x64 10.0.14: MIT; the .NET runtime and libraries Native AOT compiles into CellGlide.exe (win-x64)
+#   Microsoft.Windows.SDK.NET.Ref 10.0.26100.57: Microsoft Software License Terms (Windows SDK); the Windows SDK projection (Microsoft.Windows.SDK.NET.dll) compiled into CellGlide.exe
+#   Microsoft.Windows.CsWinRT 2.2.0.48161: MIT; C#/WinRT runtime (WinRT.Runtime.dll from Microsoft.Windows.SDK.NET.Ref) compiled into CellGlide.exe
+#
+# The full license texts and third-party notices of everything that ships, with the end-user terms
+# notice of the Windows App SDK terms (section 3.b.ii) first, are in nuget-notices.txt, which this
+# script also writes; the About page and THIRD-PARTY-LICENSES.txt show that file, not this one.

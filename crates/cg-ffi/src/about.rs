@@ -1,6 +1,5 @@
 //! `Command::GetAbout`: what the About page shows that the app can't know itself, the version,
-//! the Telegram channel and every third-party license, as the Linux window's About page has
-//! them.
+//! the Telegram channel and the full text of every third-party license that ships on Windows.
 
 use crate::api::ReplyValue;
 use std::sync::OnceLock;
@@ -10,14 +9,14 @@ pub const TELEGRAM_URL: &str = "https://t.me/cellglide";
 /// What the link shows, as on the Linux window's About page.
 pub const TELEGRAM_LABEL: &str = "t.me/cellglide";
 
-/// The crates cargo-about finds, then hev-socks5-tunnel and the C code it bundles
-/// (`scripts/update-licenses.sh`). The first line is a header for its freshness check.
-const RUST_LICENSES: &str = include_str!("../../cg-gui/assets/third-party-licenses.txt");
+/// The Rust crates the Windows package ships (cg-ffi, cg-cli, cg-service), as cargo-about lists
+/// them (`scripts/update-licenses.sh`). The first line is a header for its freshness check.
+const RUST_LICENSES: &str = include_str!("../../../packaging/licenses/windows-rust.txt");
 
-/// The NuGet packages of `windows/CellGlide.App` (`scripts/check-nuget-licenses.ps1`): one
-/// `id version license projectUrl` line per package, and `#` comments (the header, why each
-/// reviewed package is allowed, a note for packaging) that are for us, not for users.
-const NUGET_LICENSES: &str = include_str!("../../../packaging/licenses/nuget.txt");
+/// The end-user terms notice of the Windows App SDK terms, then the full license text and
+/// third-party notices of every .NET component that ships with the app
+/// (`scripts/check-nuget-licenses.ps1`). The first line is the generator's header.
+const NUGET_LICENSES: &str = include_str!("../../../packaging/licenses/nuget-notices.txt");
 
 pub fn about() -> ReplyValue {
     ReplyValue::About {
@@ -28,16 +27,14 @@ pub fn about() -> ReplyValue {
     }
 }
 
-/// The Rust list without its header line, then the NuGet packages' lines alone; built once.
+/// Both lists in full, each without its header line, joined by a newline; built once. The Windows
+/// zip's THIRD-PARTY-LICENSES.txt is to follow the same rule.
 fn licenses() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
         let mut text = without_first_line(RUST_LICENSES).to_owned();
         text.push('\n');
-        for line in nuget_packages(NUGET_LICENSES) {
-            text.push_str(line);
-            text.push('\n');
-        }
+        text.push_str(without_first_line(NUGET_LICENSES));
         text
     })
 }
@@ -46,18 +43,29 @@ fn without_first_line(text: &str) -> &str {
     text.split_once('\n').map_or("", |(_, rest)| rest)
 }
 
-/// The package lines of nuget.txt: neither comments nor blank lines.
-fn nuget_packages(text: &str) -> impl Iterator<Item = &str> {
-    text.lines()
-        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// FNV-1a 64, as cg-gui's `pages/about.rs` and `scripts/update-licenses.sh` compute it.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// `word` occurs with neither neighbour an ASCII letter, digit, `-` or `_` (or at the edge).
+    fn has_word(text: &str, word: &str) -> bool {
+        let part = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        text.match_indices(word).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + word.len()..].chars().next();
+            !before.is_some_and(part) && !after.is_some_and(part)
+        })
+    }
+
     #[test]
-    fn about_carries_the_version_link_and_both_license_lists() {
+    fn about_carries_the_windows_lists_in_full() {
         let ReplyValue::About {
             version,
             telegram_url,
@@ -70,45 +78,62 @@ mod tests {
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
         assert_eq!(telegram_url, "https://t.me/cellglide");
         assert_eq!(telegram_label, "t.me/cellglide");
-        assert!(licenses.starts_with("CellGlide third-party licenses"));
-        assert!(licenses.contains("tokio"));
-        // The license texts themselves may have lines starting with '#' (a Markdown heading, a
-        // C `#define`); what follows the Rust list and the newline after it must be package
-        // lines only.
-        let nuget = &licenses[without_first_line(RUST_LICENSES).len() + 1..];
-        assert!(!nuget.is_empty());
-        for line in nuget.lines() {
-            assert!(!line.starts_with('#') && !line.is_empty(), "{line:?}");
-        }
-        assert!(
-            nuget.lines().any(|l| l
-                == "CommunityToolkit.Mvvm 8.4.2 MIT https://github.com/CommunityToolkit/dotnet"),
-            "{nuget}"
-        );
-        // Neither generator's header, nor the review notes, nor the packaging note.
-        for internal in [
-            "# Generated by",
-            "# NuGet packages",
-            ": declares ",
-            "Note for W4",
+        assert!(licenses.starts_with("CellGlide third-party licenses (Rust crates, Windows)"));
+        for name in [
+            "tokio",
+            "smoltcp",
+            "windows-sys",
+            "CommunityToolkit.Mvvm",
+            "H.NotifyIcon.WinUI",
+            "MICROSOFT SOFTWARE LICENSE TERMS",
+            "Microsoft.Windows.SDK.NET.Ref",
+            "CellGlide includes Microsoft Windows App SDK",
         ] {
-            assert!(!licenses.contains(internal), "{internal}");
+            assert!(licenses.contains(name), "{name}");
         }
+        assert!(!licenses.contains("hev-socks5"), "hev-socks5");
+        assert!(!licenses.contains("# Generated by"));
+        for linux_only in ["lwIP", "ksni", "iced"] {
+            // Whole words: "noticed" is not "iced".
+            assert!(!has_word(&licenses, linux_only), "{linux_only}");
+        }
+        // The Rust list, a newline, then the NuGet notices from the end-user notice on.
+        let rust = without_first_line(RUST_LICENSES);
+        assert_eq!(&licenses[..rust.len()], rust);
+        assert_eq!(&licenses[rust.len()..rust.len() + 1], "\n");
+        assert_eq!(
+            &licenses[rust.len() + 1..],
+            without_first_line(NUGET_LICENSES)
+        );
+    }
+
+    #[test]
+    fn has_word_matches_whole_words_only() {
+        assert!(has_word("uses iced 0.13", "iced"));
+        assert!(has_word("(iced)", "iced"));
+        assert!(has_word("iced", "iced"));
+        assert!(!has_word("noticed, practiced", "iced"));
+        assert!(!has_word("iced-x", "iced"));
+        assert!(!has_word("x_iced", "iced"));
+    }
+
+    #[test]
+    fn windows_licenses_are_not_older_than_cargo_lock() {
+        let lock = include_str!("../../../Cargo.lock");
+        let expected = format!(
+            "# Generated by scripts/update-licenses.sh; Cargo.lock fnv1a64 {:016x}",
+            fnv1a64(lock.as_bytes())
+        );
+        assert_eq!(
+            RUST_LICENSES.lines().next().unwrap(),
+            expected,
+            "Cargo.lock changed: run scripts/update-licenses.sh"
+        );
     }
 
     #[test]
     fn the_first_line_alone_is_dropped() {
         assert_eq!(without_first_line("# header\nbody\nmore\n"), "body\nmore\n");
         assert_eq!(without_first_line("only"), "");
-    }
-
-    #[test]
-    fn only_package_lines_are_kept_from_nuget() {
-        let text = "# Generated\n# id version license projectUrl\nA 1.0 MIT https://a\n\n\
-                    #   A 1.0: declares MIT\n#\n# Note for W4\nB 2.0 Some Terms https://b\n";
-        assert_eq!(
-            nuget_packages(text).collect::<Vec<_>>(),
-            ["A 1.0 MIT https://a", "B 2.0 Some Terms https://b"]
-        );
     }
 }

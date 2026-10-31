@@ -425,6 +425,17 @@ Speed test finished
 - **SidebarHeading 去掉 BasedOn**：改为显式 Setter（FontSize 12、LineHeight 16、SemiBold、`{ThemeResource TextFillColorSecondaryBrush}`）。测前 `reg query ...\Themes\Personalize`：`AppsUseLightTheme 0x1`、`SystemUsesLightTheme 0x1`、`ColorPrevalence 0x0`、`EnableTransparency 0x1`。`--tray` 启动后只改 `AppsUseLightTheme` 并广播 `WM_SETTINGCHANGE("ImmersiveColorSet")`：深 → 浅 → 深，然后第一次打开主窗口：分组标题（Tools / Activity / App）是小号、半粗、次要颜色，进程正常；再切回浅色，标题照样正确，没有崩溃。测后写回 `0x1`，`reg query /s` 与测前逐字相同。
 - **缺 DLL 的提示**：`Configuration=Release` 时为 `run 'cargo build -p cg-ffi --release' first (or pass -p:CellGlideNativeDir=...)`，`check-windows-core.ps1` 用 `-p:CellGlideNativeDir=..\target\no-such-dir\` 核对。
 
+### Task 3：Windows 的第三方许可（2026-10-31）
+
+- **生成物**：`packaging/licenses/windows-rust.txt`（`scripts/update-licenses.sh`，cg-ffi / cg-cli / cg-service 三个随包 crate 在 Windows 目标上的依赖，cargo-about 各跑一次 JSON，`scripts/render-about.py` 按 cargo-about 自己的分组规则合并，再按 `about.hbs` 排版；不含 hev、lwIP、C 声明，也不含 cg-gui 的 iced / ksni），`packaging/licenses/nuget-notices.txt`（`scripts/check-nuget-licenses.ps1`：最终用户条款声明在前，然后每个随 App 发布的组件一节许可全文和它自带的第三方声明）。关于页的许可文字 = 两份各去掉首行、中间一个换行。
+- **可复查**：`bash scripts/update-licenses.sh --check`、`check-nuget-licenses.ps1 -Check`（`check-windows-core.ps1` 每次都跑）；Linux 清单在本机重新生成后与提交的逐字节相同。
+- **发布版实测**（`check-windows-core.ps1 -Publish` 的 AOT 产物，会话 1 临时计划任务 `CGT3W4`，`wscript //B` 隐藏运行，用完删除；英文界面；只用 UIA 的 Select / Invoke / Scroll / ItemContainer，没有发键盘鼠标输入；iPhone 未接、隧道未动，没有用手机流量）：
+  - 关于页 `View` → 列表 268 ms 出现；对话框打开后 3 秒内 App 的 CPU 时间 0 ms。
+  - 列表滚到 50% / 100% / 0% 都到位（每次在 500 ms 等待内完成）。
+  - 按 `LicenseText` 的分段规则从两份文件算出 2012 段，用 `ItemContainerPattern.FindItemByProperty` 找到并 `ScrollIntoView`（每行约 0.44 s，滚过去后该行在屏幕上）：最终用户条款声明那段、`Microsoft.Windows.CsWinRT 2.2.0.48161` 一节、`Microsoft.Windows.SDK.NET.Ref 10.0.26100.57` 一节、`MICROSOFT SOFTWARE LICENSE TERMS / MICROSOFT WINDOWS APP SDK` 那段、`tokio 1.53.3` 那段、最后一个只出现一次的段落。滚动后 3 秒内 CPU 时间 0 ms，没有卡顿。
+  - `Close` 关掉对话框，焦点回到 `View`；`Quit CellGlide` 后进程 77 ms 退出。
+- **没有放进 nuget-notices.txt 的**：Windows App SDK 各包和 WebView2 包里的 `NOTICE.txt`（Windows App SDK 的约 340 KB）；按 brief 只附 `THIRD-PARTY-NOTICES*`（另加同类的 `ThirdPartyNotices*`，CommunityToolkit.Mvvm 用这个名字）。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

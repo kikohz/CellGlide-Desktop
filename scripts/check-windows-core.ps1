@@ -7,8 +7,8 @@
 #   3. dotnet build of windows/CellGlide.sln (warnings are errors), with locked package versions;
 #   4. dotnet test of windows/CellGlide.Tests against that DLL;
 #   5. scripts/tests/test-check-nuget-licenses.ps1 (the license script against fixtures), then
-#      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
-#      license is allowed or reviewed);
+#      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt and nuget-notices.txt
+#      are current, every license is allowed or reviewed, every shipped component has its text);
 #   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
 # Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's,
 # and that a Release build without the DLL says to run 'cargo build -p cg-ffi --release'.
@@ -17,7 +17,8 @@
 # this machine's architecture with a plain `dotnet publish -c Release` (no CellGlideNativeDir), and
 # checks that the publish folder (the project's PublishDir) has CellGlide.exe and target\release's
 # cellglide_native.dll (same SHA-256) and no onnxruntime*.dll or DirectML*.dll, and that the
-# shipped DLL has no debug-only diagnostics override (no CELLGLIDE_DIAG_TARGET or localhost string).
+# shipped DLL has no debug-only diagnostics override (no CELLGLIDE_DIAG_TARGET string; not 'localhost',
+# which the license texts the DLL embeds may contain).
 # The dotnet steps run inside windows\ so that windows\global.json (SDK pin, test runner) applies.
 param(
     [switch]$Release,
@@ -183,13 +184,14 @@ try {
         }
         Write-Host '==> the published cellglide_native.dll is target\release''s'
         # Diagnostics in a release build always go to production: the debug-only override
-        # (crates/cg-ffi/src/runtime.rs, diag_target) must not be compiled in. Its variable name and
-        # its loopback host would show as strings, ASCII or UTF-16.
+        # (crates/cg-ffi/src/runtime.rs, diag_target) must not be compiled in. Its variable name would
+        # show as a string, ASCII or UTF-16. (Not its loopback host: the DLL embeds the third-party
+        # license texts, where the word 'localhost' may appear.)
         $shipped = Join-Path $publishDir 'cellglide_native.dll'
         $bytes = [IO.File]::ReadAllBytes($shipped)
         # UTF-16 read from both byte alignments.
         $texts = @([Text.Encoding]::ASCII.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1))
-        foreach ($needle in 'CELLGLIDE_DIAG_TARGET', 'localhost') {
+        foreach ($needle in @('CELLGLIDE_DIAG_TARGET')) {
             foreach ($text in $texts) {
                 if ($text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
                     Write-Host "FAILED: the release cellglide_native.dll contains '$needle' (the debug-only diagnostics override)"
@@ -197,7 +199,7 @@ try {
                 }
             }
         }
-        Write-Host "==> the release cellglide_native.dll has no diagnostics override ('CELLGLIDE_DIAG_TARGET', 'localhost')"
+        Write-Host "==> the release cellglide_native.dll has no diagnostics override ('CELLGLIDE_DIAG_TARGET')"
     }
 } finally {
     Pop-Location
