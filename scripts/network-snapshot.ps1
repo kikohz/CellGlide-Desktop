@@ -118,6 +118,32 @@ function New-Snapshot {
     }
 }
 
+function Get-DhcpOptionsStable([string]$hex) {
+    # DhcpInterfaceOptions (Tcpip, DHCPv4) is a list of entries: option code (4 bytes LE), 4 bytes,
+    # data length (4 bytes LE), 4 bytes, the time the option was received (4 bytes), then the data
+    # padded to 4 bytes. A lease renewal rewrites the times and the lease, T1 and T2 options
+    # (51, 58, 59) and nothing else, so those are dropped; every other option's data (DNS servers,
+    # router, domain, subnet, server) is kept and compared. Anything unparsable is returned as is.
+    if ($hex -notmatch '^([0-9a-fA-F]{2})+$') { return $hex }
+    $b = New-Object byte[] ($hex.Length / 2)
+    for ($i = 0; $i -lt $b.Length; $i++) { $b[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+    $out = New-Object System.Collections.Generic.List[string]
+    $pos = 0
+    while ($pos -lt $b.Length) {
+        if ($pos + 20 -gt $b.Length) { return $hex }
+        $code = [BitConverter]::ToUInt32($b, $pos)
+        $len = [BitConverter]::ToUInt32($b, $pos + 8)
+        $padded = [int](([long]$len + 3) -band (-bnot 3))
+        if ($pos + 20 + $padded -gt $b.Length) { return $hex }
+        if (@(51, 58, 59) -notcontains $code) {
+            $data = [BitConverter]::ToString($b, $pos + 20, [int]$len) -replace '-', ''
+            $out.Add("$code=$data")
+        }
+        $pos += 20 + $padded
+    }
+    return 'options:' + ($out -join ',')
+}
+
 function Read-Flat([string]$path) {
     # Flattens a snapshot file to "section :: key" -> value, applying exclusion and
     # volatile filtering again so injected or older snapshot content is handled too.
@@ -128,6 +154,7 @@ function Read-Flat([string]$path) {
             if (Test-Excluded $e.Name) { continue }
             if ($s.Name -eq 'registry' -and (($e.Name -split '[\\]')[-1] -match $VolatileRegex)) { continue }
             $value = [string]$e.Value
+            if ($s.Name -eq 'registry' -and ($e.Name -split '[\\]')[-1] -eq 'DhcpInterfaceOptions') { $value = Get-DhcpOptionsStable $value }
             if ($s.Name -eq 'ipinterface') {
                 # "InterfaceMetric|AutomaticMetric|NlMtu": an automatic metric follows link speed.
                 $parts = $value -split '\|'
