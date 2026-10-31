@@ -4,6 +4,7 @@ using CellGlide.App.Shell;
 using CellGlide.Core.Desktop;
 using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
+using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -59,6 +60,14 @@ public sealed partial class PanelWindow : Window
         AppWindow.Closing += OnClosing;
         // The dots' brushes follow a switch to or from high contrast.
         Show.Changed += () => Bindings.Update();
+        // The main button is off while the toggle runs (from here, the window or the tray menu).
+        shell.ToggleCommand.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(IAsyncRelayCommand.IsRunning))
+            {
+                ApplyBusy();
+            }
+        };
         // A new state (or why there is none) and a failed command are read out.
         Show.AnnounceChanges(TitleLine);
         Show.AnnounceChanges(ErrorLine);
@@ -142,6 +151,22 @@ public sealed partial class PanelWindow : Window
         {
             e.Handled = true;
             Dismiss();
+        }
+    }
+
+    /// <summary>
+    /// Off while the toggle runs, through Show.SetEnabled: keyboard focus goes to Open CellGlide and comes back
+    /// when it is done (a Command binding would turn the button off with the focus still on it).
+    /// </summary>
+    void ApplyBusy() => Show.SetEnabled(MainButton, !Shell.ToggleCommand.IsRunning, OpenButton);
+
+    async void OnMainClick(object sender, RoutedEventArgs e)
+    {
+        // A second press while it runs is refused here as the command would refuse it (cg-gui's command_pending).
+        if (Shell.ToggleCommand.CanExecute(null))
+        {
+            // A failed toggle leaves its sentence in Error, shown above.
+            await Shell.ToggleCommand.ExecuteAsync(null);
         }
     }
 

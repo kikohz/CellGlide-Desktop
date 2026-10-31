@@ -39,6 +39,31 @@ public class XBindTests
     }
 
     /// <summary>
+    /// W3 final review M1: a Command binding turns its button off while the command runs with the keyboard focus
+    /// still on it, so the connect buttons (overview and panel) click instead and go off through Show.SetEnabled
+    /// while ToggleCommand.IsRunning, handing focus to Change... / Open CellGlide and taking it back afterwards.
+    /// </summary>
+    [Fact]
+    public void Connect_buttons_go_off_through_show_set_enabled()
+    {
+        foreach (var (xamlFile, button, fallback) in new[]
+        {
+            (Path.Combine("Pages", "OverviewPage.xaml"), "ToggleButton", "ChangeButton"),
+            (Path.Combine("Tray", "PanelWindow.xaml"), "MainButton", "OpenButton"),
+        })
+        {
+            var xaml = File.ReadAllText(Path.Combine(AppSources.AppDir, xamlFile));
+            Assert.DoesNotContain("Command=\"{x:Bind Shell.ToggleCommand}\"", xaml);
+            Assert.Contains($"x:Name=\"{button}\"", xaml);
+            Assert.Contains($"x:Name=\"{fallback}\"", xaml);
+            var code = File.ReadAllText(Path.Combine(AppSources.AppDir, xamlFile + ".cs"));
+            Assert.Contains($"Show.SetEnabled({button}, !Shell.ToggleCommand.IsRunning, {fallback})", code);
+            Assert.Contains("ToggleCommand.PropertyChanged +=", code);
+            Assert.Contains("Shell.ToggleCommand.CanExecute(null)", code);
+        }
+    }
+
+    /// <summary>
     /// W3 final review M2: Loaded can come twice without an Unloaded between, so every page and control that
     /// subscribes a method to Show.Changed takes it off first (Unloaded takes off only one). The windows'
     /// lambdas live as long as the app and subscribe once, in their constructors.

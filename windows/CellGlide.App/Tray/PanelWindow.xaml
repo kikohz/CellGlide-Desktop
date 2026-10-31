@@ -33,10 +33,11 @@
                            Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite"
                            Visibility="{x:Bind s:Show.ErrorVisible(Shell.Now), Mode=OneWay}" />
 
+                <!-- Off while its command runs, through Show.SetEnabled (focus goes to Open CellGlide and comes back). -->
                 <Button x:Name="MainButton" HorizontalAlignment="Stretch" Padding="10,6,10,6"
                         Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
                         Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
-                        Command="{x:Bind Shell.ToggleCommand}" />
+                        Click="OnMainClick" />
 
                 <c:PhoneCard Compact="True" View="{x:Bind s:Show.Phone(Shell.Now), Mode=OneWay}" />
 

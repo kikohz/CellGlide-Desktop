@@ -57,10 +57,11 @@
                             <TextBlock x:Name="ErrorLine" FontSize="13" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
                                        Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite"
                                        Visibility="{x:Bind s:Show.ErrorVisible(Shell.Now), Mode=OneWay}" />
-                            <Button Padding="12,5,12,6"
+                            <!-- Off while its command runs, through Show.SetEnabled (focus goes to Change... and comes back). -->
+                            <Button x:Name="ToggleButton" Padding="12,5,12,6"
                                     Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
                                     Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
-                                    Command="{x:Bind Shell.ToggleCommand}" />
+                                    Click="OnToggleClick" />
                         </StackPanel>
                     </Border>
 
@@ -110,7 +111,7 @@
                                 </StackPanel>
                                 <!-- LabeledBy ties the button to its row; without the explicit Name, UIA would
                                      take the label's text as the button's name and "Change…" would be lost. -->
-                                <Button Grid.Column="1" VerticalAlignment="Center"
+                                <Button x:Name="ChangeButton" Grid.Column="1" VerticalAlignment="Center"
                                         AutomationProperties.LabeledBy="{x:Bind UsbDeviceLabel}" AutomationProperties.Name="{x:Bind h:L.T('overview.change')}"
                                         Content="{x:Bind h:L.T('overview.change')}" Click="OnChangeClick" />
                             </Grid>
