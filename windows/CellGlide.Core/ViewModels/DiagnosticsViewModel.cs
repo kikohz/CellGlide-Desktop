@@ -7,6 +7,10 @@ namespace CellGlide.Core.ViewModels;
 /// <summary>What the user typed into the diagnostics form.</summary>
 public sealed record DiagnosticsInput(DiagRange Range, string Email, string Note);
 
+/// <summary>Where the user chose to save the bundle; <c>Overwrite</c> once they confirmed replacing a file already
+/// there (the save dialog asks).</summary>
+public sealed record DiagnosticsSaveTarget(string Path, bool Overwrite);
+
 /// <summary>The diagnostics page: prepare the bundle, let the user review it, then send or save it.</summary>
 public sealed class DiagnosticsViewModel : CoreViewModel
 {
@@ -20,7 +24,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
     {
         PrepareCommand = new AsyncRelayCommand<DiagnosticsInput?>(PrepareAsync);
         SendCommand = new AsyncRelayCommand(SendAsync, () => Json is not null);
-        SaveCommand = new AsyncRelayCommand<string?>(SaveAsync, _ => Json is not null);
+        SaveCommand = new AsyncRelayCommand<DiagnosticsSaveTarget?>(SaveAsync, _ => Json is not null);
     }
 
     /// <summary>The bundle for the user to review.</summary>
@@ -60,8 +64,8 @@ public sealed class DiagnosticsViewModel : CoreViewModel
 
     public IAsyncRelayCommand SendCommand { get; }
 
-    /// <summary>Parameter: where to save, or null for the Downloads folder.</summary>
-    public IAsyncRelayCommand<string?> SaveCommand { get; }
+    /// <summary>Parameter: where to save, or null for the Downloads folder (never over a file there).</summary>
+    public IAsyncRelayCommand<DiagnosticsSaveTarget?> SaveCommand { get; }
 
     async Task PrepareAsync(DiagnosticsInput? input)
     {
@@ -86,9 +90,10 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         }
     }
 
-    async Task SaveAsync(string? path)
+    async Task SaveAsync(DiagnosticsSaveTarget? target)
     {
-        if (Json is { } json && await RunAsync(new DiagnosticsSaveCommand(json, path)) is SavedValue saved)
+        if (Json is { } json
+            && await RunAsync(new DiagnosticsSaveCommand(json, target?.Path, target?.Overwrite ?? false)) is SavedValue saved)
         {
             SavedPath = saved.Path;
         }

@@ -1251,6 +1251,7 @@ async fn diagnostics_save_and_send() {
         rt.send(Command::DiagnosticsSave {
             json: "{}".into(),
             path: None,
+            overwrite: false,
         })
     };
     let id = save(&rt);
@@ -1276,6 +1277,7 @@ async fn diagnostics_save_and_send() {
     let id = rt.send(Command::DiagnosticsSave {
         json: "{}".into(),
         path: Some(chosen.clone()),
+        overwrite: false,
     });
     assert_eq!(
         reply_of(&events, id).await,
@@ -1287,12 +1289,28 @@ async fn diagnostics_save_and_send() {
     );
     let id = rt.send(Command::DiagnosticsSave {
         json: "{}".into(),
-        path: Some(chosen),
+        path: Some(chosen.clone()),
+        overwrite: false,
     });
     assert!(matches!(
         reply_of(&events, id).await,
         ReplyResult::Err { .. }
     ));
+    // The user confirmed replacing it (the save dialog asked): it is replaced.
+    let id = rt.send(Command::DiagnosticsSave {
+        json: "{\"again\":1}".into(),
+        path: Some(chosen.clone()),
+        overwrite: true,
+    });
+    assert_eq!(
+        reply_of(&events, id).await,
+        ReplyResult::Ok {
+            value: ReplyValue::Saved {
+                path: chosen.clone()
+            }
+        }
+    );
+    assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "{\"again\":1}");
     let id = rt.send(Command::DiagnosticsSend { json: "{}".into() });
     assert_eq!(
         reply_of(&events, id).await,

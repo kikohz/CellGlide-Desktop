@@ -144,6 +144,7 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             Command::DiagnosticsSave {
                 json: DIAGNOSTICS_JSON.into(),
                 path: None,
+                overwrite: false,
             },
         ),
         (
@@ -151,6 +152,7 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             Command::DiagnosticsSave {
                 json: DIAGNOSTICS_JSON.into(),
                 path: Some(r"D:\Reports\cellglide-diagnostics-20261030-120000.json".into()),
+                overwrite: true,
             },
         ),
         (

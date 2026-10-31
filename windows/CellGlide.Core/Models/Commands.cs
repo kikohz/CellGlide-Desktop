@@ -45,8 +45,9 @@ public sealed record DiagnosticsPrepareCommand(DiagRange Range, string Email, st
 
 public sealed record DiagnosticsSendCommand(string Json) : Command;
 
-/// <summary>Save to <c>Path</c>, or to the Downloads folder when null.</summary>
-public sealed record DiagnosticsSaveCommand(string Json, string? Path) : Command;
+/// <summary>Save to <c>Path</c>, or to the Downloads folder when null. An existing file at <c>Path</c> is replaced only
+/// with <c>Overwrite</c>, set once the user confirmed replacing it.</summary>
+public sealed record DiagnosticsSaveCommand(string Json, string? Path, bool Overwrite) : Command;
 
 /// <summary>zh-CN, en, ...; empty for the system's language.</summary>
 public sealed record SetLangCommand(string Lang) : Command;

@@ -1,5 +1,6 @@
 {
   "type": "diagnostics_save",
   "json": "{\"format\":1,\"platform\":\"windows\",\"log\":[]}",
-  "path": "D:\\Reports\\cellglide-diagnostics-20261030-120000.json"
+  "path": "D:\\Reports\\cellglide-diagnostics-20261030-120000.json",
+  "overwrite": true
 }

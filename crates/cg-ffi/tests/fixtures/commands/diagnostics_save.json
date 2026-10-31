@@ -1,5 +1,6 @@
 {
   "type": "diagnostics_save",
   "json": "{\"format\":1,\"platform\":\"windows\",\"log\":[]}",
-  "path": null
+  "path": null,
+  "overwrite": false
 }

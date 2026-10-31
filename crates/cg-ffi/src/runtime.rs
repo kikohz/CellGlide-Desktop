@@ -419,9 +419,11 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
         Command::LeakStart => crate::leak::start(context),
         Command::LeakCancel => crate::leak::cancel(context),
         Command::DiagnosticsSend { json } => crate::diagnostics::send(context, &json).await,
-        Command::DiagnosticsSave { json, path } => {
-            crate::diagnostics::save(context, json, path).await
-        }
+        Command::DiagnosticsSave {
+            json,
+            path,
+            overwrite,
+        } => crate::diagnostics::save(context, json, path, overwrite).await,
     }
 }
 

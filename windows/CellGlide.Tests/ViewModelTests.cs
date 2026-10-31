@@ -155,8 +155,14 @@ public class ViewModelTests
 
         core.Next = new ReplyOk(new SavedValue(@"C:\Users\me\Downloads\cellglide.json"));
         await diagnostics.SaveCommand.ExecuteAsync(null);
-        Assert.Equal(new DiagnosticsSaveCommand("{}", null), core.Sent[2]);
+        Assert.Equal(new DiagnosticsSaveCommand("{}", null, false), core.Sent[2]);
         Assert.Equal(@"C:\Users\me\Downloads\cellglide.json", diagnostics.SavedPath);
+
+        // A file the user chose and confirmed replacing in the save dialog.
+        core.Next = new ReplyOk(new SavedValue(@"D:\report.json"));
+        await diagnostics.SaveCommand.ExecuteAsync(new DiagnosticsSaveTarget(@"D:\report.json", true));
+        Assert.Equal(new DiagnosticsSaveCommand("{}", @"D:\report.json", true), core.Sent[3]);
+        Assert.Equal(@"D:\report.json", diagnostics.SavedPath);
 
         core.Next = new ReplyErr("no network");
         await diagnostics.SendCommand.ExecuteAsync(null);

@@ -48,10 +48,14 @@ pub enum Command {
     DiagnosticsSend {
         json: String,
     },
-    /// Save the bundle to `path`, or to the Downloads folder.
+    /// Save the bundle to `path`, or to the Downloads folder (never over a file there). An
+    /// existing file at `path` is replaced only with `overwrite`, which the app sets once the
+    /// user has confirmed replacing it.
     DiagnosticsSave {
         json: String,
         path: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
     },
     /// `zh-CN`, `en`, …; empty for the system's language.
     SetLang {

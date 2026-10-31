@@ -80,6 +80,50 @@ pub fn write_to(path: &Path, json: &str) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// Writes the bundle to the full path the user chose and confirmed replacing: into a temporary
+/// file beside it, then renamed over it, so the old file stays whole until the new one is.
+/// A failed write leaves the old file (if any) as it was and no temporary file behind.
+pub fn write_over(path: &Path, json: &str) -> Result<PathBuf, String> {
+    write_over_with(path, |file| file.write_all(json.as_bytes())).map_err(failed)?;
+    Ok(path.to_path_buf())
+}
+
+/// [`write_over`] with the writing passed in, so a test can make it fail half way.
+fn write_over_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    // A name of our own: never one that is already there (another save at the same time).
+    let mut n = 0u32;
+    let (temporary, mut file) = loop {
+        let temporary = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&temporary) {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(error) => return Err(error),
+        }
+    };
+    let written = write(&mut file)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&temporary, path)
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
 /// Where "Save to File" writes when the user picks nothing: the XDG download directory, else
 /// `~/Downloads`, else home (Unix); the Downloads known folder, wherever it was moved (OneDrive
 /// included), else `%USERPROFILE%` (Windows). `None` without a home.
@@ -241,6 +285,37 @@ mod tests {
         assert_eq!(error.to_string(), "disk full");
         assert!(!path.exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn write_over_replaces_a_confirmed_file_and_leaves_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        // New, then over the existing file.
+        assert_eq!(write_over(&path, "{\"a\":1}"), Ok(path.clone()));
+        std::fs::write(&path, "old").unwrap();
+        assert_eq!(write_over(&path, "{}"), Ok(path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["report.json"]);
+    }
+
+    #[test]
+    fn write_over_that_fails_half_way_keeps_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        std::fs::write(&path, "old").unwrap();
+        let error = write_over_with(&path, |file| {
+            file.write_all(b"{\"half\":")?;
+            Err(io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "disk full");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
