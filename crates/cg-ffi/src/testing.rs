@@ -1,4 +1,5 @@
-//! For this crate's tests only (`cfg(test)` or the `testing` feature, never in the DLL): events without a runtime, and the page tests' snapshots and day.
+//! For this crate's tests only (`cfg(test)` or the `testing` feature, never in the DLL): events
+//! without a runtime, and the page tests' snapshots and day.
 
 use crate::api::Event;
 use cg_ipc::health::{

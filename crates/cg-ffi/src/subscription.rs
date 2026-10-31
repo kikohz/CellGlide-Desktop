@@ -414,6 +414,23 @@ mod tests {
     }
 
     #[test]
+    fn after_a_crash_another_reason_for_the_service_being_away_is_said() {
+        let _g = cg_i18n::lock_for_tests();
+        let mut f = Follower::new(Arc::default());
+        f.snapshot(connected_snapshot(), at(0), &TimeZone::UTC, Instant::now());
+        assert!(f.crashed("boom".into()).is_some());
+        // The retry finds the service stopped: a new reason, said.
+        let events = f.down(stopped());
+        let [Event::ServiceGone { text, .. }] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*text, stopped().text);
+        assert!(f.down(stopped()).is_empty(), "and only once");
+        // And the same panic after that is a new reason again.
+        assert!(f.crashed("boom".into()).is_some());
+    }
+
+    #[test]
     fn a_tick_sends_the_view_only_when_time_changed_it() {
         let _g = cg_i18n::lock_for_tests();
         cg_i18n::set(cg_i18n::Lang::En);

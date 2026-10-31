@@ -99,7 +99,8 @@ pub async fn request(endpoint: &Endpoint, request: &Request) -> Result<Response,
 }
 
 /// Snapshots as the service publishes them, starting with the current one.
-/// The receiver closes when the service goes away.
+/// The receiver closes when the service goes away; dropping it closes the connection at once,
+/// without waiting for the service to write again.
 pub async fn subscribe(endpoint: &Endpoint) -> Result<mpsc::Receiver<Snapshot>, ClientError> {
     let (r, mut w) = connect(endpoint).await?;
     w.write_all(&to_line(&Request::Subscribe)).await?;
@@ -107,7 +108,12 @@ pub async fn subscribe(endpoint: &Endpoint) -> Result<mpsc::Receiver<Snapshot>, 
     tokio::spawn(async move {
         let _keep_open = w;
         let mut r = BufReader::new(r);
-        while let Ok(Some(line)) = read_line_limited(&mut r, MAX_REPLY_LINE).await {
+        loop {
+            let line = tokio::select! {
+                () = tx.closed() => break,
+                line = read_line_limited(&mut r, MAX_REPLY_LINE) => line,
+            };
+            let Ok(Some(line)) = line else { break };
             let Ok(Response::Status { snapshot }) = from_line::<Response>(&line) else {
                 break;
             };
@@ -295,7 +301,9 @@ async fn follow(
                 next = updates.recv() => break next,
                 () = tokio::time::sleep(SILENCE) => {}
             }
+            // A snapshot ready together with the probe's answer wins: no needless resubscribe.
             tokio::select! {
+                biased;
                 next = updates.recv() => break next,
                 silence = probe(endpoint, &last) => match silence {
                     Silence::Quiet => {}
@@ -348,6 +356,24 @@ mod tests {
     struct Counts {
         subscribes: AtomicUsize,
         statuses: AtomicUsize,
+        /// Connections the server holds now.
+        open: AtomicUsize,
+    }
+
+    /// One connection the server holds, counted in [`Counts::open`] until it is let go.
+    struct Held(Arc<Counts>);
+
+    impl Held {
+        fn new(counts: &Arc<Counts>) -> Held {
+            counts.open.fetch_add(1, Ordering::SeqCst);
+            Held(counts.clone())
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.open.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     /// The snapshot [`Behaviour::Stale`] moved on to.
@@ -363,6 +389,7 @@ mod tests {
         behaviour: Behaviour,
         counts: Arc<Counts>,
     ) {
+        let _held = Held::new(&counts);
         if let Behaviour::Silent = behaviour {
             let _held = stream;
             std::future::pending::<()>().await;
@@ -829,5 +856,43 @@ mod tests {
         };
         assert!(!first.wants_connection && second.wants_connection);
         assert_eq!(counts.subscribes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_subscription_is_replaced_without_waiting_for_retry() {
+        let (endpoint, _keep, _counts) = test_server_counting(Behaviour::Stale);
+        let retry = Duration::from_secs(3600);
+        let mut rx = watch(endpoint, retry);
+        assert!(matches!(rx.recv().await, Some(Update::Snapshot(_))));
+        let heard = tokio::time::Instant::now();
+        let next = tokio::time::timeout(SILENCE + TIMEOUT, rx.recv()).await;
+        assert!(
+            matches!(&next, Ok(Some(Update::Snapshot(s))) if s.wants_connection),
+            "{next:?}"
+        );
+        // The probe at SILENCE found the change; the new subscription answered at once.
+        assert!(
+            heard.elapsed() < SILENCE + Duration::from_secs(1),
+            "{:?}",
+            heard.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replaced_subscription_lets_its_connection_go() {
+        let (endpoint, _keep, counts) = test_server_counting(Behaviour::Stale);
+        let mut rx = watch(endpoint, Duration::from_secs(2));
+        assert!(matches!(rx.recv().await, Some(Update::Snapshot(_))));
+        assert!(matches!(rx.recv().await, Some(Update::Snapshot(_))));
+        assert_eq!(counts.subscribes.load(Ordering::SeqCst), 2);
+        // Only the new subscription's connection is left: the old one and the probe's are
+        // closed, though the server never wrote on the old one again.
+        for _ in 0..500 {
+            if counts.open.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(counts.open.load(Ordering::SeqCst), 1);
     }
 }
