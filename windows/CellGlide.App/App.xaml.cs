@@ -111,7 +111,7 @@ public partial class App : Application
         {
             return;
         }
-        _window ??= new MainWindow(L.T("gui.title"));
+        _window ??= new MainWindow(Shell);
         _window.ShowAt(section);
     }
 

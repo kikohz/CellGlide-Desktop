@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using CellGlide.Core.Dispatch;
 using CellGlide.Core.Models;
 using CommunityToolkit.Mvvm.Input;
@@ -58,10 +59,35 @@ public sealed class ShellViewModel : CoreViewModel
     /// </summary>
     public ChromeView? Chrome => Overview?.Chrome ?? ServiceDown?.Chrome;
 
+    /// <summary>
+    /// <see cref="Overview"/>, <see cref="ServiceDown"/> and <see cref="CoreViewModel.Error"/> as one
+    /// value that is never null, replaced whenever one of them changes. XAML binds to this: x:Bind does
+    /// not call a function again when its argument's path ends in null (the generated code skips it),
+    /// so <c>F(Shell.Overview)</c> would keep showing the last state after the service went away.
+    /// </summary>
+    public ShellNow Now { get; private set; } = new(null, null, null);
+
+    protected override void OnPropertyChanged(PropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (e.PropertyName is nameof(Overview) or nameof(ServiceDown) or nameof(Error))
+        {
+            Now = new ShellNow(Overview, ServiceDown, Error);
+            base.OnPropertyChanged(new PropertyChangedEventArgs(nameof(Now)));
+        }
+    }
+
     public IAsyncRelayCommand ToggleCommand { get; }
 
     /// <summary>Starts the state events (and the speed and leak pages' watch).</summary>
     public Task SubscribeAsync() => RunAsync(new SubscribeCommand());
 
     Task ToggleAsync() => RunAsync(new Models.ToggleCommand());
+}
+
+/// <summary>What the shell shows now (<see cref="ShellViewModel.Now"/>).</summary>
+public sealed record ShellNow(OverviewView? Overview, ServiceGoneEvent? ServiceDown, string? Error)
+{
+    /// <summary>The state's chrome, or the one that came with <see cref="ServiceDown"/>; null before either.</summary>
+    public ChromeView? Chrome => Overview?.Chrome ?? ServiceDown?.Chrome;
 }

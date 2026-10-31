@@ -257,6 +257,20 @@ Speed test finished
   - 退出：菜单的 `Quit` 和面板的 `Quit CellGlide` 都试过，进程在 0.5 秒内退出，退出码 0；之后 `Shell_NotifyIconGetRect` 失败，说明图标已经移除。
 - **没能用眼睛看**：会话 1 一直锁屏，截图要么全黑，要么是锁屏画面。所以托盘图标和面板的外观、真鼠标点击、失去激活后关闭（以及 300 ms 内的那次点击不会重新打开）、图标放进溢出区、切换浅色/深色后托盘图标跟着换，这几项都要等有人看着屏幕时再确认。
 
+### 主窗口与概览页（W3 Task 6，2026-10-31）
+
+- **实测方式**：与 Task 5 相同，在会话 1 里用临时交互计划任务（`CGT6`）跑驱动脚本（UI Automation 读控件树、Invoke 按钮、Select 侧栏项），Debug 构建，`CELLGLIDE_LANG=en`（第 4 项为 `zh-CN`）。任务用完都已删除，最后没有留下进程，服务 Running，状态回到未连接。
+1. **打开窗口**：窗口 1100×800 物理像素，DPI 120，即 880×640 DIP。标题栏（自绘，`ExtendsContentIntoTitleBar`）和 HWND 标题都是 `CellGlide`（未连接）。侧栏 4 组 7 项，顺序和文字来自 chrome：`Overview`；`Tools`：`Speed test`、`DNS Leak Test`；`Activity`：`Connection History`、`Diagnostics`；`App`：`Settings`、`About`。侧栏底部 `CellGlide 1.0.0`，与托盘菜单第一项相同。侧栏宽 250 px（200 DIP）；内容区最宽 775 px（620 DIP），居中。
+2. **概览**（未连接）：`Disconnected`、说明、`Connect` 按钮；没有手机卡片，也没有健康行（DLL 只在连接时给）；连接卡片里 `USB device` / `Auto discovery / waiting for selected device` / `Change…`。
+   **经概览的按钮连接**（前后网络快照，基线当天新拍）：约 3 秒后标题变成 `CellGlide · Connected`，概览依次为 `Connected, this computer is using the phone's network`、说明、`Strict DNS: on (DNS queries can only go through the phone)`、按钮 `Disconnect and go back to your network`、手机卡片（`iPhone` / `Cricket` / `5G NSA` / `iPhone 16e` / `80%` / ↓ / ↑ / `Network quality … · This session 12.6 MB` / `Plugged in, not charging · Battery 29°C · Battery health 100% · 0 cycles`）、健康行 `Connection OK · last drop 09:28 (10 sec)`、`USB device` / `iPhone · iPhone 16e`。与同时刻 `cellglide.exe status` 的严格 DNS、运营商、制式、型号、电量、质量和健康行一致。
+   点健康行：侧栏选中 `Connection History`，内容区换成该页；点 `Change…`：选中 `Settings`；选 `Speed test`、`About`、`Overview` 都切换正确。点 `Disconnect`：标题变回 `CellGlide`。三次连接/断开的 `-Compare` 结果都是 **identical**。手机流量：`This session` 从 12.5 MB 到 12.7 MB（三次连接合计约 0.2 MB）。
+3. **服务停止 / 重启**（未连接时）：`Stop-Service` 后 0.5 秒内，概览只剩 `The CellGlide service stopped`（2 秒后换成 `✗ Can't reach the CellGlide service … Fix: …`）、按钮 `Connect`（chrome 菜单的切换项）和 USB 行，没有状态点、说明、卡片和健康行；`Start-Service` 后 2 秒内自动恢复成 `Disconnected`。`Restart-Service`：同样先显示服务停止的句子，1.5 秒后恢复。标题一直是 `CellGlide`。
+   - **第一次实测没过，查出来是 Task 5 起就有的问题**：x:Bind 的函数绑定在参数路径的最后一段为 null 时不再调用函数（生成代码里是 `if (obj != null)`），所以 `Shell.Overview` 变成 null 后，概览（和托盘面板）一直显示最后一个状态；`Shell.Error` 清空后错误行的 Visibility 也不更新。DLL 的 `ServiceGone` 实际已经到了 App（临时日志确认），是界面没变。现在 `ShellViewModel.Now`（从不为 null，Overview / ServiceDown / Error 任一变化就换一个新值）供 XAML 绑定，概览和面板都改为绑它。修好后重测，结果如上。面板没有在服务停止时打开实测，它用的是同一种绑定。
+4. **最小尺寸与中文**：把窗口设成 300×200，结果停在 950×650 物理像素，即 760×520 DIP（`WM_GETMINMAXINFO`，按窗口当前 DPI 换算）。`CELLGLIDE_LANG=zh-CN` 重启，在最小尺寸下：侧栏 `概览`；`工具`：`测速`、`DNS 泄漏检测`；`活动`：`连接记录`、`诊断`；`应用`：`设置`、`关于`。未连接和已连接（`CellGlide · 已连接`、严格 DNS、卡片、`断开，回到原来的网络`）的每段文字右边界都在内容区以内（都允许换行，内容区可以纵向滚动），没有被截断的。
+5. **关窗口**：WM_CLOSE 后窗口隐藏，进程还在；再启动一次，窗口重新出现，进程数 1，尺寸不变（760×520 DIP）。
+- **侧栏的点**没有实测到出现：本机这段时间没有健康问题、重试或不在组里的状态，不动手机和系统设置造不出来。三种状态（已连接、未连接、服务停止）下 7 项都没有点，与 chrome 的 `badges` 一致；点和标题、版本由同一个 chrome 变化处理函数更新，标题的变化已经实测到。
+- **截图**：会话 1 锁屏，截到的是锁屏画面（不是全黑），所以 Mica 背景和整体外观没能用眼睛看，留给 Task 10。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

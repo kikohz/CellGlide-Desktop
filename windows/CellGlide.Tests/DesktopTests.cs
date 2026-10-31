@@ -422,6 +422,60 @@ public class DesktopTests
         Assert.Equal(new StripSpan(0, 600), Geometry.Strip(new StripCell(0, 1000, Tone.Gray, 1), 600));
         Assert.Equal(150, Geometry.Tick(0.25, 600));
     }
+
+    [Fact]
+    public void Badges_come_from_the_chrome_for_their_sections()
+    {
+        var b = new BadgesView(Badge.Warning, Badge.Critical, Badge.Warning);
+        Assert.Equal(Badge.Warning, SidebarBadges.For(b, Section.Overview));
+        Assert.Equal(Badge.Critical, SidebarBadges.For(b, Section.History));
+        Assert.Equal(Badge.Warning, SidebarBadges.For(b, Section.Settings));
+        Assert.Equal(Badge.None, SidebarBadges.For(b, Section.SpeedTest));
+    }
+
+    [Fact]
+    public void Sections_without_a_field_never_have_a_badge()
+    {
+        var all = new BadgesView(Badge.Critical, Badge.Critical, Badge.Critical);
+        foreach (var section in new[] { Section.SpeedTest, Section.DnsLeak, Section.Diagnostics, Section.About })
+        {
+            Assert.Equal(Badge.None, SidebarBadges.For(all, section));
+        }
+        var none = new BadgesView(Badge.None, Badge.None, Badge.None);
+        Assert.All(Enum.GetValues<Section>(), section => Assert.Equal(Badge.None, SidebarBadges.For(none, section)));
+    }
+
+    [Fact]
+    public void Sidebar_is_rebuilt_only_when_its_groups_change()
+    {
+        // Each read of a sample is a new list with new records, as each state event is.
+        var shown = Samples.Overview().Chrome.Sidebar;
+        Assert.True(SidebarLayout.Same(shown, Samples.Overview().Chrome.Sidebar));
+        // The service-gone chrome has the same sidebar: only the dots differ.
+        Assert.True(SidebarLayout.Same(shown, Samples.Chrome().Sidebar));
+        Assert.False(SidebarLayout.Same(null, shown));                          // nothing built yet
+        Assert.False(SidebarLayout.Same(shown, null));
+        var renamed = shown.Select((g, i) => i == 1 ? g with { Heading = "x" } : g).ToList();
+        Assert.False(SidebarLayout.Same(shown, renamed));
+        var retitled = shown.Select((g, i) => i == 0
+            ? g with { Sections = g.Sections.Select(s => s with { Title = s.Title + "!" }).ToList() }
+            : g).ToList();
+        Assert.False(SidebarLayout.Same(shown, retitled));
+        var fewer = shown.Select((g, i) => i == 3 ? g with { Sections = g.Sections.Take(1).ToList() } : g).ToList();
+        Assert.False(SidebarLayout.Same(shown, fewer));
+        Assert.False(SidebarLayout.Same(shown, shown.Take(3).ToList()));
+    }
+
+    [Fact]
+    public void Sample_sidebar_is_four_groups_of_seven_sections()
+    {
+        // What the main window builds its NavigationView from: the DLL's groups, in its order.
+        var sidebar = Samples.Overview().Chrome.Sidebar;
+        Assert.Equal(4, sidebar.Count);
+        Assert.Null(sidebar[0].Heading);
+        Assert.All(sidebar.Skip(1), g => Assert.False(string.IsNullOrEmpty(g.Heading)));
+        Assert.Equal(Enum.GetValues<Section>(), sidebar.SelectMany(g => g.Sections).Select(s => s.Section));
+    }
 }
 
 /// <summary>A Run key in memory.</summary>

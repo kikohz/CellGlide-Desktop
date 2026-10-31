@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The overview, after cg-gui's pages/overview.rs: the state and the connect button, the phone, and
+     the connection (its health and the USB device in use), at most 620 wide and centred. Every text
+     is the DLL's. -->
+<Page
+    x:Class="CellGlide.App.Pages.OverviewPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:c="using:CellGlide.App.Controls"
+    xmlns:h="using:CellGlide.App.Hosting"
+    xmlns:s="using:CellGlide.App.Shell">
+    <Page.Resources>
+        <!-- cg-gui's kit::card: 14 padding, 10 corners, a hairline edge. -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Padding" Value="14" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        </Style>
+        <Style x:Key="CardTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Page.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="24,20,24,20">
+            <StackPanel MaxWidth="620" Spacing="18">
+                <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Text="{x:Bind h:L.T('nav.overview')}" />
+
+                <StackPanel Spacing="14">
+                    <!-- The state: its dot, title and sentence, strict DNS, a failed command, the button. -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="8">
+                            <Grid ColumnSpacing="10" Visibility="{x:Bind s:Show.HasState(Shell.Now), Mode=OneWay}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Ellipse Width="10" Height="10" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
+                                         Fill="{x:Bind s:Show.StatusBrush(Shell.Now), Mode=OneWay}" />
+                                <TextBlock Grid.Column="1" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap"
+                                           Text="{x:Bind s:Show.Title(Shell.Now), Mode=OneWay}" />
+                            </Grid>
+                            <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="{x:Bind s:Show.Detail(Shell.Now), Mode=OneWay}"
+                                       Visibility="{x:Bind s:Show.HasState(Shell.Now), Mode=OneWay}" />
+                            <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="{x:Bind StrictDnsOf(Shell.Now), Mode=OneWay}"
+                                       Visibility="{x:Bind StrictDnsVisible(Shell.Now), Mode=OneWay}" />
+                            <!-- Without a state: why (the service-gone sentence), or that the service is being reached. -->
+                            <TextBlock FontSize="13" TextWrapping="Wrap"
+                                       Text="{x:Bind s:Show.NoStateText(Shell.Now), Mode=OneWay}"
+                                       Visibility="{x:Bind s:Show.NoState(Shell.Now), Mode=OneWay}" />
+                            <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
+                                       Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}"
+                                       Visibility="{x:Bind s:Show.ErrorVisible(Shell.Now), Mode=OneWay}" />
+                            <Button Padding="12,5,12,6"
+                                    Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
+                                    Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
+                                    Command="{x:Bind Shell.ToggleCommand}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- The phone, only while the DLL has a card for it. -->
+                    <Border Style="{StaticResource Card}" Visibility="{x:Bind s:Show.PhoneVisible(Shell.Now), Mode=OneWay}">
+                        <StackPanel Spacing="10">
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{x:Bind h:L.T('phone.card_title')}" />
+                            <c:PhoneCard View="{x:Bind s:Show.Phone(Shell.Now), Mode=OneWay}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- The connection: its health (opens the history) and the USB device (opens settings). -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="10">
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{x:Bind h:L.T('overview.connection')}" />
+                            <StackPanel Spacing="10" Visibility="{x:Bind s:Show.HealthVisible(Shell.Now), Mode=OneWay}">
+                                <Button HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                        Padding="0,2,0,2" Background="Transparent" BorderThickness="0"
+                                        AutomationProperties.Name="{x:Bind s:Show.HealthLine(Shell.Now), Mode=OneWay}"
+                                        Click="OnHealthClick">
+                                    <Grid ColumnSpacing="6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Ellipse Width="8" Height="8" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
+                                                 Fill="{x:Bind s:Show.HealthBrush(Shell.Now), Mode=OneWay}" />
+                                        <TextBlock Grid.Column="1" FontSize="13" TextWrapping="Wrap" VerticalAlignment="Center"
+                                                   Text="{x:Bind s:Show.HealthLine(Shell.Now), Mode=OneWay}" />
+                                        <FontIcon Grid.Column="2" FontSize="10" Glyph="&#xE76C;" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
+                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                </Button>
+                                <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                            </StackPanel>
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock FontSize="13" TextWrapping="Wrap" Text="{x:Bind h:L.T('overview.usb_device')}" />
+                                    <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               Text="{x:Bind DeviceOf(Shell.Now), Mode=OneWay}"
+                                               Visibility="{x:Bind DeviceVisible(Shell.Now), Mode=OneWay}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" VerticalAlignment="Center"
+                                        Content="{x:Bind h:L.T('overview.change')}" Click="OnChangeClick" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

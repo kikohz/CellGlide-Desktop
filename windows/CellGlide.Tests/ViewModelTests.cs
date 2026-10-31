@@ -51,6 +51,48 @@ public class ViewModelTests
         Assert.Contains(nameof(ShellViewModel.Chrome), changed);
     }
 
+    [Fact]
+    public async Task Now_is_never_null_and_follows_state_service_gone_and_errors()
+    {
+        // x:Bind skips a function binding whose argument ends in null, so the pages bind to Now.
+        var (core, hub) = Fake(autoReply: new ReplyErr("refused"));
+        var shell = new ShellViewModel(hub);
+        var changed = new List<string?>();
+        shell.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        Assert.Equal(new ShellNow(null, null, null), shell.Now);
+        Assert.Null(shell.Now.Chrome);
+
+        var state = new StateEvent(Samples.Overview());
+        core.Raise(state);
+        Assert.Same(shell.Overview, shell.Now.Overview);
+        Assert.Null(shell.Now.ServiceDown);
+        Assert.Same(shell.Chrome, shell.Now.Chrome);
+        Assert.Contains(nameof(ShellViewModel.Now), changed);
+
+        changed.Clear();
+        var gone = new ServiceGoneEvent("gone", false, Samples.Chrome());
+        core.Raise(gone);
+        Assert.Null(shell.Now.Overview);
+        Assert.Same(gone, shell.Now.ServiceDown);
+        Assert.Same(gone.Chrome, shell.Now.Chrome);
+        Assert.Contains(nameof(ShellViewModel.Now), changed);
+
+        var errors = new List<string?>();
+        shell.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(ShellViewModel.Now))
+            {
+                errors.Add(shell.Now.Error);
+            }
+        };
+        await shell.ToggleCommand.ExecuteAsync(null);
+        Assert.Equal("refused", shell.Now.Error);
+        Assert.Same(gone, shell.Now.ServiceDown);
+        // The next command clears it first, and Now says so too.
+        await shell.ToggleCommand.ExecuteAsync(null);
+        Assert.Equal(["refused", null, "refused"], errors);
+    }
+
     // ChromeView's lists are IReadOnlyList (compared by reference) and each sample read is a new
     // instance, so compare by JSON meaning.
     static bool SameJson(ChromeView a, ChromeView b) => JsonNode.DeepEquals(

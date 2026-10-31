@@ -160,36 +160,9 @@ public sealed partial class PanelWindow : Window
         _ = _quit();
     }
 
-    // ---- For x:Bind: which of the DLL's texts and tones to show, never new ones. ----
+    // ---- For x:Bind (the rest is in Show, bound to Shell.Now): the DLL's texts and tones, never new ones. ----
 
     Brush ErrorBrush => Show.Brush(Tone.Red);
-
-    /// <summary>The state's tone; grey while there is no state (cg_ipc status_tone without a snapshot).</summary>
-    Brush StatusBrush(OverviewView? overview) => Show.Brush(overview?.StatusTone ?? Tone.Gray);
-
-    /// <summary>The state's title, else why there is none, else that the service is being reached.</summary>
-    string TitleOf(OverviewView? overview, ServiceGoneEvent? down) =>
-        overview?.Title ?? down?.Text ?? L.T("gui.waiting_service");
-
-    string DetailOf(OverviewView? overview) => overview?.Detail ?? "";
-
-    /// <summary>The state's button label; without a state, the menu's connect entry.</summary>
-    string ButtonLabel(OverviewView? overview, ChromeView? chrome) =>
-        overview?.ButtonLabel
-        ?? chrome?.Menu.FirstOrDefault(item => item.Kind == MenuKind.Toggle)?.Label
-        ?? "";
-
-    /// <summary>Prominent for connecting; plain for disconnecting, which is not the thing to invite.</summary>
-    Style ButtonStyle(OverviewView? overview) =>
-        (Style)Application.Current.Resources[overview?.WantsConnection == true ? "DefaultButtonStyle" : "AccentButtonStyle"];
-
-    PhoneCardView? PhoneOf(OverviewView? overview) => overview?.Phone;
-
-    Visibility HealthVisible(OverviewView? overview) => Show.Visible(overview?.Health);
-
-    Brush HealthBrush(OverviewView? overview) => Show.Brush(overview?.Health?.Tone ?? Tone.Gray);
-
-    string HealthLine(OverviewView? overview) => overview?.Health?.Line ?? "";
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

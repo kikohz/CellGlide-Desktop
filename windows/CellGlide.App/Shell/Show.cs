@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
+using CellGlide.App.Hosting;
 using CellGlide.Core.Models;
+using CellGlide.Core.ViewModels;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
@@ -51,6 +53,57 @@ public static partial class Show
 
     /// <summary>Half strength for a dimmed card.</summary>
     public static double Opacity(bool dim) => dim ? 0.5 : 1.0;
+
+    // ---- The state as the panel and the overview show it: which of the DLL's texts, never new ones.
+    // They take ShellViewModel.Now, which is never null (see there why). ----
+
+    /// <summary>Shown while there is a state.</summary>
+    public static Visibility HasState(ShellNow now) => Visible(now.Overview is not null);
+
+    /// <summary>Shown while there is none.</summary>
+    public static Visibility NoState(ShellNow now) => Visible(now.Overview is null);
+
+    /// <summary>The state's tone; grey while there is no state (cg_ipc status_tone without a snapshot).</summary>
+    public static Brush StatusBrush(ShellNow now) => Brush(now.Overview?.StatusTone ?? Tone.Gray);
+
+    public static string Title(ShellNow now) => now.Overview?.Title ?? "";
+
+    public static string Detail(ShellNow now) => now.Overview?.Detail ?? "";
+
+    /// <summary>Why there is no state (the service-gone sentence), else that the service is being reached.</summary>
+    public static string NoStateText(ShellNow now) => now.ServiceDown?.Text ?? L.T("gui.waiting_service");
+
+    /// <summary>The state's title, else why there is none.</summary>
+    public static string TitleOrWhy(ShellNow now) => now.Overview?.Title ?? NoStateText(now);
+
+    /// <summary>The last failed command's sentence.</summary>
+    public static string ErrorText(ShellNow now) => now.Error ?? "";
+
+    public static Visibility ErrorVisible(ShellNow now) => Visible(now.Error);
+
+    /// <summary>The state's button label; without a state, the tray menu's connect entry.</summary>
+    public static string ToggleLabel(ShellNow now) =>
+        now.Overview?.ButtonLabel
+        ?? now.Chrome?.Menu.FirstOrDefault(item => item.Kind == MenuKind.Toggle)?.Label
+        ?? "";
+
+    /// <summary>Prominent for connecting; plain for disconnecting, which is not the thing to invite (cg-gui main_button_style).</summary>
+    public static Style ToggleStyle(ShellNow now) =>
+        (Style)Application.Current.Resources[now.Overview?.WantsConnection == true ? "DefaultButtonStyle" : "AccentButtonStyle"];
+
+    /// <summary>The DLL's phone card (only when it has one), else nothing.</summary>
+    public static PhoneCardView? Phone(ShellNow now) => now.Overview?.Phone;
+
+    public static Visibility PhoneVisible(ShellNow now) => Visible(now.Overview?.Phone);
+
+    /// <summary>The health row, only while the DLL gives one (connected).</summary>
+    public static Visibility HealthVisible(ShellNow now) => Visible(now.Overview?.Health);
+
+    /// <summary>The health row's dot.</summary>
+    public static Brush HealthBrush(ShellNow now) => Brush(now.Overview?.Health?.Tone ?? Tone.Gray);
+
+    /// <summary>The health row's line (the DLL's), or nothing.</summary>
+    public static string HealthLine(ShellNow now) => now.Overview?.Health?.Line ?? "";
 
     static Brush Resource(string key) => (Brush)Application.Current.Resources[key];
 
