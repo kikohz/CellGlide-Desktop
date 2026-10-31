@@ -97,7 +97,7 @@ public sealed partial class SpeedPage : Page
         {
             IncludeWifi.Content = L.T("speed.include_wifi", "iface", uplink);
             IncludeWifi.IsChecked = prefs?.IncludeWifi == true;
-            IncludeWifi.IsEnabled = !running && prefs is not null;
+            Show.SetEnabled(IncludeWifi, !running && prefs is not null, StartButton, ClearButton);
             IncludeWifi.Visibility = Visibility.Visible;
         }
         else
@@ -107,7 +107,7 @@ public sealed partial class SpeedPage : Page
 
         StartButton.Content = L.T(running ? "common.cancel" : "speed.start");
         StartButton.Style = (Style)Application.Current.Resources[running ? "DefaultButtonStyle" : "AccentButtonStyle"];
-        StartButton.IsEnabled = view?.StartEnabled == true;
+        Show.SetEnabled(StartButton, view?.StartEnabled == true, IncludeWifi, ClearButton);
         StartNote.Text = view?.StartNote ?? "";
         StartNote.Visibility = Show.Visible(view?.StartNote);
 
@@ -311,7 +311,7 @@ public sealed partial class SpeedPage : Page
         HistoryFailed.Visibility = Show.Visible(view?.HistoryFailed == true);
         HistoryEmpty.Visibility = Show.Visible(records.Count == 0);
         ClearButton.Visibility = Show.Visible(records.Count > 0);
-        ClearButton.IsEnabled = !running;
+        Show.SetEnabled(ClearButton, !running, StartButton);
         History.Visibility = Show.Visible(records.Count > 0);
         // Every frame brings the same list again: rebuild only when it changed.
         if (History.Tag is IReadOnlyList<SpeedRecordView> shown && shown.SequenceEqual(records))

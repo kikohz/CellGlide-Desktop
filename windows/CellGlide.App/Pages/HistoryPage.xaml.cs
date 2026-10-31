@@ -48,7 +48,7 @@ public sealed partial class HistoryPage : Page
         {
             if (e.PropertyName == "IsRunning")
             {
-                RetryButton.IsEnabled = !_history.LoadCommand.IsRunning;
+                Show.SetEnabled(RetryButton, !_history.LoadCommand.IsRunning, PrevButton, NextButton);
             }
         };
         _timer.Tick += (_, _) =>
@@ -126,15 +126,15 @@ public sealed partial class HistoryPage : Page
     void Render()
     {
         var view = _history.View;
-        Show.SetEnabled(PrevButton, view?.PrevDay is not null, NextButton);
-        Show.SetEnabled(NextButton, view?.NextDay is not null, PrevButton);
+        Show.SetEnabled(
+            [(PrevButton, view?.PrevDay is not null), (NextButton, view?.NextDay is not null), (RetryButton, !_history.LoadCommand.IsRunning)],
+            [PrevButton, NextButton, RetryButton]);
         DayLabel.Text = view?.Label ?? "";
 
         var error = _history.Error;
         ErrorLine.Text = error ?? "";
         ErrorLine.Foreground = Show.Brush(Tone.Red);
         ErrorRow.Visibility = Show.Visible(error);
-        RetryButton.IsEnabled = !_history.LoadCommand.IsRunning;
 
         // Every refresh brings the same legend: built again only when it changed (the language did).
         var legend = view?.Legend ?? [];

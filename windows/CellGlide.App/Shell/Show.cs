@@ -6,6 +6,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI.ViewManagement;
 
@@ -55,22 +56,119 @@ public static partial class Show
 
     /// <summary>
     /// Turns <paramref name="control"/> on or off; when it had keyboard focus and goes off, focus moves to the first
-    /// of <paramref name="fallbacks"/> that is on and shown, so the user is not left nowhere.
+    /// of <paramref name="fallbacks"/> that is on and shown, so the user is not left nowhere. When it comes back
+    /// on and focus is still where it went then (or nowhere), focus returns to it: a control that turns itself
+    /// off while busy gets the focus back when the work is done.
+    /// <para>Every control a page turns off while it may have focus goes through here (never a bare IsEnabled = false).</para>
     /// </summary>
     public static void SetEnabled(Control control, bool enabled, params Control[] fallbacks)
     {
+        if (enabled)
+        {
+            control.IsEnabled = true;
+            Unpark(control);
+            return;
+        }
         var focus = control.FocusState;
-        control.IsEnabled = enabled;
-        if (enabled || focus == FocusState.Unfocused)
+        control.IsEnabled = false;
+        if (focus == FocusState.Unfocused)
         {
             return;
         }
         foreach (var next in fallbacks)
         {
-            if (next.IsEnabled && next.Visibility == Visibility.Visible && next.Focus(focus))
+            if (next != control && next.IsEnabled && next.Visibility == Visibility.Visible && next.Focus(focus))
             {
-                return;
+                break;
             }
+        }
+        var landed = control.XamlRoot is { } root ? FocusManager.GetFocusedElement(root) as DependencyObject : null;
+        _parked = new Parked(new WeakReference<Control>(control), focus, landed is null ? null : new WeakReference<DependencyObject>(landed));
+    }
+
+    /// <summary>
+    /// Turns several controls on and off together. Those going on go first, so one going off can hand focus to a
+    /// neighbour that is on in the new state. <paramref name="order"/> is the page's controls in reading order: a
+    /// control going off hands focus to the nearest one in it that is on (the next first, then the previous, and
+    /// so on outwards).
+    /// </summary>
+    public static void SetEnabled(IReadOnlyList<(Control Control, bool Enabled)> states, IReadOnlyList<Control> order)
+    {
+        foreach (var (control, enabled) in states)
+        {
+            if (enabled)
+            {
+                SetEnabled(control, true);
+            }
+        }
+        foreach (var (control, enabled) in states)
+        {
+            if (!enabled)
+            {
+                SetEnabled(control, false, Nearest(control, order));
+            }
+        }
+    }
+
+    /// <summary><paramref name="order"/> by distance from <paramref name="control"/> (the next before the previous).</summary>
+    static Control[] Nearest(Control control, IReadOnlyList<Control> order)
+    {
+        var at = -1;
+        for (var i = 0; i < order.Count; i++)
+        {
+            if (order[i] == control)
+            {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0)
+        {
+            return [.. order];
+        }
+        var nearest = new List<Control>(order.Count);
+        for (var step = 1; step < order.Count; step++)
+        {
+            if (at + step < order.Count)
+            {
+                nearest.Add(order[at + step]);
+            }
+            if (at - step >= 0)
+            {
+                nearest.Add(order[at - step]);
+            }
+        }
+        return [.. nearest];
+    }
+
+    /// <summary>The control that lost focus by going off, how it had it, and where focus was right after.</summary>
+    sealed record Parked(WeakReference<Control> From, FocusState State, WeakReference<DependencyObject>? Landed);
+
+    static Parked? _parked;
+
+    /// <summary>
+    /// <paramref name="control"/> is on again: when it was the one that lost focus, and the user has not taken
+    /// focus somewhere else since (it is nowhere, on something off, or still where it landed), it comes back.
+    /// </summary>
+    static void Unpark(Control control)
+    {
+        if (_parked is not { } parked || !parked.From.TryGetTarget(out var from) || from != control)
+        {
+            return;
+        }
+        _parked = null;
+        if (!control.IsLoaded || control.Visibility != Visibility.Visible || control.XamlRoot is not { } root)
+        {
+            return;
+        }
+        var now = FocusManager.GetFocusedElement(root) as DependencyObject;
+        var untouched = now is null
+            || now == control
+            || now is Control { IsEnabled: false }
+            || (parked.Landed is { } landed && landed.TryGetTarget(out var there) && there == now);
+        if (untouched)
+        {
+            control.Focus(parked.State);
         }
     }
 

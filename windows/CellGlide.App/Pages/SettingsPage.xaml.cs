@@ -132,18 +132,14 @@ public sealed partial class SettingsPage : Page
             {
                 PhoneChooser.SelectedIndex = selected;
             }
-            PhoneChooser.IsEnabled = service is not null && !_settings.SetPhoneCommand.IsRunning;
 
             // The service's switches show its values.
             AutoConnectSwitch.IsOn = service?.AutoConnect ?? false;
-            AutoConnectSwitch.IsEnabled = service is not null && !_settings.SetAutoConnectCommand.IsRunning;
             StrictDnsSwitch.IsOn = service?.StrictDns ?? false;
-            StrictDnsSwitch.IsEnabled = service is not null && !_settings.SetStrictDnsCommand.IsRunning;
 
             // Start at login: what the Run key says; off and fixed while Windows has turned us off.
             var disabled = _autostartState == AutostartState.DisabledBySystem;
             AutostartSwitch.IsOn = _autostartState == AutostartState.On;
-            AutostartSwitch.IsEnabled = !disabled;
             AutomationProperties.SetHelpText(AutostartSwitch, L.T(disabled ? "settings.launch_disabled_by_system" : "settings.launch_note"));
             DisabledBySystemLine.Foreground = Show.Brush(Tone.Orange);
             DisabledBySystemLine.Visibility = Show.Visible(disabled);
@@ -155,7 +151,6 @@ public sealed partial class SettingsPage : Page
 
             // Open on plug: the app's preference.
             OpenOnPlugSwitch.IsOn = _settings.Prefs?.OpenOnPlug ?? false;
-            OpenOnPlugSwitch.IsEnabled = _settings.Prefs is not null && !_settings.SetPrefsCommand.IsRunning;
 
             // The proxy address, or that there is none yet.
             var proxy = service?.Proxy;
@@ -167,7 +162,18 @@ public sealed partial class SettingsPage : Page
             var copyLabel = L.T(_copied ? "common.copied" : "common.copy");
             CopyProxyButton.Content = copyLabel;
             AutomationProperties.SetName(CopyProxyButton, copyLabel);
-            Show.SetEnabled(CopyProxyButton, proxy is not null, Checks);
+            // Off while their change is on its way (or without a state); all at once, so a control going off hands focus
+            // to its nearest neighbour that is on, and gets it back when the change is done.
+            Show.SetEnabled(
+                [
+                    (PhoneChooser, service is not null && !_settings.SetPhoneCommand.IsRunning),
+                    (AutoConnectSwitch, service is not null && !_settings.SetAutoConnectCommand.IsRunning),
+                    (AutostartSwitch, !disabled),
+                    (OpenOnPlugSwitch, _settings.Prefs is not null && !_settings.SetPrefsCommand.IsRunning),
+                    (StrictDnsSwitch, service is not null && !_settings.SetStrictDnsCommand.IsRunning),
+                    (CopyProxyButton, proxy is not null),
+                ],
+                [PhoneChooser, AutoConnectSwitch, AutostartSwitch, OpenOnPlugSwitch, StrictDnsSwitch, CopyProxyButton, Checks.RunControl]);
 
             // DNS: the DLL's line and tone.
             DnsText.Text = service?.Dns.Text ?? "";

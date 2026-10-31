@@ -79,12 +79,16 @@ public sealed partial class DiagnosticsPage : Page
         SentDot.Fill = Show.Brush(Tone.Green);
         CopyCodeButton.Content = L.T(_copied ? "common.copied" : "common.copy");
         AutomationProperties.SetName(CopyCodeButton, L.T(_copied ? "common.copied" : "common.copy"));
-        AgainButton.IsEnabled = DoneButton.IsEnabled = !busy;
 
-        Range.IsEnabled = Email.IsEnabled = Note.IsEnabled = !busy;
-        ViewButton.IsEnabled = !busy;
-        SaveButton.IsEnabled = SaveAsButton.IsEnabled = !busy;
-        Show.SetEnabled(SendButton, canSend, ViewButton, SaveButton);
+        // All at once, so a control going off hands focus to a neighbour that is on in the new state; the one that
+        // started the work gets focus back when it is done.
+        Show.SetEnabled(
+            [
+                (CopyCodeButton, true), (AgainButton, !busy), (DoneButton, !busy),
+                (Range, !busy), (Email, !busy), (Note, !busy),
+                (SaveButton, !busy), (SaveAsButton, !busy), (ViewButton, !busy), (SendButton, canSend),
+            ],
+            [CopyCodeButton, AgainButton, DoneButton, Range, Email, Note, SaveButton, SaveAsButton, ViewButton, SendButton, OpenFolderButton, Preview]);
         NeedsPreview.Visibility = Show.Visible(!busy && !canSend);
 
         ErrorLine.Text = _diag.Error ?? "";

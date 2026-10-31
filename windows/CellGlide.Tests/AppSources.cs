@@ -39,6 +39,12 @@ static partial class AppSources
             m.Groups[1].Value,
             (IReadOnlyList<string>)m.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)));
 
+    /// <summary>The App's *.cs files (not bin, obj): path relative to the App, and text.</summary>
+    public static IEnumerable<(string File, string Text)> CodeFiles() =>
+        Files()
+            .Where(f => f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            .Select(f => (Path.GetRelativePath(AppDir, f), File.ReadAllText(f)));
+
     [GeneratedRegex(@"\{x:Bind\s+([\w:.]+)\(([^)]*)\)")]
     private static partial Regex BindCall();
     static IEnumerable<string> Files()

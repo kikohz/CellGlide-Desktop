@@ -66,6 +66,9 @@ public sealed partial class ChecksList : UserControl
         ShowRunButton();
     }
 
+    /// <summary>The run button, for a page that hands keyboard focus to it.</summary>
+    public Control RunControl => RunButton;
+
     /// <summary>The checklist to run and show (a <see cref="ChecksViewModel"/>).</summary>
     public ChecksViewModel? Checks
     {
@@ -141,7 +144,8 @@ public sealed partial class ChecksList : UserControl
     {
         var running = Checks?.RunCommand.IsRunning == true;
         RunButton.Content = running ? L.T("doctor.running") : RunLabel;
-        RunButton.IsEnabled = Checks is not null && !running;
+        // Off while running: focus waits on a Copy button (or nowhere) and comes back when the run is done.
+        Show.SetEnabled(RunButton, Checks is not null && !running, [.. _copyButtons.Select(b => b.Button)]);
     }
 
     void ShowError()

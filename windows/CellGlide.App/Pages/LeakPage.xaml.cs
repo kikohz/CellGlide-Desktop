@@ -57,7 +57,7 @@ public sealed partial class LeakPage : Page
         var running = view?.Running == true;
         // Before the DLL's first view the button waits, with the label it starts with.
         StartButton.Content = view?.StartLabel ?? L.T("leak.start");
-        StartButton.IsEnabled = view is not null && !running;
+        Show.SetEnabled(StartButton, view is not null && !running, DoctorChecks.RunControl);
         RunningLine.Visibility = Show.Visible(running);
 
         var error = view?.Error ?? _leak.Error;

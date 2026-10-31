@@ -21,6 +21,23 @@ public class XBindTests
         Assert.Empty(bad);
     }
 
+    /// <summary>
+    /// A control that goes off while it has keyboard focus leaves the user nowhere unless focus is moved: pages
+    /// turn controls on and off only through Show.SetEnabled (Show.cs itself, and the tray menu's items, which
+    /// are not focusable XAML controls, are the exceptions).
+    /// </summary>
+    [Fact]
+    public void Pages_turn_controls_off_only_through_show_set_enabled()
+    {
+        var raw = new System.Text.RegularExpressions.Regex(@"\.IsEnabled\s*=[^=]");
+        var bad = AppSources.CodeFiles()
+            .Where(f => !f.File.EndsWith("Show.cs", StringComparison.Ordinal) && !f.File.EndsWith("TrayHost.cs", StringComparison.Ordinal))
+            .Where(f => raw.IsMatch(f.Text))
+            .Select(f => f.File)
+            .ToList();
+        Assert.Empty(bad);
+    }
+
     [Fact]
     public void A_nullable_shell_path_is_caught()
     {

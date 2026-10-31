@@ -66,12 +66,12 @@ public sealed partial class AboutPage : Page
         CopyVersionButton.Content = copyLabel;
         AutomationProperties.SetName(CopyVersionButton, copyLabel);
         AutomationProperties.SetHelpText(CopyVersionButton, VersionText.Text);
-        CopyVersionButton.IsEnabled = about is not null;
 
         TelegramButton.Content = about?.TelegramUrl ?? "";
         AutomationProperties.SetHelpText(TelegramButton, about?.TelegramUrl ?? "");
-        TelegramButton.IsEnabled = about is not null;
-        ShowLicensesButton.IsEnabled = about is not null && !_dialogOpen;
+        Show.SetEnabled(
+            [(CopyVersionButton, about is not null), (TelegramButton, about is not null), (ShowLicensesButton, about is not null && !_dialogOpen)],
+            [CopyVersionButton, TelegramButton, ShowLicensesButton, QuitButton]);
     }
 
     async void OnCopyVersionClick(object sender, RoutedEventArgs e)
