@@ -74,11 +74,6 @@ pub fn checks(checks: &[Check]) -> Vec<ui::CheckRow> {
     ui::check_rows(checks, None)
 }
 
-/// An hour as its label under the strip.
-fn tick_label(hour: u8) -> String {
-    hour.to_string()
-}
-
 fn ticks(day: &HistoryDay, tz: &TimeZone) -> Vec<TickView> {
     let marks = match day.day.parse::<Date>() {
         Ok(date) => hour_marks(date, tz),
@@ -91,7 +86,7 @@ fn ticks(day: &HistoryDay, tz: &TimeZone) -> Vec<TickView> {
     marks
         .into_iter()
         .map(|(hour, at)| TickView {
-            label: tick_label(hour),
+            label: ui::tick_label(hour),
             at,
         })
         .collect()
@@ -149,7 +144,7 @@ mod tests {
         );
         assert_eq!(
             v.ticks.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(),
-            ["0", "6", "12", "18", "24"]
+            ["00:00", "06:00", "12:00", "18:00", "24:00"]
         );
         assert!(v.ticks.windows(2).all(|w| w[0].at < w[1].at));
         assert_eq!(v.rows.len(), day.events.len());

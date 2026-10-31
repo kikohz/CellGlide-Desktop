@@ -489,6 +489,11 @@ pub fn tick_gaps(day: &Date, tz: &TimeZone) -> Vec<u16> {
         .collect()
 }
 
+/// An hour label under the strip: "06:00".
+pub fn tick_label(hour: u8) -> String {
+    format!("{hour:02}:00")
+}
+
 fn event_tone(tone: EventTone) -> Tone {
     match tone {
         EventTone::Green => Tone::Green,

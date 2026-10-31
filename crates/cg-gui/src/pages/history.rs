@@ -11,7 +11,7 @@ use cg_i18n::tr;
 use cg_ipc::Request;
 use cg_ipc::describe::{
     self,
-    ui::{EventRow, day_strip, legend as legend_items, neighbor, row_texts, tick_gaps},
+    ui::{EventRow, day_strip, legend as legend_items, neighbor, row_texts, tick_gaps, tick_label},
 };
 use cg_ipc::health::{HealthEvent, HistoryDay};
 use iced::widget::{button, column, container, row, space, text};
@@ -220,7 +220,7 @@ fn ticks<'a>(day: &HistoryDay, tz: &TimeZone) -> Element<'a, Msg> {
         .parse::<Date>()
         .map(|date| tick_gaps(&date, tz))
         .unwrap_or_else(|_| vec![250; 4]);
-    let label = |hour: u8| kit::secondary(format!("{hour:02}:00")).size(11);
+    let label = |hour: u8| kit::secondary(tick_label(hour)).size(11);
     let mut ticks = row![label(0)];
     for (gap, hour) in gaps.into_iter().zip([6u8, 12, 18, 24]) {
         ticks = ticks
