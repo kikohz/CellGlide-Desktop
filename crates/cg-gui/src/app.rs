@@ -12,7 +12,7 @@ use crate::widgets::kit::{self, Tone};
 use crate::writer::Writer;
 use cg_i18n::tr;
 use cg_ipc::describe::ui::{
-    self, Badge, GROUPS, KnownDevices, Section, ServiceDown, is_connected, plugged_in, version_line,
+    self, Badge, GROUPS, KnownDevices, Section, ServiceDown, plugged_in, version_line,
 };
 use cg_ipc::{Request, Snapshot, describe};
 use cg_tools::prefs::{self, PrefChange, Prefs};
@@ -253,12 +253,7 @@ impl App {
 
     /// The same title for the main window and the panel.
     pub fn title(&self, _window: window::Id) -> String {
-        let key = if is_connected(self.snapshot.as_ref()) {
-            "gui.title_connected"
-        } else {
-            "gui.title"
-        };
-        tr(key, &[])
+        ui::window_title(self.snapshot.as_ref())
     }
 
     /// Raises the main window, or opens it.

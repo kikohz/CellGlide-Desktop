@@ -73,9 +73,10 @@ pub fn verdict_line(phone: Option<f64>, wifi: Option<f64>) -> Option<String> {
 
 /// "Testing Download… 3 / 5 s": `elapsed` against the direction's own `duration`.
 fn transfer_text(progress: &Progress, uploading: bool) -> String {
-    // `max` also turns a NaN into 0, which `clamp` would panic on.
+    // `max` turns a NaN (or a negative) into 0: `clamp` would panic on a NaN bound, and the
+    // text would read "NaN".
     let total = progress.duration.max(0.0);
-    let seconds = format!("{:.0}", progress.elapsed.clamp(0.0, total));
+    let seconds = format!("{:.0}", progress.elapsed.max(0.0).min(total));
     tr(
         "speed.stage.transfer",
         &[
@@ -327,5 +328,29 @@ mod tests {
             "{:?}",
             progress_line("iPhone", &p)
         );
+    }
+
+    #[test]
+    fn a_missing_or_broken_duration_reads_zero_without_panicking() {
+        let _lang = language(cg_i18n::Lang::En);
+        for (elapsed, duration) in [
+            (3.2, 0.0),
+            (3.2, f64::NAN),
+            (3.2, -5.0),
+            (f64::NAN, 5.0),
+            (-1.0, 5.0),
+        ] {
+            let p = Progress {
+                stage: Stage::Download,
+                elapsed,
+                duration,
+                ..Progress::default()
+            };
+            let text = stage_text(&p).unwrap();
+            let expected = if duration > 0.0 { "0 / 5 s" } else { "0 / 0 s" };
+            assert!(text.ends_with(expected), "{elapsed} / {duration}: {text}");
+            let line = progress_line("iPhone", &p).unwrap();
+            assert!(line.contains(expected) && !line.contains("NaN"), "{line}");
+        }
     }
 }

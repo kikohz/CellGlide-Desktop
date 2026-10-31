@@ -69,13 +69,8 @@ pub fn chrome(snapshot: Option<&Snapshot>, down: Option<&ServiceDown>) -> Chrome
         _ => ui::tray_look(snapshot),
     };
     let badge = |section| ui::badge(section, snapshot, down);
-    let title_key = if ui::is_connected(snapshot) {
-        "gui.title_connected"
-    } else {
-        "gui.title"
-    };
     ChromeView {
-        window_title: tr(title_key, &[]),
+        window_title: ui::window_title(snapshot),
         menu: menu(&tray),
         tray,
         badges: BadgesView {

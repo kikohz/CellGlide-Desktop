@@ -303,6 +303,17 @@ pub fn is_connected(snapshot: Option<&Snapshot>) -> bool {
     snapshot.is_some_and(|s| matches!(s.state, ConnState::Connected { .. }))
 }
 
+/// The main window's title, which says so while connected: the Linux window and the Windows
+/// app (`ChromeView.window_title`) both use it.
+pub fn window_title(snapshot: Option<&Snapshot>) -> String {
+    let key = if is_connected(snapshot) {
+        "gui.title_connected"
+    } else {
+        "gui.title"
+    };
+    tr(key, &[])
+}
+
 /// How long an iPhone must have been missing before its return counts as plugging it in.
 /// usbmuxd can lose a phone for a moment and find it again: after resume it came back 26 s
 /// later once resume-check restarted usbmuxd (validation l), and a relock can empty the list
@@ -1173,6 +1184,11 @@ mod tests {
         assert!(is_connected(Some(&connected)));
         assert!(!is_connected(Some(&Snapshot::default())));
         assert!(!is_connected(None));
+        let _lang = cg_i18n::lock_for_tests();
+        cg_i18n::set(cg_i18n::Lang::En);
+        assert_eq!(window_title(Some(&connected)), "CellGlide · Connected");
+        assert_eq!(window_title(Some(&Snapshot::default())), "CellGlide");
+        assert_eq!(window_title(None), "CellGlide");
     }
 
     #[test]

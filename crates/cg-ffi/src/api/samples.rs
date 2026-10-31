@@ -285,9 +285,7 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
                     telegram_url: "https://t.me/cellglide".into(),
                     // A short stand-in: the real lists run to hundreds of kilobytes.
                     licenses: "CellGlide third-party licenses\n\nMIT License\n  - tokio 1.48.0\n\
-                               # NuGet packages of windows/CellGlide.App (both RIDs): id version \
-                               license projectUrl\nCommunityToolkit.Mvvm 8.4.2 MIT \
-                               https://github.com/CommunityToolkit/dotnet\n"
+                               CommunityToolkit.Mvvm 8.4.2 MIT https://github.com/CommunityToolkit/dotnet\n"
                         .into(),
                 },
             ),

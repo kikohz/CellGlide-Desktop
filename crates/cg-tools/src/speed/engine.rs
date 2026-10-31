@@ -178,13 +178,16 @@ async fn run(
         p.stage = Stage::Download;
     });
     measure_direction(route, server, params, progress, false).await?;
-    // Upload's own clock starts at 0: its first frame must not show download's end.
-    progress.send_modify(|p| {
-        p.stage = Stage::Upload;
-        p.elapsed = 0.0;
-    });
+    progress.send_modify(begin_upload);
     measure_direction(route, server, params, progress, true).await?;
     Ok(())
+}
+
+/// Download is over and upload starts: upload's own clock starts at 0, so its first frame
+/// doesn't show download's end.
+fn begin_upload(p: &mut Progress) {
+    p.stage = Stage::Upload;
+    p.elapsed = 0.0;
 }
 
 /// The median of `samples` requests on one kept-alive connection, in milliseconds.
@@ -936,7 +939,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn progress_carries_its_duration_and_each_direction_starts_at_zero() {
+    async fn progress_carries_its_duration_and_each_directions_clock_runs_forward() {
         let fake = FakeServer::start(Mode::Normal).await;
         let params = Params {
             duration: Duration::from_secs(2),
@@ -944,8 +947,34 @@ pub(crate) mod tests {
         };
         let (_, frames) = frames_against(&fake, params).await;
         assert!(frames.iter().all(|p| p.duration == 2.0), "{frames:?}");
-        let first_upload = frames.iter().find(|p| p.stage == Stage::Upload).unwrap();
-        assert!(first_upload.elapsed < 1.0, "{}", first_upload.elapsed);
+        assert!(frames.iter().any(|p| p.stage == Stage::Upload));
+        // Within each direction the clock only moves forward, whatever the machine's load:
+        // an upload frame carrying download's elapsed would be followed by a smaller one.
+        for stage in [Stage::Download, Stage::Upload] {
+            let elapsed: Vec<f64> = frames
+                .iter()
+                .filter(|p| p.stage == stage)
+                .map(|p| p.elapsed)
+                .collect();
+            assert!(
+                elapsed.windows(2).all(|w| w[0] <= w[1]),
+                "{stage:?}: {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_starts_its_own_clock() {
+        let mut p = Progress {
+            stage: Stage::Download,
+            elapsed: 2.0,
+            duration: 2.0,
+            progress: 0.5,
+            ..Progress::default()
+        };
+        begin_upload(&mut p);
+        assert_eq!((&p.stage, p.elapsed), (&Stage::Upload, 0.0));
+        assert_eq!((p.duration, p.progress), (2.0, 0.5));
     }
 
     #[tokio::test]
