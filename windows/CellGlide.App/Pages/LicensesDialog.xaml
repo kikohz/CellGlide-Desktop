@@ -14,7 +14,8 @@
         <x:Double x:Key="ContentDialogMaxWidth">900</x:Double>
         <x:Double x:Key="ContentDialogMaxHeight">800</x:Double>
     </ContentDialog.Resources>
-    <ListView x:Name="List" Width="700" Height="440" SelectionMode="None" IsItemClickEnabled="False"
+    <!-- Width: up to 700, narrower with the window (set in code), so the dialog never clips. -->
+    <ListView x:Name="List" Height="440" SelectionMode="None" IsItemClickEnabled="False"
               AutomationProperties.Name="{x:Bind h:L.T('about.licenses')}">
         <ListView.ItemTemplate>
             <DataTemplate x:DataType="x:String">
