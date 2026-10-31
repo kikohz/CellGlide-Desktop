@@ -39,13 +39,18 @@ pub fn labelled_routes(plan: &Plan) -> Vec<(Route, String)> {
     plan.routes()
         .into_iter()
         .map(|route| {
-            let label = match &route {
-                Route::Interface(iface) => tr("speed.wifi", &[("iface", iface)]),
-                _ => tr("speed.phone", &[]),
-            };
+            let label = route_label(&route);
             (route, label)
         })
         .collect()
+}
+
+/// The name the user sees for `route`, in the current language.
+pub fn route_label(route: &Route) -> String {
+    match route {
+        Route::Interface(iface) => tr("speed.wifi", &[("iface", iface)]),
+        _ => tr("speed.phone", &[]),
+    }
 }
 
 /// Measures the routes one after the other. After a cancel no further leg starts and the

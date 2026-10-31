@@ -222,9 +222,8 @@ pub(crate) async fn start(
     let routes = session::labelled_routes(&plan);
     state.legs = routes
         .iter()
-        .map(|(route, label)| SpeedLeg {
-            label: label.clone(),
-            phone: *route == Route::Phone,
+        .map(|(route, _label)| SpeedLeg {
+            route: route.clone(),
             progress: Progress::default(),
         })
         .collect();
@@ -424,8 +423,7 @@ mod tests {
     #[test]
     fn a_leg_cut_short_reads_cancelled_and_a_finished_one_keeps_its_end() {
         let leg = |stage| SpeedLeg {
-            label: String::new(),
-            phone: true,
+            route: Route::Phone,
             progress: Progress {
                 stage,
                 waiting: true,

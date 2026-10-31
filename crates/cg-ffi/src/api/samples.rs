@@ -17,7 +17,7 @@ use cg_ipc::{Check, CheckId, Contact, DiagRange, DnsMode, PhoneChoice, Request, 
 use cg_tools::ToolError;
 use cg_tools::dns_leak::{Report, judge};
 use cg_tools::prefs::Prefs;
-use cg_tools::speed::{Note, Progress, Record, SpeedError, SpeedResult, Stage};
+use cg_tools::speed::{Note, Progress, Record, Route, SpeedError, SpeedResult, Stage};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -642,8 +642,11 @@ fn leg(phone: bool, stage: Stage, results: Results) -> SpeedLeg {
         ),
     };
     SpeedLeg {
-        label: if phone { "iPhone" } else { "Wi-Fi" }.into(),
-        phone,
+        route: if phone {
+            Route::Phone
+        } else {
+            Route::Interface("Wi-Fi".into())
+        },
         progress: Progress {
             stage,
             progress,

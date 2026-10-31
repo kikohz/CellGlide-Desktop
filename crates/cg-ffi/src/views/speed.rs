@@ -5,7 +5,7 @@ use cg_ipc::describe::ui::{self, CurvePoint};
 use cg_tools::speed::text::{
     error_text, note_text, numbers, stage_text, summary_text, verdict_line,
 };
-use cg_tools::speed::{Progress, Record, Stage, run};
+use cg_tools::speed::{Progress, Record, Route, Stage, run, session};
 use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
 
@@ -89,12 +89,19 @@ pub struct SpeedRecordView {
     pub carrier: Option<String>,
 }
 
-/// One route as the page keeps it.
+/// One route as the page keeps it. Its title is worked out when the page is, so it follows
+/// the language.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SpeedLeg {
-    pub label: String,
-    pub phone: bool,
+    pub route: Route,
     pub progress: Progress,
+}
+
+impl SpeedLeg {
+    /// The phone's leg (blue), not Wi‑Fi or Ethernet (green).
+    pub fn phone(&self) -> bool {
+        self.route == Route::Phone
+    }
 }
 
 /// Everything the page depends on.
@@ -138,7 +145,7 @@ fn verdict(page: &SpeedPage) -> Option<String> {
     let download = |phone: bool| {
         page.legs
             .iter()
-            .find(|leg| leg.phone == phone && leg.progress.stage == Stage::Done)
+            .find(|leg| leg.phone() == phone && leg.progress.stage == Stage::Done)
             .and_then(|leg| leg.progress.result.download)
     };
     verdict_line(download(true), download(false))
@@ -157,8 +164,8 @@ fn leg(leg: &SpeedLeg) -> SpeedLegView {
         Stage::Cancelled => (StageView::Cancelled, None),
     };
     SpeedLegView {
-        label: leg.label.clone(),
-        phone: leg.phone,
+        label: session::route_label(&leg.route),
+        phone: leg.phone(),
         stage,
         stage_text: stage_text(p),
         error,
@@ -200,8 +207,11 @@ mod tests {
 
     fn leg_at(phone: bool, stage: Stage, download: Option<f64>) -> SpeedLeg {
         SpeedLeg {
-            label: if phone { "iPhone" } else { "Wi‑Fi" }.into(),
-            phone,
+            route: if phone {
+                Route::Phone
+            } else {
+                Route::Interface("Wi-Fi".into())
+            },
             progress: Progress {
                 stage,
                 progress: 0.5,

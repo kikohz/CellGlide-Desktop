@@ -1386,3 +1386,57 @@ async fn each_leg_shows_its_end_as_soon_as_it_ends() {
     assert!(view.verdict.is_some(), "{view:#?}");
     rt.shutdown();
 }
+
+#[tokio::test]
+async fn a_new_language_relabels_the_speed_legs() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        uplink: || Some("Wi-Fi".to_string()),
+        ..speed_setup(&svc, dir.path(), &fake)
+    };
+    let (rt, events) = connected_runtime(&svc, config).await;
+    let id = rt.send(Command::SetLang {
+        lang: "zh-CN".into(),
+    });
+    reply_of(&events, id).await;
+    rt.send(Command::SpeedStart {
+        include_wifi: true,
+        confirmed: true,
+        caps: small(),
+    });
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if !view.running && view.legs.len() == 2),
+    )
+    .await;
+    let wifi = |lang| cg_i18n::tr_in(lang, "speed.wifi", &[("iface", "Wi-Fi")]);
+    let phone = |lang| cg_i18n::tr_in(lang, "speed.phone", &[]);
+    // Another test in this binary may switch the language too, and the page is only sent when
+    // it reads differently: so what counts is the latest page, whatever came before.
+    for (tag, lang) in [("en", cg_i18n::Lang::En), ("zh-CN", cg_i18n::Lang::ZhCn)] {
+        let id = rt.send(Command::SetLang { lang: tag.into() });
+        reply_of(&events, id).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let latest = events.lock().unwrap().iter().rev().find_map(|e| match e {
+                Event::SpeedProgress { view } if view.legs.len() == 2 => {
+                    Some((view.legs[0].label.clone(), view.legs[1].label.clone()))
+                }
+                _ => None,
+            });
+            if latest == Some((phone(lang), wifi(lang))) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{tag}: {latest:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    assert_ne!(
+        wifi(cg_i18n::Lang::En),
+        wifi(cg_i18n::Lang::ZhCn),
+        "the two languages read differently"
+    );
+    rt.shutdown();
+}
