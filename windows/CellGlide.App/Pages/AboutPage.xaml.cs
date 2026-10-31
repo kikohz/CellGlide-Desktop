@@ -20,18 +20,14 @@ namespace CellGlide.App.Pages;
 /// </summary>
 public sealed partial class AboutPage : Page
 {
-    /// <summary>How long "Copied" shows before turning back into "Copy" (cg-gui COPIED_FOR).</summary>
-    static readonly TimeSpan CopiedFor = TimeSpan.FromSeconds(2);
-
     readonly AboutViewModel _about;
-    // "Copied" is the page's own short-lived state; the number lets only the last copy's timer turn it back.
-    bool _copied;
-    int _copies;
+    readonly CopyFeedback _copy;
     bool _dialogOpen;
 
     public AboutPage(AboutViewModel about)
     {
         _about = about;
+        _copy = new CopyFeedback(Render);
         InitializeComponent();
         Icon.Source = new BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon-128.png")));
         about.PropertyChanged += OnChanged;
@@ -62,9 +58,7 @@ public sealed partial class AboutPage : Page
         ErrorLine.Visibility = Show.Visible(_about.Error);
 
         VersionText.Text = about is null ? "" : L.T("about.version", "version", about.Version);
-        var copyLabel = L.T(_copied ? "common.copied" : "common.copy");
-        CopyVersionButton.Content = copyLabel;
-        AutomationProperties.SetName(CopyVersionButton, copyLabel);
+        CopyFeedback.SetLabel(CopyVersionButton, _copy.Copied is not null);
         AutomationProperties.SetHelpText(CopyVersionButton, VersionText.Text);
 
         TelegramButton.Content = about?.TelegramUrl ?? "";
@@ -74,21 +68,11 @@ public sealed partial class AboutPage : Page
             [CopyVersionButton, TelegramButton, ShowLicensesButton, QuitButton]);
     }
 
-    async void OnCopyVersionClick(object sender, RoutedEventArgs e)
+    void OnCopyVersionClick(object sender, RoutedEventArgs e)
     {
-        if (_about.About is not { } about || !Show.Copy(about.Version))
+        if (_about.About is { } about)
         {
-            return;
-        }
-        _copied = true;
-        var copy = ++_copies;
-        Render();
-        Show.Announce(CopyVersionButton);
-        await Task.Delay(CopiedFor);
-        if (copy == _copies)
-        {
-            _copied = false;
-            Render();
+            _copy.Copy(about.Version, CopyVersionButton);
         }
     }
 

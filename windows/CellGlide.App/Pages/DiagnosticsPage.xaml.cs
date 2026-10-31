@@ -6,10 +6,8 @@ using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
-using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.Storage.Pickers;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace CellGlide.App.Pages;
 
@@ -24,17 +22,13 @@ namespace CellGlide.App.Pages;
 /// </summary>
 public sealed partial class DiagnosticsPage : Page
 {
-    /// <summary>How long "Copied" shows before turning back into "Copy" (cg-gui COPIED_FOR).</summary>
-    static readonly TimeSpan CopiedFor = TimeSpan.FromSeconds(2);
-
     readonly DiagnosticsViewModel _diag;
-    // "Copied" is the page's own short-lived state; the number lets only the last copy's timer turn it back.
-    int _copies;
-    bool _copied;
+    readonly CopyFeedback _copy;
 
     public DiagnosticsPage(DiagnosticsViewModel diag)
     {
         _diag = diag;
+        _copy = new CopyFeedback(Render);
         InitializeComponent();
         diag.PropertyChanged += OnChanged;
         foreach (var command in new INotifyPropertyChanged[] { diag.PrepareCommand, diag.PrepareToSaveCommand, diag.SendCommand, diag.SaveCommand })
@@ -77,8 +71,7 @@ public sealed partial class DiagnosticsPage : Page
         FormCard.Visibility = Show.Visible(!sent);
         CodeText.Text = _diag.Code ?? "";
         SentDot.Fill = Show.Brush(Tone.Green);
-        CopyCodeButton.Content = L.T(_copied ? "common.copied" : "common.copy");
-        AutomationProperties.SetName(CopyCodeButton, L.T(_copied ? "common.copied" : "common.copy"));
+        CopyFeedback.SetLabel(CopyCodeButton, _copy.Copied is not null);
 
         // All at once, so a control going off hands focus to a neighbour that is on in the new state; the one that
         // started the work gets focus back when it is done.
@@ -247,36 +240,11 @@ public sealed partial class DiagnosticsPage : Page
     }
 
     /// <summary>Copies the report code; the button says "Copied" for 2 s (cg-gui copying_the_code_turns_back_after_two_seconds).</summary>
-    async void OnCopyCodeClick(object sender, RoutedEventArgs e)
+    void OnCopyCodeClick(object sender, RoutedEventArgs e)
     {
-        if (_diag.Code is not { } code)
+        if (_diag.Code is { } code)
         {
-            return;
-        }
-        var package = new DataPackage();
-        package.SetText(code);
-        try
-        {
-            Clipboard.SetContent(package);
-            Clipboard.Flush();
-        }
-        catch (Exception)
-        {
-            // The clipboard is held by another program right now: nothing copied, nothing claimed.
-            return;
-        }
-        _copied = true;
-        var copy = ++_copies;
-        Render();
-        if ((FrameworkElementAutomationPeer.FromElement(CopyCodeButton) ?? FrameworkElementAutomationPeer.CreatePeerForElement(CopyCodeButton)) is { } peer)
-        {
-            peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
-        }
-        await Task.Delay(CopiedFor);
-        if (copy == _copies)
-        {
-            _copied = false;
-            Render();
+            _copy.Copy(code, CopyCodeButton);
         }
     }
 
@@ -304,8 +272,7 @@ public sealed partial class DiagnosticsPage : Page
     void Restart()
     {
         _diag.Reset();
-        _copied = false;
-        _copies++;
+        _copy.Reset();
         Render();
         ViewButton.Focus(FocusState.Programmatic);
     }

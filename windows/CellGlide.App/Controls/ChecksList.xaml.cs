@@ -10,7 +10,6 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace CellGlide.App.Controls;
 
@@ -30,8 +29,6 @@ namespace CellGlide.App.Controls;
 /// </summary>
 public sealed partial class ChecksList : UserControl
 {
-    static readonly TimeSpan CopiedFor = TimeSpan.FromSeconds(2);
-
     public static readonly DependencyProperty ChecksProperty = DependencyProperty.Register(
         nameof(Checks), typeof(object), typeof(ChecksList), new PropertyMetadata(null, (d, e) => ((ChecksList)d).Attach(e.OldValue as ChecksViewModel)));
 
@@ -41,13 +38,12 @@ public sealed partial class ChecksList : UserControl
     /// <summary>Each shown fix and its Copy button, to relabel in place (keyboard focus stays put).</summary>
     readonly List<(string Fix, Button Button)> _copyButtons = [];
     /// <summary>The fix just copied, while its button says so.</summary>
-    string? _copied;
-    /// <summary>Numbers the copies: only the latest one's timer puts its label back.</summary>
-    int _copies;
+    readonly CopyFeedback _copy;
     bool _attached;
 
     public ChecksList()
     {
+        _copy = new CopyFeedback(Relabel);
         InitializeComponent();
         Loaded += (_, _) =>
         {
@@ -204,7 +200,7 @@ public sealed partial class ChecksList : UserControl
             // The button's name is its own text; LabeledBy ties it to the fix it copies.
             AutomationProperties.SetLabeledBy(copy, shown);
             AutomationProperties.SetLiveSetting(copy, AutomationLiveSetting.Polite);
-            copy.Click += (_, _) => Copy(fix);
+            copy.Click += (_, _) => _copy.Copy(fix, copy);
             Grid.SetColumn(copy, 1);
             fixRow.Children.Add(shown);
             fixRow.Children.Add(copy);
@@ -215,48 +211,13 @@ public sealed partial class ChecksList : UserControl
         return entry;
     }
 
-    void Label(string fix, Button button)
-    {
-        var text = L.T(fix == _copied ? "common.copied" : "common.copy");
-        button.Content = text;
-        AutomationProperties.SetName(button, text);
-    }
+    void Label(string fix, Button button) => CopyFeedback.SetLabel(button, _copy.IsCopied(fix));
 
     void Relabel()
     {
         foreach (var (fix, button) in _copyButtons)
         {
             Label(fix, button);
-        }
-    }
-
-    async void Copy(string fix)
-    {
-        var package = new DataPackage();
-        package.SetText(fix);
-        try
-        {
-            Clipboard.SetContent(package);
-            Clipboard.Flush();
-        }
-        catch (Exception)
-        {
-            // The clipboard is held by another program right now: nothing copied, nothing claimed.
-            return;
-        }
-        _copied = fix;
-        var copy = ++_copies;
-        Relabel();
-        if (_copyButtons.Find(b => b.Fix == fix).Button is { } button
-            && (FrameworkElementAutomationPeer.FromElement(button) ?? FrameworkElementAutomationPeer.CreatePeerForElement(button)) is { } peer)
-        {
-            peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
-        }
-        await Task.Delay(CopiedFor);
-        if (copy == _copies)
-        {
-            _copied = null;
-            Relabel();
         }
     }
 

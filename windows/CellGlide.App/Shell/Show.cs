@@ -189,8 +189,9 @@ public static partial class Show
             Windows.ApplicationModel.DataTransfer.Clipboard.Flush();
             return true;
         }
-        catch (Exception)
+        catch (COMException)
         {
+            // CLIPBRD_E_CANT_OPEN and the like; anything else is a bug and is not hidden.
             return false;
         }
     }

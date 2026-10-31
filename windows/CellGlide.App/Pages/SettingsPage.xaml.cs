@@ -21,9 +21,6 @@ namespace CellGlide.App.Pages;
 /// </summary>
 public sealed partial class SettingsPage : Page
 {
-    /// <summary>How long "Copied" shows before turning back into "Copy" (cg-gui COPIED_FOR).</summary>
-    static readonly TimeSpan CopiedFor = TimeSpan.FromSeconds(2);
-
     readonly SettingsViewModel _settings;
     readonly ShellViewModel _shell;
     readonly Autostart _autostart;
@@ -33,15 +30,14 @@ public sealed partial class SettingsPage : Page
     // Why reading the Run key failed (cleared by the next read that works), and why the last click's write failed.
     string? _autostartReadError;
     string? _autostartWriteError;
-    // "Copied" is the page's own short-lived state; the number lets only the last copy's timer turn it back.
-    bool _copied;
-    int _copies;
+    readonly CopyFeedback _copy;
 
     public SettingsPage(SettingsViewModel settings, ShellViewModel shell, Autostart autostart, Window window)
     {
         _settings = settings;
         _shell = shell;
         _autostart = autostart;
+        _copy = new CopyFeedback(Render);
         InitializeComponent();
         Checks.Checks = settings.Checks;
         Checks.RunLabel = L.T("settings.run_checks");
@@ -142,7 +138,13 @@ public sealed partial class SettingsPage : Page
             AutostartSwitch.IsOn = _autostartState == AutostartState.On;
             AutomationProperties.SetHelpText(AutostartSwitch, L.T(disabled ? "settings.launch_disabled_by_system" : "settings.launch_note"));
             DisabledBySystemLine.Foreground = Show.Brush(Tone.Orange);
+            // Its text never changes, so XAML says nothing by itself: said when it appears.
+            var appears = disabled && DisabledBySystemLine.Visibility != Visibility.Visible;
             DisabledBySystemLine.Visibility = Show.Visible(disabled);
+            if (appears)
+            {
+                Show.Announce(DisabledBySystemLine);
+            }
             // Never together with the disabled line: while Windows has turned us off, that line is the one that counts.
             var autostartError = disabled ? null : _autostartWriteError ?? _autostartReadError;
             AutostartErrorLine.Text = autostartError ?? "";
@@ -159,9 +161,7 @@ public sealed partial class SettingsPage : Page
             ProxyText.Foreground = proxy is null
                 ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
                 : (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-            var copyLabel = L.T(_copied ? "common.copied" : "common.copy");
-            CopyProxyButton.Content = copyLabel;
-            AutomationProperties.SetName(CopyProxyButton, copyLabel);
+            CopyFeedback.SetLabel(CopyProxyButton, _copy.Copied is not null);
             // Off while their change is on its way (or without a state); all at once, so a control going off hands focus
             // to its nearest neighbour that is on, and gets it back when the change is done.
             Show.SetEnabled(
@@ -261,21 +261,11 @@ public sealed partial class SettingsPage : Page
         Render();
     }
 
-    async void OnCopyProxyClick(object sender, RoutedEventArgs e)
+    void OnCopyProxyClick(object sender, RoutedEventArgs e)
     {
-        if (Service?.Proxy is not { } proxy || !Show.Copy(proxy))
+        if (Service?.Proxy is { } proxy)
         {
-            return;
-        }
-        _copied = true;
-        var copy = ++_copies;
-        Render();
-        Show.Announce(CopyProxyButton);
-        await Task.Delay(CopiedFor);
-        if (copy == _copies)
-        {
-            _copied = false;
-            Render();
+            _copy.Copy(proxy, CopyProxyButton);
         }
     }
 }

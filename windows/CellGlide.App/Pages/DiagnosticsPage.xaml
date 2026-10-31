@@ -40,7 +40,9 @@
                                 <TextBlock x:Name="CodeText" FontFamily="Consolas" FontSize="15" IsTextSelectionEnabled="True"
                                            AutomationProperties.LiveSetting="Polite" />
                             </Border>
-                            <Button x:Name="CopyCodeButton" FontSize="12" VerticalAlignment="Center" Click="OnCopyCodeClick" />
+                            <!-- Named by its own text ("Copy" / "Copied"), said again when it changes. -->
+                            <Button x:Name="CopyCodeButton" FontSize="12" VerticalAlignment="Center" Click="OnCopyCodeClick"
+                                    AutomationProperties.LiveSetting="Polite" />
                         </StackPanel>
                         <TextBlock FontSize="13" TextWrapping="Wrap" HorizontalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    Text="{x:Bind h:L.T('diag.code_hint')}" />
