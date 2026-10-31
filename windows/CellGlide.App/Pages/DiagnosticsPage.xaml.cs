@@ -5,28 +5,39 @@ using CellGlide.App.Shell;
 using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.Storage.Pickers;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace CellGlide.App.Pages;
 
 /// <summary>
 /// Diagnostics (cg-gui pages/diagnostics.rs) over <see cref="DiagnosticsViewModel"/>. View asks the DLL for
-/// the bundle of the form on screen and shows it, byte for byte, in the preview; Send and both saves work
-/// only on that bundle, and any change to the form throws it away (<see cref="DiagnosticsViewModel.Discard"/>).
-/// The form is frozen while a bundle is built, sent or saved, so a reply always belongs to what is on screen.
-/// Texts, the file name and every failure sentence are the DLL's.
+/// the bundle of the form on screen and shows it, byte for byte, in the preview; only a previewed bundle can
+/// be sent. Saving needs no preview: it builds the bundle first (which then still needs a view before a send).
+/// Any change to the form throws the bundle away (<see cref="DiagnosticsViewModel.Discard"/>). The form is
+/// frozen while a bundle is built, sent or saved, so a reply always belongs to what is on screen. After a send
+/// the sent card replaces the form: copy the code, Send Another (keeps the email and note) or Done (clears
+/// them). Texts, the file name and every failure sentence are the DLL's.
 /// </summary>
 public sealed partial class DiagnosticsPage : Page
 {
+    /// <summary>How long "Copied" shows before turning back into "Copy" (cg-gui COPIED_FOR).</summary>
+    static readonly TimeSpan CopiedFor = TimeSpan.FromSeconds(2);
+
     readonly DiagnosticsViewModel _diag;
+    // "Copied" is the page's own short-lived state; the number lets only the last copy's timer turn it back.
+    int _copies;
+    bool _copied;
 
     public DiagnosticsPage(DiagnosticsViewModel diag)
     {
         _diag = diag;
         InitializeComponent();
         diag.PropertyChanged += OnChanged;
-        foreach (var command in new INotifyPropertyChanged[] { diag.PrepareCommand, diag.SendCommand, diag.SaveCommand })
+        foreach (var command in new INotifyPropertyChanged[] { diag.PrepareCommand, diag.PrepareToSaveCommand, diag.SendCommand, diag.SaveCommand })
         {
             command.PropertyChanged += (_, e) =>
             {
@@ -46,50 +57,60 @@ public sealed partial class DiagnosticsPage : Page
         Show.AnnounceChanges(ErrorLine);
         Show.AnnounceChanges(BusyLine);
         Show.AnnounceChanges(SavedLine);
+        Show.AnnounceChanges(CodeText);
         Render();
     }
 
-    bool Busy => _diag.PrepareCommand.IsRunning || _diag.SendCommand.IsRunning || _diag.SaveCommand.IsRunning;
+    bool Busy =>
+        _diag.PrepareCommand.IsRunning || _diag.PrepareToSaveCommand.IsRunning || _diag.SendCommand.IsRunning || _diag.SaveCommand.IsRunning;
 
     void OnChanged(object? sender, PropertyChangedEventArgs e) => Render();
 
     void Render()
     {
         var busy = Busy;
-        var json = _diag.Json;
+        var sent = _diag.Code is not null;
+        var canSend = !busy && _diag.SendCommand.CanExecute(null);
 
-        DayRange.IsEnabled = WeekRange.IsEnabled = Email.IsEnabled = Note.IsEnabled = !busy;
+        // The sent card in place of the form.
+        SentCard.Visibility = Show.Visible(sent);
+        FormCard.Visibility = Show.Visible(!sent);
+        CodeText.Text = _diag.Code ?? "";
+        SentDot.Fill = Show.Brush(Tone.Green);
+        CopyCodeButton.Content = L.T(_copied ? "common.copied" : "common.copy");
+        AutomationProperties.SetName(CopyCodeButton, L.T(_copied ? "common.copied" : "common.copy"));
+        AgainButton.IsEnabled = DoneButton.IsEnabled = !busy;
+
+        Range.IsEnabled = Email.IsEnabled = Note.IsEnabled = !busy;
         ViewButton.IsEnabled = !busy;
-        SendButton.IsEnabled = !busy && json is not null;
-        SaveButton.IsEnabled = SaveAsButton.IsEnabled = !busy && json is not null;
-        NeedsPreview.Visibility = Show.Visible(!busy && json is null);
+        SaveButton.IsEnabled = SaveAsButton.IsEnabled = !busy;
+        Show.SetEnabled(SendButton, canSend, ViewButton, SaveButton);
+        NeedsPreview.Visibility = Show.Visible(!busy && !canSend);
 
         ErrorLine.Text = _diag.Error ?? "";
         ErrorLine.Foreground = Show.Brush(Tone.Red);
         ErrorLine.Visibility = Show.Visible(_diag.Error);
-        var busyLine = _diag.PrepareCommand.IsRunning ? L.T("diag.preparing")
+        var busyLine = _diag.PrepareCommand.IsRunning || _diag.PrepareToSaveCommand.IsRunning ? L.T("diag.preparing")
             : _diag.SendCommand.IsRunning ? L.T("diag.sending")
             : null;
         BusyLine.Text = busyLine ?? "";
         BusyLine.Visibility = Show.Visible(busyLine);
 
-        // The same text, so it is not set again (which would move the reader's caret) on every change.
-        if (Preview.Text != (json ?? ""))
+        // Only a previewed bundle is shown (and so may be sent); one built for a save stays out of sight.
+        var shown = _diag.Previewed ? _diag.Json ?? "" : "";
+        // The same text is not set again (which would move the reader's caret) on every change.
+        if (Preview.Text != shown)
         {
-            Preview.Text = json ?? "";
+            Preview.Text = shown;
         }
-        PreviewCard.Visibility = Show.Visible(json);
+        PreviewCard.Visibility = Show.Visible(_diag.Previewed && _diag.Json is not null && !sent);
 
         SavedLine.Text = _diag.SavedPath is { } path ? L.T("diag.saved", "path", path) : "";
         SavedRow.Visibility = Show.Visible(_diag.SavedPath);
-
-        CodeText.Text = _diag.Code ?? "";
-        SentDot.Fill = Show.Brush(Tone.Green);
-        SentCard.Visibility = Show.Visible(_diag.Code);
     }
 
     DiagnosticsInput Input() =>
-        new(WeekRange.IsChecked == true ? DiagRange.Week : DiagRange.Day, Email.Text, Note.Text);
+        new(Range.SelectedIndex == 1 ? DiagRange.Week : DiagRange.Day, Email.Text, Note.Text);
 
     /// <summary>The form changed: the bundle on hand is no longer the one for it.</summary>
     void FormChanged()
@@ -100,7 +121,7 @@ public sealed partial class DiagnosticsPage : Page
         }
     }
 
-    void OnRangeChecked(object sender, RoutedEventArgs e) => FormChanged();
+    void OnRangeChanged(object sender, SelectionChangedEventArgs e) => FormChanged();
 
     void OnFieldChanged(object sender, TextChangedEventArgs e) => FormChanged();
 
@@ -110,12 +131,10 @@ public sealed partial class DiagnosticsPage : Page
         {
             return;
         }
-        if (_diag.Json is null)
-        {
-            // A failure leaves the DLL's sentence in Error.
-            await _diag.PrepareCommand.ExecuteAsync(Input());
-        }
-        if (_diag.Json is not null)
+        // Builds the bundle unless one is on hand (one built for a save is shown as it is); a failure leaves
+        // the DLL's sentence in Error.
+        await _diag.PrepareCommand.ExecuteAsync(Input());
+        if (_diag.Previewed)
         {
             Preview.Focus(FocusState.Programmatic);
             Preview.StartBringIntoView();
@@ -124,15 +143,33 @@ public sealed partial class DiagnosticsPage : Page
 
     async void OnSendClick(object sender, RoutedEventArgs e)
     {
-        if (!Busy && _diag.SendCommand.CanExecute(null))
+        if (Busy || !_diag.SendCommand.CanExecute(null))
         {
-            await _diag.SendCommand.ExecuteAsync(null);
+            return;
+        }
+        // The form is off while sending, so focus has nowhere to stay: put it back where the result is.
+        await _diag.SendCommand.ExecuteAsync(null);
+        if (_diag.Code is not null)
+        {
+            CopyCodeButton.Focus(FocusState.Programmatic);
+        }
+        else if (SendButton.IsEnabled)
+        {
+            SendButton.Focus(FocusState.Programmatic);
         }
     }
 
-    /// <summary>To the Downloads folder, under the DLL's name; a file already there is never replaced (-2 and so on).</summary>
+    /// <summary>
+    /// To the Downloads folder, under the DLL's name; a file already there is never replaced (-2 and so on).
+    /// Without a bundle on hand, the bundle of the form is built first.
+    /// </summary>
     async void OnSaveClick(object sender, RoutedEventArgs e)
     {
+        if (Busy)
+        {
+            return;
+        }
+        await _diag.PrepareToSaveCommand.ExecuteAsync(Input());
         if (!Busy && _diag.SaveCommand.CanExecute(null))
         {
             await _diag.SaveCommand.ExecuteAsync(null);
@@ -140,12 +177,18 @@ public sealed partial class DiagnosticsPage : Page
     }
 
     /// <summary>
-    /// Anywhere the user picks, offered under the DLL's file name as .json. The dialog asks before an existing
-    /// file is chosen, so a chosen file that exists is one the user agreed to replace.
+    /// Anywhere the user picks, offered under the DLL's file name as .json (the bundle is built first when there
+    /// is none, so the name is known). The dialog asks before an existing file is chosen, so a chosen file that
+    /// exists is one the user agreed to replace.
     /// </summary>
     async void OnSaveAsClick(object sender, RoutedEventArgs e)
     {
-        if (Busy || !_diag.SaveCommand.CanExecute(null) || XamlRoot?.ContentIslandEnvironment is not { } island)
+        if (Busy || XamlRoot?.ContentIslandEnvironment is not { } island)
+        {
+            return;
+        }
+        await _diag.PrepareToSaveCommand.ExecuteAsync(Input());
+        if (Busy || !_diag.SaveCommand.CanExecute(null))
         {
             return;
         }
@@ -197,5 +240,69 @@ public sealed partial class DiagnosticsPage : Page
         {
             Debug.WriteLine("CellGlide: opening the folder failed: " + ex);
         }
+    }
+
+    /// <summary>Copies the report code; the button says "Copied" for 2 s (cg-gui copying_the_code_turns_back_after_two_seconds).</summary>
+    async void OnCopyCodeClick(object sender, RoutedEventArgs e)
+    {
+        if (_diag.Code is not { } code)
+        {
+            return;
+        }
+        var package = new DataPackage();
+        package.SetText(code);
+        try
+        {
+            Clipboard.SetContent(package);
+            Clipboard.Flush();
+        }
+        catch (Exception)
+        {
+            // The clipboard is held by another program right now: nothing copied, nothing claimed.
+            return;
+        }
+        _copied = true;
+        var copy = ++_copies;
+        Render();
+        if ((FrameworkElementAutomationPeer.FromElement(CopyCodeButton) ?? FrameworkElementAutomationPeer.CreatePeerForElement(CopyCodeButton)) is { } peer)
+        {
+            peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+        }
+        await Task.Delay(CopiedFor);
+        if (copy == _copies)
+        {
+            _copied = false;
+            Render();
+        }
+    }
+
+    /// <summary>"Send Another": a new report with the same email and note.</summary>
+    void OnAgainClick(object sender, RoutedEventArgs e)
+    {
+        if (!Busy)
+        {
+            Restart();
+        }
+    }
+
+    /// <summary>"Done": the report is finished; the form is cleared.</summary>
+    void OnDoneClick(object sender, RoutedEventArgs e)
+    {
+        if (Busy)
+        {
+            return;
+        }
+        Email.Text = "";
+        Note.Text = "";
+        Restart();
+    }
+
+    void Restart()
+    {
+        _diag.Reset();
+        _copied = false;
+        _copies++;
+        Render();
+        ViewButton.Focus(FocusState.Programmatic);
     }
 }

@@ -55,6 +55,14 @@ public sealed partial class MainWindow : Window
         KeepMinimumSize(hwnd);
 
         AppWindow.Closing += OnClosing;
+        AppWindow.Changed += (_, e) =>
+        {
+            // Hidden to the tray, shown again, minimised or restored (minimising changes the size).
+            if (e.DidVisibilityChange || e.DidPresenterChange || e.DidSizeChange)
+            {
+                ScreenChanged?.Invoke();
+            }
+        };
         shell.PropertyChanged += OnShellChanged;
         // The dots' brushes follow a switch to or from high contrast.
         Show.Changed += () => ApplyBadges(repaint: true);
@@ -65,6 +73,12 @@ public sealed partial class MainWindow : Window
 
     /// <summary>Whether the window is on screen (shown, possibly minimized), not hidden.</summary>
     public bool IsShown => AppWindow.IsVisible;
+
+    /// <summary>The window is minimised.</summary>
+    public bool IsMinimised => AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized };
+
+    /// <summary>Raised when the window may have been hidden, shown, minimised or restored.</summary>
+    public event Action? ScreenChanged;
 
     /// <summary>
     /// Shows the window (restored if minimized) and brings it to the front; with a section, opens that
@@ -108,7 +122,7 @@ public sealed partial class MainWindow : Window
         Section.Overview => new OverviewPage(_shell, Open),
         Section.SpeedTest => new SpeedPage(App.Current.Speed, App.Current.Settings),
         Section.DnsLeak => new LeakPage(App.Current.Leak),
-        Section.History => new HistoryPage(App.Current.History),
+        Section.History => new HistoryPage(App.Current.History, this),
         Section.Diagnostics => new DiagnosticsPage(App.Current.Diagnostics),
         Section.Settings => new SettingsPage(),
         _ => new AboutPage(),

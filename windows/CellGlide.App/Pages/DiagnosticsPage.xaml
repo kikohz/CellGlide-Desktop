@@ -27,22 +27,32 @@
             <StackPanel MaxWidth="620" Spacing="14">
                 <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,4" Text="{x:Bind h:L.T('nav.diagnostics')}" />
 
-                <!-- The report just sent: its code, to pass on. -->
+                <!-- The report just sent, in place of the form (cg-gui sent_card): its code to copy and pass on,
+                     then Send Another (keeps the email and note) or Done (clears them). -->
                 <Border x:Name="SentCard" Style="{StaticResource Card}" Visibility="Collapsed">
                     <StackPanel Spacing="10" HorizontalAlignment="Center" Padding="0,14,0,14">
                         <Ellipse x:Name="SentDot" Width="28" Height="28" HorizontalAlignment="Center" AutomationProperties.AccessibilityView="Raw" />
                         <TextBlock x:Name="SentTitle" FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center"
-                                   AutomationProperties.LiveSetting="Polite" Text="{x:Bind h:L.T('diag.sent_title')}" />
-                        <Border Padding="10,4,10,4" CornerRadius="6" HorizontalAlignment="Center"
-                                Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                            <TextBlock x:Name="CodeText" FontFamily="Consolas" FontSize="15" IsTextSelectionEnabled="True" />
-                        </Border>
+                                   Text="{x:Bind h:L.T('diag.sent_title')}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                            <Border Padding="10,4,10,4" CornerRadius="6" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                                <!-- Said when it appears: the send's result. -->
+                                <TextBlock x:Name="CodeText" FontFamily="Consolas" FontSize="15" IsTextSelectionEnabled="True"
+                                           AutomationProperties.LiveSetting="Polite" />
+                            </Border>
+                            <Button x:Name="CopyCodeButton" FontSize="12" VerticalAlignment="Center" Click="OnCopyCodeClick" />
+                        </StackPanel>
                         <TextBlock FontSize="13" TextWrapping="Wrap" HorizontalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    Text="{x:Bind h:L.T('diag.code_hint')}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                            <Button x:Name="AgainButton" FontSize="12" Click="OnAgainClick" Content="{x:Bind h:L.T('diag.again')}" />
+                            <Button x:Name="DoneButton" FontSize="12" Style="{ThemeResource AccentButtonStyle}" Click="OnDoneClick"
+                                    Content="{x:Bind h:L.T('common.done')}" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
-                <Border Style="{StaticResource Card}">
+                <Border x:Name="FormCard" Style="{StaticResource Card}">
                     <StackPanel Spacing="10">
                         <TextBlock FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.HeadingLevel="Level2"
                                    Text="{x:Bind h:L.T('diag.send_title')}" />
@@ -50,21 +60,16 @@
                                    Text="{x:Bind h:L.T('diag.about_gui')}" />
                         <Rectangle Style="{StaticResource Rule}" />
 
-                        <!-- The range. -->
-                        <Grid ColumnSpacing="12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="90" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock x:Name="RangeLabel" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind h:L.T('diag.range')}" />
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                <RadioButton x:Name="DayRange" GroupName="Range" IsChecked="True" Checked="OnRangeChecked"
-                                             Content="{x:Bind h:L.T('diag.range_day')}" />
-                                <RadioButton x:Name="WeekRange" GroupName="Range" Checked="OnRangeChecked"
-                                             Content="{x:Bind h:L.T('diag.range_week')}" />
-                            </StackPanel>
-                        </Grid>
+                        <!-- The range: one group named by its label (the group's header), each choice by its own text. -->
+                        <RadioButtons x:Name="Range" MaxColumns="2" SelectedIndex="0" SelectionChanged="OnRangeChanged"
+                                      AutomationProperties.Name="{x:Bind h:L.T('diag.range')}">
+                            <RadioButtons.Header>
+                                <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="{x:Bind h:L.T('diag.range')}" />
+                            </RadioButtons.Header>
+                            <RadioButton Content="{x:Bind h:L.T('diag.range_day')}" />
+                            <RadioButton Content="{x:Bind h:L.T('diag.range_week')}" />
+                        </RadioButtons>
                         <Rectangle Style="{StaticResource Rule}" />
 
                         <!-- Email and note, both optional. -->

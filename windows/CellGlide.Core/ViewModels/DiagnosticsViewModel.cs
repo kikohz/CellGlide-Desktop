@@ -11,23 +11,30 @@ public sealed record DiagnosticsInput(DiagRange Range, string Email, string Note
 /// there (the save dialog asks).</summary>
 public sealed record DiagnosticsSaveTarget(string Path, bool Overwrite);
 
-/// <summary>The diagnostics page: prepare the bundle, let the user review it, then send or save it.</summary>
+/// <summary>
+/// The diagnostics page: prepare the bundle, let the user review it, then send or save it. As in cg-gui
+/// pages/diagnostics.rs, only a bundle that was opened in the preview can be sent; saving needs no preview
+/// (it prepares the bundle first), but a bundle that was only saved was never shown, so it is not sendable
+/// until it is viewed.
+/// </summary>
 public sealed class DiagnosticsViewModel : CoreViewModel
 {
     string? _json;
     string? _fileName;
     string? _code;
     string? _savedPath;
+    bool _previewed;
 
     public DiagnosticsViewModel(EventHub hub)
         : base(hub)
     {
         PrepareCommand = new AsyncRelayCommand<DiagnosticsInput?>(PrepareAsync);
-        SendCommand = new AsyncRelayCommand(SendAsync, () => Json is not null);
+        PrepareToSaveCommand = new AsyncRelayCommand<DiagnosticsInput?>(PrepareToSaveAsync);
+        SendCommand = new AsyncRelayCommand(SendAsync, () => Json is not null && Previewed);
         SaveCommand = new AsyncRelayCommand<DiagnosticsSaveTarget?>(SaveAsync, _ => Json is not null);
     }
 
-    /// <summary>The bundle for the user to review.</summary>
+    /// <summary>The bundle on hand: the exact bytes a send or save uses.</summary>
     public string? Json
     {
         get => _json;
@@ -37,6 +44,19 @@ public sealed class DiagnosticsViewModel : CoreViewModel
             {
                 SendCommand.NotifyCanExecuteChanged();
                 SaveCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary><see cref="Json"/> has been opened in the preview: the one condition for sending it.</summary>
+    public bool Previewed
+    {
+        get => _previewed;
+        private set
+        {
+            if (SetProperty(ref _previewed, value))
+            {
+                SendCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -60,7 +80,11 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         private set => SetProperty(ref _savedPath, value);
     }
 
+    /// <summary>"View what will be sent": builds the bundle of the form (unless one is on hand) and marks it previewed.</summary>
     public IAsyncRelayCommand<DiagnosticsInput?> PrepareCommand { get; }
+
+    /// <summary>Before a save: builds the bundle of the form unless one is on hand; it is not previewed by this.</summary>
+    public IAsyncRelayCommand<DiagnosticsInput?> PrepareToSaveCommand { get; }
 
     public IAsyncRelayCommand SendCommand { get; }
 
@@ -69,37 +93,62 @@ public sealed class DiagnosticsViewModel : CoreViewModel
 
     /// <summary>
     /// The form changed (range, email or note): the bundle on hand no longer matches it, so it can be neither
-    /// sent nor saved until it is previewed again (cg-gui pages/diagnostics.rs). What was already saved stays saved.
+    /// sent nor saved until it is built again (cg-gui pages/diagnostics.rs). What was already saved stays saved.
     /// </summary>
     public void Discard()
     {
         Json = null;
         FileName = null;
+        Previewed = false;
+    }
+
+    /// <summary>"Send Another" (the page keeps the form) and "Done" (the page clears it): forgets the last report.</summary>
+    public void Reset()
+    {
+        Discard();
+        Code = null;
+        SavedPath = null;
+        Error = null;
     }
 
     async Task PrepareAsync(DiagnosticsInput? input)
     {
-        if (input is null)
+        if (Json is not null || await BuildAsync(input))
         {
-            return;
+            Previewed = true;
         }
-        if (await RunAsync(new DiagnosticsPrepareCommand(input.Range, input.Email, input.Note)) is DiagnosticsValue bundle)
+    }
+
+    async Task PrepareToSaveAsync(DiagnosticsInput? input)
+    {
+        if (Json is null)
         {
-            Json = bundle.Json;
-            FileName = bundle.FileName;
-            Code = null;
-            SavedPath = null;
+            await BuildAsync(input);
         }
+    }
+
+    async Task<bool> BuildAsync(DiagnosticsInput? input)
+    {
+        if (input is null
+            || await RunAsync(new DiagnosticsPrepareCommand(input.Range, input.Email, input.Note)) is not DiagnosticsValue bundle)
+        {
+            return false;
+        }
+        Previewed = false;
+        Json = bundle.Json;
+        FileName = bundle.FileName;
+        Code = null;
+        SavedPath = null;
+        return true;
     }
 
     async Task SendAsync()
     {
-        if (Json is { } json && await RunAsync(new DiagnosticsSendCommand(json)) is SentValue sent)
+        if (Json is { } json && Previewed && await RunAsync(new DiagnosticsSendCommand(json)) is SentValue sent)
         {
             Code = sent.Code;
             // A sent bundle is done with: another report needs a new preview (cg-gui pages/diagnostics.rs).
-            Json = null;
-            FileName = null;
+            Discard();
         }
     }
 

@@ -49,7 +49,8 @@ public sealed class HistoryViewModel : CoreViewModel
     {
         var load = ++_loads;
         RequestedDay = day;
-        var reply = await RunAsync(new RequestCommand(new HistoryRequest(day)));
+        // A failure of a load that a newer one replaced is not news either.
+        var reply = await RunAsync(new RequestCommand(new HistoryRequest(day)), () => load == _loads);
         if (load != _loads)
         {
             // The user asked for another day meanwhile; its answer is the one to show.

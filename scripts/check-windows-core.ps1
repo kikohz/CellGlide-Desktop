@@ -13,7 +13,8 @@
 # -Release takes the DLL from target\release instead of target\debug.
 # -Publish then builds cg-ffi in release and publishes CellGlide.App (Native AOT, self-contained) for
 # this machine's architecture, and checks that the publish folder (the project's PublishDir) has
-# CellGlide.exe and cellglide_native.dll and no onnxruntime*.dll or DirectML*.dll.
+# CellGlide.exe and cellglide_native.dll and no onnxruntime*.dll or DirectML*.dll, and that the
+# shipped DLL has no debug-only diagnostics override (no CELLGLIDE_DIAG_TARGET or localhost string).
 # The dotnet steps run inside windows\ so that windows\global.json (SDK pin, test runner) applies.
 param(
     [switch]$Release,
@@ -140,6 +141,22 @@ try {
             exit 1
         }
         Write-Host "==> CellGlide.exe and cellglide_native.dll are in $publishDir; no onnxruntime or DirectML"
+        # Diagnostics in a release build always go to production: the debug-only override
+        # (crates/cg-ffi/src/runtime.rs, diag_target) must not be compiled in. Its variable name and
+        # its loopback host would show as strings, ASCII or UTF-16.
+        $shipped = Join-Path $publishDir 'cellglide_native.dll'
+        $bytes = [IO.File]::ReadAllBytes($shipped)
+        # UTF-16 read from both byte alignments.
+        $texts = @([Text.Encoding]::ASCII.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1))
+        foreach ($needle in 'CELLGLIDE_DIAG_TARGET', 'localhost') {
+            foreach ($text in $texts) {
+                if ($text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    Write-Host "FAILED: the release cellglide_native.dll contains '$needle' (the debug-only diagnostics override)"
+                    exit 1
+                }
+            }
+        }
+        Write-Host "==> the release cellglide_native.dll has no diagnostics override ('CELLGLIDE_DIAG_TARGET', 'localhost')"
     }
 } finally {
     Pop-Location

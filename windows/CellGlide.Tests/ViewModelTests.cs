@@ -397,6 +397,76 @@ public class ViewModelTests
     }
 
     [Fact]
+    public async Task A_replaced_history_load_that_fails_says_nothing()
+    {
+        var (core, hub) = Fake();
+        var history = new HistoryViewModel(hub);
+        var today = history.LoadCommand.ExecuteAsync(null);
+        var older = history.LoadCommand.ExecuteAsync("2026-10-29");
+        core.Raise(new ReplyEvent(core.SentIds[1], new ReplyOk(new HistoryValue(new("2026-10-29", "x", null, "2026-10-30", [], [], [], [])))));
+        await older;
+        // The refresh of today that the page turn replaced fails late: the day on screen is fine.
+        core.Raise(new ReplyEvent(core.SentIds[0], new ReplyErr("service is down")));
+        await today;
+        Assert.Null(history.Error);
+        Assert.Equal("2026-10-29", history.View?.Day);
+        // The newest load's failure is still said.
+        var again = history.LoadCommand.ExecuteAsync("2026-10-28");
+        core.Raise(new ReplyEvent(core.SentIds[2], new ReplyErr("service is down")));
+        await again;
+        Assert.Equal("service is down", history.Error);
+    }
+
+    [Fact]
+    public async Task Saving_without_a_preview_prepares_first_and_never_allows_a_send()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var diagnostics = new DiagnosticsViewModel(hub);
+        var input = new DiagnosticsInput(DiagRange.Day, "a@b.co", "");
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        await diagnostics.PrepareToSaveCommand.ExecuteAsync(input);
+        Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Day, "a@b.co", ""), core.Sent[0]);
+        Assert.Equal("{}", diagnostics.Json);
+        Assert.False(diagnostics.Previewed);
+        // A saved bundle was never shown (cg-gui pages/diagnostics.rs): no send.
+        Assert.False(diagnostics.SendCommand.CanExecute(null));
+        core.Next = new ReplyOk(new SavedValue(@"C:\d\cellglide.json"));
+        await diagnostics.SaveCommand.ExecuteAsync(null);
+        Assert.Equal(new DiagnosticsSaveCommand("{}", null, false), core.Sent[1]);
+
+        // A bundle on hand is not asked for again.
+        await diagnostics.PrepareToSaveCommand.ExecuteAsync(input);
+        Assert.Equal(2, core.Sent.Count);
+        // Viewing it shows the same bundle without asking the service, and then it may be sent.
+        await diagnostics.PrepareCommand.ExecuteAsync(input);
+        Assert.Equal(2, core.Sent.Count);
+        Assert.True(diagnostics.Previewed);
+        Assert.True(diagnostics.SendCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Send_another_and_done_forget_the_last_report()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var diagnostics = new DiagnosticsViewModel(hub);
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        core.Next = new ReplyOk(new SavedValue(@"C:\d\cellglide.json"));
+        await diagnostics.SaveCommand.ExecuteAsync(null);
+        core.Next = new ReplyOk(new SentValue("CG-ABCDE"));
+        await diagnostics.SendCommand.ExecuteAsync(null);
+        Assert.Equal("CG-ABCDE", diagnostics.Code);
+        diagnostics.Reset();
+        Assert.Null(diagnostics.Code);
+        Assert.Null(diagnostics.SavedPath);
+        Assert.Null(diagnostics.Json);
+        Assert.False(diagnostics.Previewed);
+        Assert.False(diagnostics.SendCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task Settings_send_one_field_at_a_time()
     {
         var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));

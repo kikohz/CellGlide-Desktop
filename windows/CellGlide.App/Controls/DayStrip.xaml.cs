@@ -1,6 +1,8 @@
 using CellGlide.App.Shell;
 using CellGlide.Core.Models;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -77,6 +79,8 @@ public sealed partial class DayStrip : UserControl
                 FontSize = 11,
                 Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
             };
+            // The hours belong to the picture: not read one by one (Raw on the canvas would not hide its children).
+            AutomationProperties.SetAccessibilityView(label, AccessibilityView.Raw);
             label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             var labelWidth = label.DesiredSize.Width;
             // Centred under its hour, kept inside the strip so 00:00 and 24:00 sit at its ends.

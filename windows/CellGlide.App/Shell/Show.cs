@@ -53,6 +53,27 @@ public static partial class Show
 
     public static Visibility Visible(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>
+    /// Turns <paramref name="control"/> on or off; when it had keyboard focus and goes off, focus moves to the first
+    /// of <paramref name="fallbacks"/> that is on and shown, so the user is not left nowhere.
+    /// </summary>
+    public static void SetEnabled(Control control, bool enabled, params Control[] fallbacks)
+    {
+        var focus = control.FocusState;
+        control.IsEnabled = enabled;
+        if (enabled || focus == FocusState.Unfocused)
+        {
+            return;
+        }
+        foreach (var next in fallbacks)
+        {
+            if (next.IsEnabled && next.Visibility == Visibility.Visible && next.Focus(focus))
+            {
+                return;
+            }
+        }
+    }
+
     /// <summary>Half strength for a dimmed card.</summary>
     public static double Opacity(bool dim) => dim ? 0.5 : 1.0;
 

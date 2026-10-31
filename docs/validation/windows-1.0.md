@@ -307,6 +307,12 @@ Speed test finished
 - **AOT 发布版冒烟**：历史页显示今天的列表；诊断页预览正常；`Save As…` 能弹出系统保存对话框（没有保存，没有点 `Send`：发布版只会发往正式服务）。
 - **实测中修的问题**：`Save As…` 第一次点击时 App 崩溃（`0xc000027b`，stowed exception）：`FileTypeChoices.Add(…, [".json"])` 的集合表达式在 CsWinRT 下抛 `InvalidCastException`（没有那个对象的 COM 包装）。改成显式 `new List<string> { ".json" }`，并把整个对话框过程放进 try；重测通过，AOT 版也能弹出对话框。
 - **截图**：会话 1 锁屏，没有截图；色条、图例、Expander 的样子留给 Task 10 用眼睛看。
+- **fix round 1**（同样的会话 1 方式，`CGT8`、`CGT8V`，用完删除）：
+  - **刷新只在看得见时进行**（`HistoryRefreshGate`）。临时在页面里加了文件日志（实测后已删）记录门的变化和每次计时：历史页显示时每 5 秒一次 `tick`；`WM_CLOSE` 收进托盘后立刻 `Stop`，之后 16 秒没有任何 `tick`；再启动一次 App 把窗口带回来，立刻 `Start` 并恢复每 5 秒；切到 Settings 时 `Stop`，回到历史页时 `Start`；在 Settings 上收进托盘再拿回来，门保持关闭。最小化：最小化后 `cellglide.exe disconnect`，11 秒后列表里仍没有新的 `Sharing stopped`（窗口标题已变成 `CellGlide`，说明窗口本身在更新）；还原后 0.2 秒内出现 `06:40 Sharing stopped`（回到屏幕上时立刻请求今天）。这次连接与断开的前后快照 `-Compare` **identical**，手机流量约 0。
+  - **不预览直接保存**（控制者裁定，照 cg-gui）：未预览时 `Save to File` 可点，先准备（`Preparing…`）再存进「下载」；之后 `Send` 仍不可点，预览不显示（只保存过的内容没给用户看过）。再点 `View what will be sent…`，约 2 秒就显示同一份内容（`createdAt` 相同，不再向服务要），`Send` 变为可点。
+  - **发送卡**（对本地假服务）：发送后表单换成发送卡：`Sent`、`CG-LOCAL1`、`Just send us this code.`，按钮 `Copy`、`Send Another`、`Done`；假服务收到 144403 字节，与预览和刚才保存的文件一样大。`Done` 后表单回来、邮箱和备注清空、`Send` 不可点。会话 1 锁屏时焦点在锁屏上，所以焦点落点没能读到。
+  - 范围的两个单选现在是一个组，读屏名 `Time range`。保存的文件脱敏检查 0 处，已删除。
+- **给 Task 10 的提醒**：用户在场看界面时，凡是可能打开诊断页的构建（Debug 版），启动时都必须把 `CELLGLIDE_DIAG_TARGET` 设成一个没人监听的本地端口（例如 `http://127.0.0.1:18081/v1/reports`）；否则就请用户不要按 `Send`。Debug 版不设这个变量时会发往正式服务；Release / 发布版一定发往正式服务，W3 里不要在发布版上按 `Send`。
 
 ## 已知问题（W1 实测发现，未修）
 

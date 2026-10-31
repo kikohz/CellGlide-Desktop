@@ -11,6 +11,28 @@ namespace CellGlide.Tests;
 public class DesktopTests
 {
     [Fact]
+    public void History_refreshes_only_while_its_page_shows_in_a_visible_window()
+    {
+        var gate = new HistoryRefreshGate();
+        Assert.False(gate.Running);
+        Assert.Equal(RefreshChange.None, gate.Set(pageShown: false, windowVisible: true, minimised: false));
+        Assert.Equal(RefreshChange.Start, gate.Set(pageShown: true, windowVisible: true, minimised: false));
+        Assert.True(gate.Running);
+        Assert.Equal(RefreshChange.None, gate.Set(pageShown: true, windowVisible: true, minimised: false));
+        // Closed to the tray, then shown again.
+        Assert.Equal(RefreshChange.Stop, gate.Set(pageShown: true, windowVisible: false, minimised: false));
+        Assert.False(gate.Running);
+        Assert.Equal(RefreshChange.Start, gate.Set(pageShown: true, windowVisible: true, minimised: false));
+        // Minimised, then restored.
+        Assert.Equal(RefreshChange.Stop, gate.Set(pageShown: true, windowVisible: true, minimised: true));
+        Assert.Equal(RefreshChange.None, gate.Set(pageShown: true, windowVisible: false, minimised: true));
+        Assert.Equal(RefreshChange.Start, gate.Set(pageShown: true, windowVisible: true, minimised: false));
+        // Another page.
+        Assert.Equal(RefreshChange.Stop, gate.Set(pageShown: false, windowVisible: true, minimised: false));
+        Assert.Equal(RefreshChange.None, gate.Set(pageShown: false, windowVisible: false, minimised: true));
+    }
+
+    [Fact]
     public void Launch_options_read_tray_and_small_caps()
     {
         Assert.Equal(new LaunchOptions(false, null), LaunchOptions.Parse([], null));

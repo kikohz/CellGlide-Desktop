@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using CellGlide.App.Shell;
+using CellGlide.Core.Desktop;
 using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
 using Microsoft.UI.Xaml;
@@ -15,8 +16,9 @@ namespace CellGlide.App.Pages;
 /// Connection history (cg-gui pages/history.rs) drawn from <see cref="HistoryViewModel.View"/>, filled in
 /// code each time the view changes (x:Bind would stop calling a function whose argument path is null). The
 /// day's label, its neighbours, strip cells, hour labels, legend and rows are the DLL's. Showing the page
-/// asks for today; while it shows, today is asked for again every 5 s (the view model does nothing when
-/// another day is on screen or a load is out).
+/// asks for today; while it shows in a visible, unminimised window (<see cref="HistoryRefreshGate"/>), today is
+/// asked for again every 5 s (the view model does nothing when another day is on screen or a load is out), and
+/// when the window comes back from the tray or from minimised, today is asked for at once.
 /// </summary>
 public sealed partial class HistoryPage : Page
 {
@@ -27,15 +29,19 @@ public sealed partial class HistoryPage : Page
 
     readonly HistoryViewModel _history;
     readonly DispatcherTimer _timer = new() { Interval = RefreshEvery };
+    readonly HistoryRefreshGate _gate = new();
+    readonly MainWindow _window;
+    bool _pageShown;
     // The rows on screen and the day they belong to, so a refresh that changes nothing keeps the list
     // (and which rows are open, and keyboard focus) as it is.
     IReadOnlyList<HistoryRowView>? _rows;
     string? _rowsDay;
     IReadOnlyList<LegendItem>? _legend;
 
-    public HistoryPage(HistoryViewModel history)
+    public HistoryPage(HistoryViewModel history, MainWindow window)
     {
         _history = history;
+        _window = window;
         InitializeComponent();
         history.PropertyChanged += OnChanged;
         history.LoadCommand.PropertyChanged += (_, e) =>
@@ -52,16 +58,41 @@ public sealed partial class HistoryPage : Page
             Show.Changed -= OnBrushesChanged;
             Show.Changed += OnBrushesChanged;
             _ = _history.LoadCommand.ExecuteAsync(null);
-            _timer.Start();
+            _pageShown = true;
+            ApplyGate(askNow: false);
             Render();
         };
         Unloaded += (_, _) =>
         {
-            _timer.Stop();
+            _pageShown = false;
+            ApplyGate(askNow: false);
             Show.Changed -= OnBrushesChanged;
         };
+        window.ScreenChanged += () => ApplyGate(askNow: true);
         Show.AnnounceChanges(ErrorLine);
+        Show.AnnounceChanges(DayLabel);
         Render();
+    }
+
+    /// <summary>
+    /// Starts or stops the refresh as the page and its window come and go. Back on screen from the tray or from
+    /// minimised (<paramref name="askNow"/>), today is asked for at once when the page follows it.
+    /// </summary>
+    void ApplyGate(bool askNow)
+    {
+        switch (_gate.Set(_pageShown, _window.IsShown, _window.IsMinimised))
+        {
+            case RefreshChange.Start:
+                _timer.Start();
+                if (askNow)
+                {
+                    _ = _history.RefreshCommand.ExecuteAsync(null);
+                }
+                break;
+            case RefreshChange.Stop:
+                _timer.Stop();
+                break;
+        }
     }
 
     void OnChanged(object? sender, PropertyChangedEventArgs e)
@@ -83,8 +114,8 @@ public sealed partial class HistoryPage : Page
     void Render()
     {
         var view = _history.View;
-        PrevButton.IsEnabled = view?.PrevDay is not null;
-        NextButton.IsEnabled = view?.NextDay is not null;
+        Show.SetEnabled(PrevButton, view?.PrevDay is not null, NextButton);
+        Show.SetEnabled(NextButton, view?.NextDay is not null, PrevButton);
         DayLabel.Text = view?.Label ?? "";
 
         var error = _history.Error;
@@ -199,7 +230,8 @@ public sealed partial class HistoryPage : Page
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             CornerRadius = new CornerRadius(0),
         };
-        AutomationProperties.SetName(expander, row.Title);
+        // Its time and title, as the row shows them (the header's texts are not read as the expander's name).
+        AutomationProperties.SetName(expander, row.Time + " " + row.Title);
         return expander;
     }
 

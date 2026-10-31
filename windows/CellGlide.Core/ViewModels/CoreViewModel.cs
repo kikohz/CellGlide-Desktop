@@ -19,7 +19,13 @@ public abstract class CoreViewModel(EventHub hub) : ObservableObject
     }
 
     /// <summary>Sends <paramref name="command"/>: its value on success; on failure null, with <see cref="Error"/> set.</summary>
-    protected async Task<ReplyValue?> RunAsync(Command command)
+    protected Task<ReplyValue?> RunAsync(Command command) => RunAsync(command, static () => true);
+
+    /// <summary>
+    /// <see cref="RunAsync(Command)"/> for a command a newer one can replace: once <paramref name="wanted"/> says
+    /// no, its reply leaves <see cref="Error"/> alone (and its value is still returned for the caller to drop).
+    /// </summary>
+    protected async Task<ReplyValue?> RunAsync(Command command, Func<bool> wanted)
     {
         Error = null;
         ReplyResult result;
@@ -35,7 +41,10 @@ public abstract class CoreViewModel(EventHub hub) : ObservableObject
         catch (Exception e)
         {
             // The reply could not be handed to the UI thread.
-            Error = Hub.Tr("reason.internal", new Dictionary<string, string> { ["detail"] = e.Message });
+            if (wanted())
+            {
+                Error = Hub.Tr("reason.internal", new Dictionary<string, string> { ["detail"] = e.Message });
+            }
             return null;
         }
         switch (result)
@@ -43,7 +52,10 @@ public abstract class CoreViewModel(EventHub hub) : ObservableObject
             case ReplyOk ok:
                 return ok.Value;
             case ReplyErr err:
-                Error = err.Message;
+                if (wanted())
+                {
+                    Error = err.Message;
+                }
                 return null;
             default:
                 return null;
