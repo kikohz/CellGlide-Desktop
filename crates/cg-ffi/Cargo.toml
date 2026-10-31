@@ -10,8 +10,8 @@ publish.workspace = true
 workspace = true
 
 [lib]
-# cellglide.dll for the Windows app; the rlib is for this crate's own integration tests.
-name = "cellglide"
+# cellglide_native.dll for the Windows app; the rlib is for this crate's own integration tests.
+name = "cellglide_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

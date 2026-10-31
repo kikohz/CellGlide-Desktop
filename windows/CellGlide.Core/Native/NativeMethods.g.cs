@@ -12,7 +12,7 @@ namespace CellGlide.Core.Native
 {
     internal static unsafe partial class NativeMethods
     {
-        const string __DllName = "cellglide";
+        const string __DllName = "cellglide_native";
 
         // Return codes (crates/cg-ffi/src/codes.rs).
         internal const int CG_OK = 0;

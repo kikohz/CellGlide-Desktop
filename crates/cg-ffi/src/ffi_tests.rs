@@ -367,4 +367,6 @@ fn the_generated_csharp_has_every_return_code() {
             ("CG_PANIC", CG_PANIC),
         ]
     );
+    // The DLL is cellglide_native.dll: the bindings load that name.
+    assert!(csharp.contains("const string __DllName = \"cellglide_native\";"));
 }

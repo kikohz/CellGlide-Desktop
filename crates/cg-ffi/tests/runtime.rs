@@ -3,8 +3,8 @@
 
 mod support;
 
-use cellglide::api::{Command, Event, ReplyResult, ReplyValue};
-use cellglide::runtime::{Config, Runtime};
+use cellglide_native::api::{Command, Event, ReplyResult, ReplyValue};
+use cellglide_native::runtime::{Config, Runtime};
 use cg_ipc::Request;
 use cg_tools::prefs::Prefs;
 use std::sync::Arc;
@@ -273,8 +273,8 @@ async fn commands_of_later_tasks_say_not_yet() {
 #[tokio::test]
 async fn panic_becomes_fault_and_err_reply() {
     let (sink, events) = collect();
-    let ev = cellglide::testing::events_into(sink);
-    cellglide::testing::guarded(7, &ev, async { panic!("boom") }).await;
+    let ev = cellglide_native::testing::events_into(sink);
+    cellglide_native::testing::guarded(7, &ev, async { panic!("boom") }).await;
     let got = events.lock().unwrap().clone();
     assert!(
         got.iter()
@@ -292,8 +292,8 @@ async fn panic_becomes_fault_and_err_reply() {
 #[tokio::test]
 async fn guarded_passes_the_result_on() {
     let (sink, events) = collect();
-    let ev = cellglide::testing::events_into(sink);
-    cellglide::testing::guarded(8, &ev, async { ReplyResult::done() }).await;
+    let ev = cellglide_native::testing::events_into(sink);
+    cellglide_native::testing::guarded(8, &ev, async { ReplyResult::done() }).await;
     assert_eq!(
         *events.lock().unwrap(),
         [Event::Reply {
@@ -406,7 +406,7 @@ async fn dropping_from_async_context_is_safe() {
 
 // The subscription, Toggle, and the replies that are views (Task 9).
 
-use cellglide::testing::{SERIAL, connected_snapshot, disconnected_snapshot, middle_day};
+use cellglide_native::testing::{SERIAL, connected_snapshot, disconnected_snapshot, middle_day};
 use cg_ipc::{Check, CheckId, Contact, DiagRange, Response, Snapshot};
 
 /// A runtime on `svc` (files in a fresh directory), and what it says.

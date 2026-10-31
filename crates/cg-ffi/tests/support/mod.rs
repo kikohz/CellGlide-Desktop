@@ -2,8 +2,8 @@
 //! for events. Each test binary uses a part of it.
 #![allow(dead_code)]
 
-use cellglide::api::{Event, ReplyResult};
-use cellglide::runtime::Config;
+use cellglide_native::api::{Event, ReplyResult};
+use cellglide_native::runtime::Config;
 use cg_ipc::health::{DayStart, HistoryDay};
 use cg_ipc::{Endpoint, Request, Response, Snapshot};
 use cg_tools::speed::{Route, Server};
@@ -72,7 +72,8 @@ pub struct FakeService {
 
 impl FakeService {
     pub async fn start(replies: Replies) -> FakeService {
-        let (snapshots, receiver) = watch::channel(cellglide::testing::disconnected_snapshot());
+        let (snapshots, receiver) =
+            watch::channel(cellglide_native::testing::disconnected_snapshot());
         #[cfg(unix)]
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
