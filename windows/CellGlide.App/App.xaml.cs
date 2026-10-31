@@ -127,15 +127,18 @@ public partial class App : Application
             _window.ShowAt(section);
         });
 
-    /// <summary>The tray click: opens or closes the panel (created the first time); not while quitting.</summary>
-    void TogglePanel()
+    /// <summary>
+    /// The tray click or key: opens or closes the panel (created the first time); not while quitting. Opened
+    /// from the keyboard, the panel shows where its focus is.
+    /// </summary>
+    void TogglePanel(bool fromKeyboard)
     {
         if (IsQuitting)
         {
             return;
         }
         _panel ??= new PanelWindow(Shell, _trayId, ShowWindow, QuitAsync);
-        _panel.Toggle();
+        _panel.Toggle(fromKeyboard);
     }
 
     /// <summary>

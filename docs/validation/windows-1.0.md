@@ -407,6 +407,24 @@ Speed test finished
 - **DLL 起不来时的重定向（M3）**：DLL 启动与「退出中」标志移到 Core 的 `HostGate`：起不来时先置退出中，再弹（模态的）消息框，弹窗期间重定向来的 `ShowWindow` 什么都不建；退出码 2。单测经可注入的启动函数模拟「弹窗期间来一次重定向」。实测（Debug 构建暂时改名 `cellglide_native.dll`，会话 1）：第一个进程弹出「安装不完整」；弹窗期间再启动一次，第二个进程重定向后以 0 退出；第一个进程仍在、没有任何 WinUI 窗口；关掉消息框后以 **2** 退出，事件日志没有崩溃记录。DLL 已改回原名。
 - **W4 承接：第三方许可全文（I3，W3 只记录，不实现）**：W4 打包时 THIRD-PARTY-LICENSES 除 Windows App SDK 条款与 3.b.ii 终端用户声明外，还必须含：每个随 App 发布的 MIT / BSD 一类 NuGet 包的版权声明和许可全文（CommunityToolkit.Mvvm、H.NotifyIcon 三个包、System.Drawing.Common、Microsoft.Win32.SystemEvents、Microsoft.Web.WebView2（BSD-3-Clause）等，可由 `check-nuget-licenses.ps1` 从包里的 license 文件 / `licenseUrl` 汇总）；Native AOT 编进 `CellGlide.exe` 的 .NET 运行时（ILCompiler 运行时包，MIT，连同其 THIRD-PARTY-NOTICES）；以及不在锁文件里、但 AOT 编进去的 Windows SDK 投影 / CsWinRT（MIT）。关于页是否也显示全文到 W4 一并定。同一要求已写进 `packaging/licenses/nuget.txt` 末尾的 W4 说明（由 `check-nuget-licenses.ps1` 生成）。
 
+## W4 打包与发布
+
+### Task 2：App 端的 W3 遗留（2026-10-31）
+
+发布版（`check-windows-core.ps1 -Publish` 的 AOT 产物），会话 1 临时计划任务 `CGT2`（`wscript //B` 隐藏运行，每次用完删除），英文界面，UI Automation + PrintWindow。iPhone 未接，测试期间隧道一直断开，没有用手机流量。
+
+- **侧栏圆点的读屏名**：`SidebarBadges.NameKey` 给出 `gui.badge_warning` / `gui.badge_critical`，`MainWindow.Dot` 用 `L.T(key)` 设 `AutomationProperties.Name`（不再是 Raw）。没有手机时 DLL 不给任何圆点（服务停止只是 `Gone`，设置页的圆点只在 `not_in_group` 时出现），所以用一个临时改动的 Debug 构建（`ApplyBadges` 强制概览 Critical、设置 Warning，测后已还原，未提交）看 UIA：概览项下有 `Group name='Problem'`，设置项下有 `Group name='Needs attention'`（`NamedContainerAutomationPeer`），列表项自己的名字仍是 `Overview` / `Settings`；截图里圆点外观与之前相同。真实状态下的圆点（Retrying / 健康问题）留给 Task 10（要接手机）。另外 `Stop-Service CellGlide` 再 `Start-Service` 一次：前后快照 `-Compare` **identical**。
+- **诊断大小行**：点「View what will be sent…」后，预览标题同一行右侧（与 cg-gui 预览卡片的标题行相同）显示 `148 KB in total`；预览文字 147894 字符、UTF-8 147894 字节（`describe::amount` 取整为 148 KB）。另一次 147476 字节显示 `147 KB in total`。没有点 Send。
+- **关于页 Telegram**：按钮文字 `t.me/cellglide`（DLL 的 `TelegramLabel`），HelpText 同；点击仍打开 `TelegramUrl`。
+- **托盘键盘**：H.NotifyIcon 2.4.1 的消息窗口有 `KeyboardEventReceived`（NIN_SELECT 0x400 → `Select`、NIN_KEYSELECT 0x401 → `KeySelect`、WM_CONTEXTMENU 0x007B → `ContextMenu`，已用 SendMessage 逐一核对），`TrayHost` 订阅它和 `MouseEventReceived`，由 Core 的 `TrayKeyboard` 判断，经 `_togglePanel(true)` 打开面板；面板打开后焦点交给第一个可聚焦的控件（第一次打开时内容还没加载，等 `Loaded` / `Activated` 再给）。
+  - 实际记录到的 Windows 11 23H2 消息顺序（临时日志，测后已删）：真鼠标左键 = `LBUTTONDOWN, LBUTTONUP, NIN_SELECT`；真鼠标右键 = `RBUTTONDOWN, WM_CONTEXTMENU, RBUTTONUP`；溢出区里对着图标按 Enter / Space，shell 发的是和左键完全一样的三条；Shift+F10 和右键完全一样。没有收到过 NIN_KEYSELECT。
+  - 因此按钮按下和抬起都算点击，之后 500 ms 内的 `Select` / `ContextMenu` 属于这次点击，不再切换面板：Enter / Space 由库的左键命令打开面板；右键和 Shift+F10 在 Windows 11 上打开图标菜单（与鼠标相同，菜单可用方向键操作，含「打开 CellGlide」）。只发通知不模拟点击的 shell 上，NIN_KEYSELECT、单独的 NIN_SELECT / WM_CONTEXTMENU 打开面板；Enter 连发的第二条 NIN_KEYSELECT 被去重。
+  - 真键盘（SendInput，`--tray` 启动）：Win+B → 焦点在「Show Hidden Icons」→ Enter 打开溢出区 → UIA 把焦点放到 `CellGlide Waiting for USB` 图标 → Enter：面板打开，焦点 `MainButton`（Connect）；Esc 关闭，焦点回到通知区。Space、Shift+F10 同样（这一轮是改动前的构建，Shift+F10 当时走 WM_CONTEXTMENU 打开面板）。
+  - 真鼠标（`--tray` 启动后第一次打开）：左键点溢出区图标，面板打开一次（不会被随后的 NIN_SELECT 再关上），焦点 `MainButton`。改动前的构建右键会打开面板而不出菜单，于是改为按下也算点击。改动后按记录到的顺序向消息窗口投递：左键三条 → 面板开；再一次 → 关；右键三条 → 面板不开，弹出原生菜单（`#32768` 1 个）；单独 NIN_KEYSELECT ×2 → 开（第二条去重），再一条 → 关；单独 WM_CONTEXTMENU → 开，再一条 → 关。
+  - 最后一版构建（`--tray` 启动）再用真输入走一遍：左键点溢出区图标 → 面板打开一次，焦点 `MainButton`（这是第一次打开，验证了等内容加载后再给焦点）；右键 → 原生菜单（`#32768` 1 个），面板不开，Esc 关掉菜单；Win+B → Enter 打开溢出区 → 焦点放到图标 → Enter：面板开、焦点 `MainButton`，Esc 关；Space 同样；Shift+F10：出菜单、面板不开，Esc 关。测试时用户在用 Telegram，测试脚本发的 Esc 有几次落到了 Telegram 窗口上（没有别的影响）；有一次右键因为溢出区还在动画中没取到图标位置，点到了桌面，弹出桌面菜单后由 Esc 关掉。
+- **SidebarHeading 去掉 BasedOn**：改为显式 Setter（FontSize 12、LineHeight 16、SemiBold、`{ThemeResource TextFillColorSecondaryBrush}`）。测前 `reg query ...\Themes\Personalize`：`AppsUseLightTheme 0x1`、`SystemUsesLightTheme 0x1`、`ColorPrevalence 0x0`、`EnableTransparency 0x1`。`--tray` 启动后只改 `AppsUseLightTheme` 并广播 `WM_SETTINGCHANGE("ImmersiveColorSet")`：深 → 浅 → 深，然后第一次打开主窗口：分组标题（Tools / Activity / App）是小号、半粗、次要颜色，进程正常；再切回浅色，标题照样正确，没有崩溃。测后写回 `0x1`，`reg query /s` 与测前逐字相同。
+- **缺 DLL 的提示**：`Configuration=Release` 时为 `run 'cargo build -p cg-ffi --release' first (or pass -p:CellGlideNativeDir=...)`，`check-windows-core.ps1` 用 `-p:CellGlideNativeDir=..\target\no-such-dir\` 核对。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

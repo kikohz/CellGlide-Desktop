@@ -22,8 +22,10 @@
     <None Include="$(CellGlideNativeDll)" Link="cellglide_native.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" Visible="false" />
   </ItemGroup>
 
+  <!-- A Release build takes target\release's DLL, so it says to build that one. -->
   <Target Name="CheckCellGlideNative" BeforeTargets="BeforeBuild" Condition="!Exists('$(CellGlideNativeDll)')">
-    <Error Text="$(CellGlideNativeDll) is missing: run 'cargo build -p cg-ffi' first (or pass -p:CellGlideNativeDir=...)." />
+    <Error Condition="'$(Configuration)' == 'Release'" Text="$(CellGlideNativeDll) is missing: run 'cargo build -p cg-ffi --release' first (or pass -p:CellGlideNativeDir=...)." />
+    <Error Condition="'$(Configuration)' != 'Release'" Text="$(CellGlideNativeDll) is missing: run 'cargo build -p cg-ffi' first (or pass -p:CellGlideNativeDir=...)." />
   </Target>
 
   <!-- A Release build or publish ships the release DLL. The debug one is unoptimised, may be the

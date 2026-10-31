@@ -45,6 +45,12 @@ static partial class AppSources
             .Where(f => f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .Select(f => (Path.GetRelativePath(AppDir, f), File.ReadAllText(f)));
 
+    /// <summary>The App's *.xaml files (not bin, obj): path relative to the App, and text.</summary>
+    public static IEnumerable<(string File, string Text)> XamlFiles() =>
+        Files()
+            .Where(f => f.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            .Select(f => (Path.GetRelativePath(AppDir, f), File.ReadAllText(f)));
+
     [GeneratedRegex(@"\{x:Bind\s+([\w:.]+)\(([^)]*)\)")]
     private static partial Regex BindCall();
     static IEnumerable<string> Files()

@@ -101,6 +101,7 @@ public sealed partial class DiagnosticsPage : Page
             Preview.Text = shown;
         }
         PreviewCard.Visibility = Show.Visible(_diag.Previewed && _diag.Json is not null && !sent);
+        SizeLine.Text = _diag.Previewed ? _diag.SizeText ?? "" : "";
 
         SavedLine.Text = _diag.SavedPath is { } path ? L.T("diag.saved", "path", path) : "";
         SavedRow.Visibility = Show.Visible(_diag.SavedPath);

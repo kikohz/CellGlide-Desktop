@@ -129,8 +129,17 @@
                 <!-- Exactly what Send would send. -->
                 <Border x:Name="PreviewCard" Style="{StaticResource Card}" Visibility="Collapsed">
                     <StackPanel Spacing="10">
-                        <TextBlock x:Name="PreviewTitle" FontSize="15" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"
-                                   Text="{x:Bind h:L.T('diag.preview_title')}" />
+                        <!-- The title, and the DLL's size of the bundle beside it (cg-gui's preview header). -->
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="PreviewTitle" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center"
+                                       AutomationProperties.HeadingLevel="Level2" Text="{x:Bind h:L.T('diag.preview_title')}" />
+                            <TextBlock x:Name="SizeLine" Grid.Column="1" FontSize="12" VerticalAlignment="Center"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
                         <TextBox x:Name="Preview" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Consolas" FontSize="12"
                                  Height="360" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                  AutomationProperties.LabeledBy="{x:Bind PreviewTitle}" />

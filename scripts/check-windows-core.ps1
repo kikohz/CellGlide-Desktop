@@ -10,7 +10,8 @@
 #      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
 #      license is allowed or reviewed);
 #   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
-# Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's.
+# Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's,
+# and that a Release build without the DLL says to run 'cargo build -p cg-ffi --release'.
 # -Release takes the DLL from target\release instead of target\debug.
 # -Publish then builds cg-ffi in release and publishes CellGlide.App (Native AOT, self-contained) for
 # this machine's architecture with a plain `dotnet publish -c Release` (no CellGlideNativeDir), and
@@ -83,6 +84,13 @@ try {
         if ($LASTEXITCODE -eq 0 -or $refusal -notmatch 'must not ship the debug DLL') {
             Write-Host 'FAILED: a Release build with CellGlideNativeDir=..\target\debug\ was not refused:'
             Write-Host $refusal
+            exit 1
+        }
+        # A Release build without the DLL says to build the release one (CheckCellGlideNative).
+        $missing = (dotnet msbuild CellGlide.Core -nologo -t:CheckCellGlideNative -p:Configuration=Release '-p:CellGlideNativeDir=..\target\no-such-dir\' | Out-String)
+        if ($LASTEXITCODE -eq 0 -or $missing -notmatch [regex]::Escape('cargo build -p cg-ffi --release')) {
+            Write-Host 'FAILED: a Release build without cellglide_native.dll did not say to run cargo build -p cg-ffi --release:'
+            Write-Host $missing
             exit 1
         }
         $debugDll = (dotnet msbuild CellGlide.Core -nologo -t:CheckCellGlideNativeRelease -p:Configuration=Debug | Out-String)

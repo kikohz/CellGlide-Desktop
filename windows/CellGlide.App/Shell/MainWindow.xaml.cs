@@ -221,20 +221,21 @@ public sealed partial class MainWindow : Window
                 continue;
             }
             _badges[section] = badge;
-            item.InfoBadge = badge switch
+            item.InfoBadge = (badge, SidebarBadges.NameKey(badge)) switch
             {
-                Badge.Warning => Dot(Tone.Orange),
-                Badge.Critical => Dot(Tone.Red),
+                (Badge.Warning, { } name) => Dot(Tone.Orange, L.T(name)),
+                (Badge.Critical, { } name) => Dot(Tone.Red, L.T(name)),
                 _ => null,
             };
         }
     }
 
-    static InfoBadge Dot(Tone tone)
+    /// <param name="name">What a screen reader says for it: the DLL's text for the dot.</param>
+    static InfoBadge Dot(Tone tone, string name)
     {
         // A dot, like cg-gui's 7 px one; the page itself says what is wrong.
         var dot = new InfoBadge { Background = Show.Brush(tone), Width = 8, Height = 8 };
-        AutomationProperties.SetAccessibilityView(dot, AccessibilityView.Raw);
+        AutomationProperties.SetName(dot, name);
         return dot;
     }
 

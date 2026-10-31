@@ -6,6 +6,7 @@ using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
 using CommunityToolkit.Mvvm.Input;
 using H.NotifyIcon;
+using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Controls;
 using Windows.UI.ViewManagement;
@@ -16,28 +17,32 @@ namespace CellGlide.App.Tray;
 /// The notification-area icon. Its look, tooltip and menu are the DLL's chrome
 /// (<see cref="ShellViewModel.Chrome"/>); only the choice of icon file for a light or dark taskbar is
 /// made here. Left click toggles the panel; right click shows a native menu built from
-/// <see cref="ChromeView.Menu"/>, in its order, with its labels and enabled states.
+/// <see cref="ChromeView.Menu"/>, in its order, with its labels and enabled states. From the keyboard
+/// (Win+B, then the arrows to the icon), Enter and Space toggle the panel (decision 12); Windows 11 sends them
+/// as a left click, other shells as NIN_KEYSELECT. Shift+F10 opens the menu where the shell makes a right
+/// click of it (Windows 11), and the panel where it sends only WM_CONTEXTMENU.
 /// </summary>
 sealed class TrayHost : IDisposable
 {
     readonly ShellViewModel _shell;
     readonly DispatcherQueue _queue;
-    readonly Action _togglePanel;
+    readonly Action<bool> _togglePanel;
     readonly Action _open;
     readonly Func<Task> _quit;
     readonly TaskbarIcon _icon;
     readonly MenuFlyout _menu = new();
     readonly UISettings _settings = new();
+    readonly TrayKeyboard _keys = new();
     string? _iconFile;
     int _iconSize;
     IReadOnlyList<MenuItemView>? _menuShown;
     bool _disposed;
 
     /// <param name="id">The icon's GUID (<see cref="TrayIdentity.GuidFor"/> of this exe).</param>
-    /// <param name="togglePanel">Opens or closes the panel.</param>
+    /// <param name="togglePanel">Opens or closes the panel; true when asked from the keyboard.</param>
     /// <param name="open">Opens the main window where it was.</param>
     /// <param name="quit">Quits the app.</param>
-    public TrayHost(Guid id, ShellViewModel shell, DispatcherQueue queue, Action togglePanel, Action open, Func<Task> quit)
+    public TrayHost(Guid id, ShellViewModel shell, DispatcherQueue queue, Action<bool> togglePanel, Action open, Func<Task> quit)
     {
         _shell = shell;
         _queue = queue;
@@ -53,7 +58,7 @@ sealed class TrayHost : IDisposable
             // closed the panel by taking its focus is still within the panel's reopen guard.
             NoLeftClickDelay = true,
             // Raised on a timer thread: the panel is the UI thread's.
-            LeftClickCommand = new RelayCommand(() => Post(_togglePanel)),
+            LeftClickCommand = new RelayCommand(() => Post(() => _togglePanel(false))),
             ContextFlyout = _menu,
         };
         Update();
@@ -75,6 +80,10 @@ sealed class TrayHost : IDisposable
         // WM_DPICHANGED when that scale changes, and a restarted taskbar may sit elsewhere.
         _icon.TrayIcon.MessageWindow.DpiChanged += OnPlacementChanged;
         _icon.TrayIcon.MessageWindow.TaskbarCreated += OnPlacementChanged;
+        // H.NotifyIcon acts only on the mouse's button-up messages; its message window reports NIN_SELECT,
+        // NIN_KEYSELECT and WM_CONTEXTMENU as keyboard events, which may also belong to a click.
+        _icon.TrayIcon.MessageWindow.MouseEventReceived += OnMouse;
+        _icon.TrayIcon.MessageWindow.KeyboardEventReceived += OnKeyboard;
     }
 
     /// <summary>The icon's GUID; the panel asks the shell where this icon is.</summary>
@@ -95,6 +104,8 @@ sealed class TrayHost : IDisposable
         _settings.ColorValuesChanged -= OnColorValuesChanged;
         _icon.TrayIcon.MessageWindow.DpiChanged -= OnPlacementChanged;
         _icon.TrayIcon.MessageWindow.TaskbarCreated -= OnPlacementChanged;
+        _icon.TrayIcon.MessageWindow.MouseEventReceived -= OnMouse;
+        _icon.TrayIcon.MessageWindow.KeyboardEventReceived -= OnKeyboard;
         _icon.Dispose();
     }
 
@@ -109,6 +120,41 @@ sealed class TrayHost : IDisposable
     void OnColorValuesChanged(UISettings sender, object args) => Post(Update);
 
     void OnPlacementChanged(object? sender, EventArgs e) => Post(Update);
+
+    /// <summary>
+    /// A click's button going down or up: the NIN_SELECT after a left click and the WM_CONTEXTMENU inside a right
+    /// click are the click's, not keys (Windows 11 makes such clicks of Enter, Space and Shift+F10 as well).
+    /// </summary>
+    void OnMouse(object? sender, MessageWindow.MouseEventReceivedEventArgs e)
+    {
+        if (e.MouseEvent is MouseEvent.IconLeftMouseDown or MouseEvent.IconLeftMouseUp
+            or MouseEvent.IconRightMouseDown or MouseEvent.IconRightMouseUp)
+        {
+            _keys.Mouse(Now());
+        }
+    }
+
+    /// <summary>
+    /// The icon's keyboard notifications on the message window's thread: NIN_SELECT (0x400), NIN_KEYSELECT
+    /// (0x401, Enter or Space) and WM_CONTEXTMENU (0x007B, Shift+F10) toggle the panel, which then has the
+    /// keyboard focus. The mouse's own NIN_SELECT and WM_CONTEXTMENU are left out (<see cref="TrayKeyboard"/>).
+    /// </summary>
+    void OnKeyboard(object? sender, MessageWindow.KeyboardEventReceivedEventArgs e)
+    {
+        TrayKey? key = e.KeyboardEvent switch
+        {
+            KeyboardEvent.Select => TrayKey.Select,
+            KeyboardEvent.KeySelect => TrayKey.KeySelect,
+            KeyboardEvent.ContextMenu => TrayKey.ContextMenu,
+            _ => null,
+        };
+        if (key is { } pressed && _keys.Toggles(pressed, Now()))
+        {
+            Post(() => _togglePanel(true));
+        }
+    }
+
+    static TimeSpan Now() => TimeSpan.FromMilliseconds(Environment.TickCount64);
 
     /// <summary>
     /// Shows the current chrome: icon file, tooltip, menu. The taskbar's mode and the icon's size are

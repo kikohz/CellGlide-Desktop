@@ -99,10 +99,8 @@ public class XBindTests
     [Fact]
     public void Code_takes_theme_colours_from_styles_not_resource_brushes()
     {
-        var themeBrush = new System.Text.RegularExpressions.Regex(@"Resources\[\s*""(TextFill|DividerStroke|CardStroke|ControlFill|SolidBackground|LayerFill|CardBackground|AccentFill|AccentTextFill)");
-        var brushCast = new System.Text.RegularExpressions.Regex(@"\(\s*(Microsoft\.UI\.Xaml\.Media\.)?Brush\s*\)\s*Application\.Current\.Resources");
         var bad = AppSources.CodeFiles()
-            .Where(f => themeBrush.IsMatch(f.Text) || (brushCast.IsMatch(f.Text) && !f.File.EndsWith("Show.cs", StringComparison.Ordinal)))
+            .Where(f => ThemeBrushGuard.IsBad(f.Text, f.File))
             .Select(f => f.File)
             .ToList();
         Assert.Empty(bad);
@@ -138,9 +136,12 @@ public class XBindTests
     {
         var xaml = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml"));
         var style = System.Text.RegularExpressions.Regex.Match(xaml, """<Style x:Key="SidebarHeading"[\s\S]*?</Style>""").Value;
-        Assert.Contains("BasedOn=\"{StaticResource CaptionTextBlockStyle}\"", style);
-        Assert.Contains("SemiBold", style);
-        Assert.Contains("{ThemeResource TextFillColorSecondaryBrush}", style);
+        // Explicit setters (CaptionTextBlockStyle's size and line height), not BasedOn a deferred system style.
+        Assert.DoesNotContain("BasedOn", style);
+        Assert.Contains("""<Setter Property="FontSize" Value="12" />""", style);
+        Assert.Contains("""<Setter Property="LineHeight" Value="16" />""", style);
+        Assert.Contains("""<Setter Property="FontWeight" Value="SemiBold" />""", style);
+        Assert.Contains("""<Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />""", style);
 
         var code = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml.cs"));
         var header = System.Text.RegularExpressions.Regex.Match(xaml, """<Style x:Key="SidebarHeader"[\s\S]*?</Style>""").Value;
@@ -149,6 +150,106 @@ public class XBindTests
         Assert.Contains("Style = (Style)Nav.Resources[\"SidebarHeader\"]", code);
         Assert.Contains("IsTabStop = false", code);
         Assert.Contains("AutomationHeadingLevel.Level2", code);
+    }
+
+    [Fact]
+    public void No_app_style_is_based_on_a_system_style()
+    {
+        // Deferred system styles can be missing after a theme switch (RowExpander crashed, W3 final review).
+        var files = AppSources.XamlFiles().ToList();
+        Assert.Contains(files, f => f.File.EndsWith("MainWindow.xaml", StringComparison.Ordinal));
+        foreach (var f in files)
+        {
+            Assert.DoesNotContain("BasedOn=", f.Text);
+        }
+    }
+
+    [Fact]
+    public void The_theme_brush_guard_catches_every_way_of_reading_a_brush()
+    {
+        foreach (var bad in new[]
+        {
+            """var b = Application.Current.Resources["TextFillColorPrimaryBrush"] as Brush;""",
+            """var b = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];""",
+            """Application.Current.Resources.TryGetValue("SystemFillColorCautionBrush", out var b);""",
+            """var c = (Windows.UI.Color)Resources["SystemAccentColor"];""",
+            """var b = Resources["ControlStrokeColorDefaultBrush"];""",
+            // A key that is not a literal is judged by what it is read as.
+            """var b = (Brush)Application.Current.Resources[key];""",
+            """var b = Resources[name] as Microsoft.UI.Xaml.Media.SolidColorBrush;""",
+            """if (Resources[name] is Brush b) { }""",
+        })
+        {
+            Assert.True(ThemeBrushGuard.IsBad(bad, file: "X.cs"), bad);
+        }
+        Assert.False(ThemeBrushGuard.IsBad("""var s = (Style)Nav.Resources["SidebarHeader"];""", file: "MainWindow.xaml.cs"));
+        Assert.False(ThemeBrushGuard.IsBad("""Resource("Tone" + tone + "Brush")""", file: "Show.cs"));
+        // Show.cs's one reader of the tone brushes, and only there.
+        const string reader = "static Brush Resource(string key) => (Brush)Application.Current.Resources[key];";
+        Assert.False(ThemeBrushGuard.IsBad(reader, file: Path.Combine("Shell", "Show.cs")));
+        Assert.True(ThemeBrushGuard.IsBad(reader, file: "Other.cs"));
+        // Show.cs is still checked for everything else.
+        Assert.True(ThemeBrushGuard.IsBad(reader + "\nvar b = Resources[\"TextFillColorPrimaryBrush\"];", file: Path.Combine("Shell", "Show.cs")));
+    }
+
+    /// <summary>
+    /// What Code_takes_theme_colours_from_styles_not_resource_brushes refuses: a resource key ending in Brush or
+    /// Color (by index or TryGetValue), or a resource read cast to, or taken as, a Brush, SolidColorBrush or Color.
+    /// Show.cs's Resource helper (the tone and low-power brushes, the same in light and dark) is the one exception.
+    /// </summary>
+    static class ThemeBrushGuard
+    {
+        const string ShowReader = "(Brush)Application.Current.Resources[key]";
+        const string Brushy = @"(?:[\w.]+\.)?(?:Brush|SolidColorBrush|Color)\b";
+
+        static readonly System.Text.RegularExpressions.Regex[] Rules =
+        [
+            // A theme key, however it is read.
+            new(@"(?:Resources\s*\[|TryGetValue\s*\()\s*@?""[^""]*(?:Brush|Color)""\s*[\],]"),
+            // (Brush)...Resources[...], (Windows.UI.Color)Resources[...]
+            new(@"\(\s*" + Brushy + @"\s*\)\s*(?:[\w.]+\.)?Resources\b"),
+            // Resources[...] as Brush, Resources[...] is SolidColorBrush b
+            new(@"Resources\s*\[[^\]]*\]\s*(?:as|is)\s+" + Brushy),
+        ];
+
+        public static bool IsBad(string text, string file)
+        {
+            if (Path.GetFileName(file) == "Show.cs")
+            {
+                text = text.Replace(ShowReader, "", StringComparison.Ordinal);
+            }
+            return Rules.Any(rule => rule.IsMatch(text));
+        }
+    }
+
+    /// <summary>
+    /// Decision 12: the keyboard reaches the panel from the focused tray icon. H.NotifyIcon 2.4.1 acts only on the
+    /// mouse's button-up messages; its message window reports NIN_SELECT (0x400), NIN_KEYSELECT (0x401) and
+    /// WM_CONTEXTMENU (0x007B) as KeyboardEventReceived, which TrayHost passes to the panel's toggle unless a click
+    /// just came (TrayKeyboard; Windows 11 makes clicks of Enter, Space and Shift+F10, which the library handles).
+    /// TrayHost watches both buttons going down and up. The panel then gives the keyboard focus to its first control.
+    /// </summary>
+    [Fact]
+    public void Tray_opens_the_panel_from_the_keyboard()
+    {
+        var tray = File.ReadAllText(Path.Combine(AppSources.AppDir, "Tray", "TrayHost.cs"));
+        Assert.Contains("MessageWindow.KeyboardEventReceived += OnKeyboard", tray);
+        Assert.Contains("MessageWindow.KeyboardEventReceived -= OnKeyboard", tray);
+        Assert.Contains("MessageWindow.MouseEventReceived += OnMouse", tray);
+        foreach (var button in new[] { "IconLeftMouseDown", "IconLeftMouseUp", "IconRightMouseDown", "IconRightMouseUp" })
+        {
+            Assert.Contains("MouseEvent." + button, tray);
+        }
+        var handler = System.Text.RegularExpressions.Regex.Match(tray, @"void OnKeyboard\([\s\S]*?\n    }").Value;
+        foreach (var key in new[] { "KeyboardEvent.Select => TrayKey.Select", "KeyboardEvent.KeySelect => TrayKey.KeySelect", "KeyboardEvent.ContextMenu => TrayKey.ContextMenu" })
+        {
+            Assert.Contains(key, handler);
+        }
+        Assert.Contains("Post(() => _togglePanel(true))", handler);
+        Assert.Contains("_keys.Toggles(", handler);
+
+        var panel = File.ReadAllText(Path.Combine(AppSources.AppDir, "Tray", "PanelWindow.xaml.cs"));
+        Assert.Contains("FocusManager.FindFirstFocusableElement(Root)", panel);
     }
 
     [Fact]

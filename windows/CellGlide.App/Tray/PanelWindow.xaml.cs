@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
@@ -33,6 +34,7 @@ public sealed partial class PanelWindow : Window
     readonly Func<Task> _quit;
     readonly ReopenGuard _reopenGuard = new();
     bool _isOpen;
+    FocusState? _focusOnOpen;
 
     /// <param name="trayId">The tray icon's GUID, to ask the shell where it is.</param>
     /// <param name="openWindow">Opens the main window (at a section, or where it was).</param>
@@ -57,6 +59,7 @@ public sealed partial class PanelWindow : Window
         SystemBackdrop = new DesktopAcrylicBackdrop();
 
         Activated += OnActivated;
+        Root.Loaded += (_, _) => FocusFirst();
         AppWindow.Closing += OnClosing;
         // The dots' brushes follow a switch to or from high contrast.
         Show.Changed += () => Bindings.Update();
@@ -81,8 +84,11 @@ public sealed partial class PanelWindow : Window
     /// <summary>Where the panel was last put, in physical pixels (for checks and logs).</summary>
     public RectInt32 LastPlacement { get; private set; }
 
-    /// <summary>A tray click: opens a hidden panel, hides an open one.</summary>
-    public void Toggle()
+    /// <summary>
+    /// A tray click or key: opens a hidden panel, hides an open one. The opened panel gives the focus to its
+    /// first control, shown as keyboard focus when <paramref name="fromKeyboard"/>.
+    /// </summary>
+    public void Toggle(bool fromKeyboard = false)
     {
         if (_isOpen)
         {
@@ -91,7 +97,7 @@ public sealed partial class PanelWindow : Window
         }
         if (_reopenGuard.AllowsOpen(Now()))
         {
-            Open();
+            Open(fromKeyboard ? FocusState.Keyboard : FocusState.Programmatic);
         }
     }
 
@@ -106,7 +112,7 @@ public sealed partial class PanelWindow : Window
         AppWindow.Hide();
     }
 
-    void Open()
+    void Open(FocusState focus)
     {
         var icon = TrayNative.IconRect(_trayId);
         var (work, dpi) = TrayNative.WorkArea(icon);
@@ -122,6 +128,22 @@ public sealed partial class PanelWindow : Window
         // Moving onto a monitor with another scale may have resized it on the way.
         AppWindow.MoveAndResize(rect);
         LastPlacement = rect;
+        _focusOnOpen = focus;
+        FocusFirst();
+    }
+
+    /// <summary>
+    /// Gives the focus to the connect button, or the first control that is on (while a toggle runs, Open
+    /// CellGlide). The first time the panel opens its content is not loaded yet; it is tried again when the
+    /// content has loaded and when the window is activated, until it takes.
+    /// </summary>
+    void FocusFirst()
+    {
+        if (_isOpen && _focusOnOpen is { } focus
+            && FocusManager.FindFirstFocusableElement(Root) is Control first && first.Focus(focus))
+        {
+            _focusOnOpen = null;
+        }
     }
 
     void OnActivated(object sender, WindowActivatedEventArgs args)
@@ -130,6 +152,10 @@ public sealed partial class PanelWindow : Window
         {
             Dismiss();
             _reopenGuard.ClosedOnDeactivation(Now());
+        }
+        else if (args.WindowActivationState != WindowActivationState.Deactivated)
+        {
+            FocusFirst();
         }
     }
 

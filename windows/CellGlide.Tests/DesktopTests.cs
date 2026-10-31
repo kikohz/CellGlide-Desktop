@@ -463,6 +463,42 @@ public class DesktopTests
         Assert.Equal(TimeSpan.FromMilliseconds(300), ReopenGuard.Default);
     }
 
+    /// <summary>
+    /// Decision 12: the tray icon's keyboard notifications open the panel. NIN_SELECT also follows a left click's
+    /// button-up, and WM_CONTEXTMENU comes between a right click's button-down and button-up (Windows 11 makes
+    /// those clicks of Enter, Space and Shift+F10 too); those were the mouse's, already handled. Enter may send
+    /// its notification twice; that is one press.
+    /// </summary>
+    [Fact]
+    public void Tray_keys_open_the_panel_but_not_after_a_mouse_click()
+    {
+        var t0 = TimeSpan.FromSeconds(100);
+        var ms = (int n) => TimeSpan.FromMilliseconds(n);
+        var keys = new TrayKeyboard();
+        // Enter or Space on the focused icon; Shift+F10; Space as NIN_SELECT.
+        Assert.True(keys.Toggles(TrayKey.KeySelect, t0));
+        // The second notification of the same press.
+        Assert.False(keys.Toggles(TrayKey.KeySelect, t0 + ms(30)));
+        Assert.True(keys.Toggles(TrayKey.ContextMenu, t0 + ms(2000)));
+        Assert.True(keys.Toggles(TrayKey.Select, t0 + ms(4000)));
+
+        // A left click (down, up, NIN_SELECT): its NIN_SELECT is not a key.
+        keys.Mouse(t0 + ms(10000));
+        keys.Mouse(t0 + ms(10000));
+        Assert.False(keys.Toggles(TrayKey.Select, t0 + ms(10005)));
+        // A right click (down, WM_CONTEXTMENU, up): its WM_CONTEXTMENU is not a key either; the menu opens.
+        keys.Mouse(t0 + ms(20000));
+        Assert.False(keys.Toggles(TrayKey.ContextMenu, t0 + ms(20015)));
+        keys.Mouse(t0 + ms(20015));
+        // Enter right after a click is still a key.
+        keys.Mouse(t0 + ms(30000));
+        Assert.True(keys.Toggles(TrayKey.KeySelect, t0 + ms(30005)));
+        // Long after a click, Shift+F10 opens again.
+        keys.Mouse(t0 + ms(40000));
+        Assert.True(keys.Toggles(TrayKey.ContextMenu, t0 + ms(40000) + TrayKeyboard.Window));
+        Assert.Equal(ms(500), TrayKeyboard.Window);
+    }
+
     [Fact]
     public void Tray_guid_is_stable_per_path()
     {
@@ -502,6 +538,14 @@ public class DesktopTests
         Assert.Equal(Badge.Critical, SidebarBadges.For(b, Section.History));
         Assert.Equal(Badge.Warning, SidebarBadges.For(b, Section.Settings));
         Assert.Equal(Badge.None, SidebarBadges.For(b, Section.SpeedTest));
+    }
+
+    [Fact]
+    public void Badge_names_come_from_their_keys()
+    {
+        Assert.Equal("gui.badge_warning", SidebarBadges.NameKey(Badge.Warning));
+        Assert.Equal("gui.badge_critical", SidebarBadges.NameKey(Badge.Critical));
+        Assert.Null(SidebarBadges.NameKey(Badge.None));
     }
 
     [Fact]

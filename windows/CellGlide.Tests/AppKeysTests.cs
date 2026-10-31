@@ -1,3 +1,5 @@
+using CellGlide.Core.Desktop;
+using CellGlide.Core.Models;
 using CellGlide.Core.Native;
 
 namespace CellGlide.Tests;
@@ -9,8 +11,17 @@ public class AppKeysTests
     [Fact]
     public void Every_key_the_app_names_exists_in_both_languages()
     {
-        var keys = AppSources.Keys();   // L.T('…') / L.T("…") / Tr("…" in windows/CellGlide.App's *.xaml and *.cs
+        var keys = new HashSet<string>(AppSources.Keys());   // L.T('…') / L.T("…") / Tr("…" in windows/CellGlide.App's *.xaml and *.cs
         Assert.NotEmpty(keys);
+        // Keys the App passes as variables: the sidebar dots' names.
+        foreach (var badge in Enum.GetValues<Badge>())
+        {
+            if (SidebarBadges.NameKey(badge) is { } key)
+            {
+                keys.Add(key);
+            }
+        }
+        Assert.Contains("gui.badge_warning", keys);
         Assert.Contains("gui.title", keys);
         foreach (var lang in new[] { "en", "zh-CN" })
         {

@@ -17,6 +17,17 @@ public static class SidebarBadges
         Section.Settings => badges.Settings,
         _ => Badge.None,
     };
+
+    /// <summary>
+    /// The text key of a dot's screen-reader name ("Needs attention", "Problem"); none without a dot. The
+    /// App reads the text from the DLL with this key.
+    /// </summary>
+    public static string? NameKey(Badge badge) => badge switch
+    {
+        Badge.Warning => "gui.badge_warning",
+        Badge.Critical => "gui.badge_critical",
+        _ => null,
+    };
 }
 
 /// <summary>When the main window's NavigationView needs its items built again.</summary>

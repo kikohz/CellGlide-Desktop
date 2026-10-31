@@ -30,8 +30,11 @@
                         SelectionChanged="OnSelectionChanged">
             <NavigationView.Resources>
                 <!-- A group's heading (the DLL's text): caption size, semibold, secondary colour, so it reads
-                     as a heading over its items rather than as another item. -->
-                <Style x:Key="SidebarHeading" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+                     as a heading over its items rather than as another item. Explicit setters (CaptionTextBlockStyle's
+                     size and line height), not BasedOn: a deferred system style can be missing after a theme switch. -->
+                <Style x:Key="SidebarHeading" TargetType="TextBlock">
+                    <Setter Property="FontSize" Value="12" />
+                    <Setter Property="LineHeight" Value="16" />
                     <Setter Property="FontWeight" Value="SemiBold" />
                     <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Style>
