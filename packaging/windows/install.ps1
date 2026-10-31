@@ -1,0 +1,793 @@
+<#
+Installs or upgrades CellGlide on Windows 11.
+
+  irm https://pkg.cellglide.com/install.ps1 | iex
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 [-BaseUrl <url>] [-ZipPath <zip>] [-Unattended]
+
+Checks the system, Smart App Control and Apple's device service in the user's own process; the
+download, the file swap, the service, the data directory ACLs, the Start menu shortcut and the
+Installed-apps entry are done elevated (one UAC prompt: this script's own text runs again with
+-ElevatedPart, and its log is printed here). Then the app is started as the user and
+"cellglide doctor" runs.
+
+-BaseUrl (or the CELLGLIDE_PKG_BASE environment variable) may only be https://pkg.cellglide.com
+or a loopback http://127.0.0.1:<port> / http://localhost:<port> source. -ZipPath installs a
+local package and prints its SHA-256 to compare with the published SHA256SUMS. -Unattended asks
+nothing and does not start the app.
+
+Only CellGlide's own service, files, shortcut, uninstall entry and data directory are touched;
+no other adapter, DNS setting or route is changed. Exit codes: 0 installed, 1 failed or
+cancelled, 2 this PC does not meet the requirements.
+#>
+param(
+    [string]$BaseUrl = '',
+    [string]$ZipPath = '',
+    [switch]$Unattended,
+    [switch]$ElevatedPart,
+    [string]$Arch = '',
+    [string]$LogPath = ''
+)
+
+$InstallDir = 'C:\Program Files\CellGlide'
+$ServiceName = 'CellGlide'
+$DataDir = "$env:ProgramData\CellGlide"
+$UninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CellGlide'
+$Shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\CellGlide.lnk"
+$AppleService = 'Apple Mobile Device Service'
+$AppleStoreId = '9NP83LWLPZ9K'
+$DefaultBase = 'https://pkg.cellglide.com'
+$AdapterName = 'cellglide0'
+# cg_core::tunnel::WINDOWS_ADAPTER_GUID; wintun uses it as the device instance id.
+$AdapterGuid = '{E490EEF2-2CB0-4A80-B341-BF929C2E56B3}'
+$AdapterInstanceId = "SWD\Wintun\$AdapterGuid"
+# Well-known SIDs, so the script works on any display language.
+$SidSystem = '*S-1-5-18'
+$SidAdmins = '*S-1-5-32-544'
+$SidUsers = '*S-1-5-32-545'
+# The first line of packaging/licenses/windows-end-user-notice.txt, word for word.
+$EndUserNotice = 'CellGlide includes Microsoft Windows App SDK and Windows SDK components that are licensed to you under the Microsoft Software License Terms reproduced in this file (the Windows App SDK terms and the Windows SDK terms); by installing or using CellGlide you agree to those terms for those components.'
+# This script's own full text, whether it runs with -File or through iex: the elevated child
+# runs exactly this text (decision 4), never a second download.
+$CellGlideInstallText = { }.Ast.Extent.StartScriptPosition.GetFullScript()
+
+# ---- Shared with uninstall.ps1 (decision 3: kept identical) ----
+
+function Test-Elevated {
+    $ErrorActionPreference = 'Stop'
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([Security.Principal.WindowsPrincipal]$id).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-Native {
+    # Runs a native command; throws with its output when the exit code is not 0.
+    param([string]$Exe, [string[]]$ArgList)
+    # stderr lines must not become terminating errors under 'Stop'.
+    $ErrorActionPreference = 'Continue'
+    $out = & $Exe @ArgList 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Exe $($ArgList -join ' ') failed (exit $LASTEXITCODE): $($out.Trim())"
+    }
+    return $out
+}
+
+function Get-OurAdapter {
+    $ErrorActionPreference = 'Stop'
+    Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceGuid -eq $AdapterGuid -or $_.Name -eq $AdapterName }
+}
+
+function Wait-AdapterGone {
+    # True when cellglide0 is gone within the timeout.
+    param([int]$TimeoutSeconds = 10)
+    $ErrorActionPreference = 'Stop'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        if (-not (Get-OurAdapter)) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Stop-OurService {
+    # Stops CellGlide if it exists and waits for cellglide0 to go. Returns true if it did.
+    $ErrorActionPreference = 'Stop'
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Write-Host "Stopping service $ServiceName"
+        Stop-Service -Name $ServiceName -Force
+        (Get-Service -Name $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }
+    return (Wait-AdapterGone -TimeoutSeconds 10)
+}
+
+function Remove-PathWithRetry {
+    # The service's image can stay locked for a moment after it stops.
+    param([string]$Path)
+    $ErrorActionPreference = 'Stop'
+    for ($i = 0; $i -lt 20; $i++) {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try { Remove-Item -LiteralPath $Path -Recurse -Force; return }
+        catch { Start-Sleep -Milliseconds 500 }
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
+function Remove-PhantomDevice {
+    # A crash can leave cellglide0's device node behind as non-present (CM_PROB_PHANTOM).
+    # Only the node whose instance id is our fixed wintun GUID is removed, and only when
+    # it is not present (a live adapter is never removed here).
+    $ErrorActionPreference = 'Stop'
+    $dev = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -eq $AdapterInstanceId }
+    if (-not $dev) { return }
+    if ($dev.Present) {
+        Write-Warning "$AdapterName device is present; not removing it"
+        return
+    }
+    Write-Host "Removing phantom device $($dev.InstanceId) ($($dev.FriendlyName))"
+    Invoke-Native 'pnputil.exe' @('/remove-device', $dev.InstanceId) | Out-Null
+}
+
+function Select-ProcessesToStop {
+    # The ids of processes running a program under the install directory (the app and the
+    # CLI, whose names differ only in case), except the service, which the SCM stops.
+    param([object[]]$Processes, [string]$InstallDir)
+    $ErrorActionPreference = 'Stop'
+    $prefix = $InstallDir.TrimEnd('\') + '\'
+    $ids = @()
+    foreach ($p in @($Processes)) {
+        $exe = [string]$p.ExecutablePath
+        if (-not $exe) { continue }
+        if (-not $exe.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ([IO.Path]::GetFileName($exe) -ieq 'cellglide-service.exe') { continue }
+        $ids += [int]$p.ProcessId
+    }
+    return $ids
+}
+
+function Test-ReparsePoint($item) {
+    $ErrorActionPreference = 'Stop'
+    return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+}
+
+function Get-ReparsePoints([string]$Dir) {
+    # Every junction or symbolic link under $Dir, without following any of them.
+    $ErrorActionPreference = 'Stop'
+    foreach ($child in @(Get-ChildItem -LiteralPath $Dir -Force)) {
+        if (Test-ReparsePoint $child) { $child.FullName }
+        elseif ($child.PSIsContainer) { Get-ReparsePoints $child.FullName }
+    }
+}
+
+function Refuse-ReparsePoint([string]$Path) {
+    $ErrorActionPreference = 'Stop'
+    throw ("$Path is a junction or symbolic link. CellGlide's data directory must hold " +
+        'plain files and folders only; remove it (it may point anywhere) and run again.')
+}
+
+# ---- Pure checks ----
+
+function Resolve-BaseUrl([string]$Param, [string]$Env) {
+    # The parameter wins over the environment variable; production or a loopback source only.
+    $ErrorActionPreference = 'Stop'
+    $value = if ($Param) { $Param } elseif ($Env) { $Env } else { $DefaultBase }
+    $value = $value.TrimEnd('/')
+    if ($value -ceq $DefaultBase) { return $value }
+    if ($value -cmatch '^http://(127\.0\.0\.1|localhost):(\d{1,5})$' -and [int]$Matches[2] -ge 1 -and [int]$Matches[2] -le 65535) {
+        return $value
+    }
+    throw "Unsupported download location: $value"
+}
+
+function ConvertTo-CellGlideArch([uint16]$Machine) {
+    $ErrorActionPreference = 'Stop'
+    switch ($Machine) {
+        0x8664 { return 'x64' }
+        0xAA64 { return 'arm64' }
+    }
+    return $null
+}
+
+function Test-WindowsSupported([int]$Build, [string]$Arch) {
+    $ErrorActionPreference = 'Stop'
+    $reason = $null
+    if ($Build -lt 22000) { $reason = 'CellGlide needs Windows 11.' }
+    elseif ($Arch -eq 'x64' -and $Build -lt 22621) { $reason = 'CellGlide needs Windows 11 22H2 or newer.' }
+    elseif ($Arch -eq 'arm64' -and $Build -lt 26100) { $reason = 'CellGlide on ARM64 needs Windows 11 24H2 or newer.' }
+    return [pscustomobject]@{ Ok = ($null -eq $reason); Reason = $reason }
+}
+
+function Test-SmartAppControlBlocks([int]$State) {
+    # 1 = enforced (decision 8); 2 = evaluation and 0 = off install as usual.
+    $ErrorActionPreference = 'Stop'
+    return ($State -eq 1)
+}
+
+function Read-Latest([string]$Json, [string]$Arch, [string]$BaseUrl) {
+    # latest.json (decision 14), checked field by field; the URL must name this version's file.
+    $ErrorActionPreference = 'Stop'
+    $data = $Json | ConvertFrom-Json
+    $version = $data.version
+    if (-not ($version -is [string]) -or $version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') {
+        throw "latest.json: bad version '$version'"
+    }
+    $entry = $data.$Arch
+    if ($null -eq $entry) { throw "latest.json: no entry for $Arch" }
+    $fileName = "CellGlide-$version-windows-$Arch.zip"
+    $expected = "$BaseUrl/windows/$version/$fileName"
+    if (-not ($entry.url -is [string]) -or $entry.url -cne $expected) {
+        throw "latest.json: the $Arch url is '$($entry.url)', expected '$expected'"
+    }
+    if (-not ($entry.sha256 -is [string]) -or $entry.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "latest.json: bad sha256 for $Arch"
+    }
+    if (-not ($entry.size -is [int] -or $entry.size -is [long]) -or $entry.size -le 0) {
+        throw "latest.json: bad size for $Arch"
+    }
+    if (-not ($entry.test_build -is [bool])) { throw "latest.json: bad test_build for $Arch" }
+    return [pscustomobject]@{
+        Version = $version; Url = $entry.url; Sha256 = $entry.sha256.ToLowerInvariant()
+        Size = [long]$entry.size; TestBuild = $entry.test_build; FileName = $fileName
+    }
+}
+
+function Read-Sha256Sums([string]$Text) {
+    # "<hex>  <name>" or "<hex> *<name>" per line; file name -> lower-case hash.
+    $ErrorActionPreference = 'Stop'
+    $sums = @{}
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line.Trim() -eq '') { continue }
+        if ($line -notmatch '^([0-9a-fA-F]{64}) [ *](\S.*)$') { throw "SHA256SUMS: bad line '$line'" }
+        $sums[$Matches[2]] = $Matches[1].ToLowerInvariant()
+    }
+    return $sums
+}
+
+function Test-Download([string]$Path, [string]$Expected) {
+    $ErrorActionPreference = 'Stop'
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ieq $Expected)
+}
+
+function Get-InstallAction([string]$Installed, [string]$New) {
+    $ErrorActionPreference = 'Stop'
+    if (-not $Installed) { return 'Install' }
+    try {
+        $old = [version]($Installed -replace '-.*$', '')
+        $next = [version]($New -replace '-.*$', '')
+    } catch { return 'Upgrade' }
+    if ($next -eq $old) { return 'Reinstall' }
+    if ($next -gt $old) { return 'Upgrade' }
+    return 'Downgrade'
+}
+
+function Install-Files([string]$Source, [string]$Target) {
+    # Decision 6: copy to <Target>.new, move <Target> to <Target>.old, move .new in, delete
+    # .old. A failure removes .new and puts .old back, so the old version stays usable.
+    $ErrorActionPreference = 'Stop'
+    $new = "$Target.new"
+    $old = "$Target.old"
+    $targetLeaf = Split-Path -Leaf $Target
+    # An earlier run that died between the two renames left only .old: that is the old version.
+    if ((Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $Target)) {
+        Rename-Item -Path $old -NewName $targetLeaf
+    }
+    foreach ($leftover in @($new, $old)) {
+        if (Test-Path -LiteralPath $leftover) { Remove-PathWithRetry $leftover }
+    }
+    try {
+        Copy-Item -LiteralPath $Source -Destination $new -Recurse
+        if (Test-Path -LiteralPath $Target) { Rename-Item -Path $Target -NewName (Split-Path -Leaf $old) }
+        Rename-Item -Path $new -NewName $targetLeaf
+    } catch {
+        $failure = $_
+        if (Test-Path -LiteralPath $new) { Remove-PathWithRetry $new }
+        if ((Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $Target)) {
+            Rename-Item -Path $old -NewName $targetLeaf
+        }
+        throw $failure
+    }
+    if (Test-Path -LiteralPath $old) { Remove-PathWithRetry $old }
+}
+
+function Get-UninstallEntry([string]$InstallDir, [string]$Version, [long]$SizeKb) {
+    $ErrorActionPreference = 'Stop'
+    return @{
+        DisplayName = 'CellGlide'
+        DisplayVersion = $Version
+        Publisher = 'CellGlide'
+        DisplayIcon = "$InstallDir\app\CellGlide.exe"
+        InstallLocation = $InstallDir
+        UninstallString = "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`""
+        URLInfoAbout = 'https://cellglide.com'
+        NoModify = 1
+        NoRepair = 1
+        EstimatedSize = $SizeKb
+    }
+}
+
+function Get-TranscriptBody([string[]]$Lines) {
+    # A transcript's lines without the start and end banners Start-Transcript adds.
+    $ErrorActionPreference = 'Stop'
+    $body = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $Lines.Count) {
+        $line = $Lines[$i]
+        if ($line -match '^\*{10,}$' -and ($i + 1) -lt $Lines.Count -and
+            $Lines[$i + 1] -match '^Windows PowerShell transcript (start|end)$') {
+            $i += 2
+            while ($i -lt $Lines.Count -and $Lines[$i] -notmatch '^\*{10,}$') { $i++ }
+            $i++
+            continue
+        }
+        $body.Add($line)
+        $i++
+    }
+    return $body.ToArray()
+}
+
+function ConvertTo-CommandLine([string[]]$ArgList) {
+    # Start-Process joins -ArgumentList with spaces as is: quote each argument the way
+    # CommandLineToArgvW reads it back.
+    $ErrorActionPreference = 'Stop'
+    $quoted = foreach ($a in $ArgList) {
+        $escaped = ($a -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1'
+        '"' + $escaped + '"'
+    }
+    return ($quoted -join ' ')
+}
+
+function Get-PeMachine([string]$Path) {
+    # The Machine field of a PE file's COFF header.
+    $ErrorActionPreference = 'Stop'
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "$Path is not a program" }
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($pe -lt 0 -or $pe + 6 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) {
+        throw "$Path is not a program"
+    }
+    return [BitConverter]::ToUInt16($bytes, $pe + 4)
+}
+
+# ---- Steps with side effects ----
+
+function Get-NativeMachine {
+    # IsWow64Process2: x64 PowerShell emulated on ARM64 still gets 0xAA64.
+    $ErrorActionPreference = 'Stop'
+    if (-not ('CellGlideInstall.Native' -as [type])) {
+        Add-Type -Namespace CellGlideInstall -Name Native -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetCurrentProcess();
+'@
+    }
+    [uint16]$processMachine = 0
+    [uint16]$nativeMachine = 0
+    if (-not [CellGlideInstall.Native]::IsWow64Process2([CellGlideInstall.Native]::GetCurrentProcess(),
+            [ref]$processMachine, [ref]$nativeMachine)) {
+        throw 'IsWow64Process2 failed'
+    }
+    return $nativeMachine
+}
+
+function Get-SmartAppControlState {
+    $ErrorActionPreference = 'Stop'
+    $value = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name 'VerifiedAndReputablePolicyState' -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
+    if ($null -eq $value) { return 0 }
+    return [int]$value
+}
+
+function Test-AppleService {
+    # The same two sources as "cellglide doctor": the classic service that iTunes and Apple
+    # Mobile Device Support install, or the Store's Apple Devices app package.
+    $ErrorActionPreference = 'Stop'
+    $classic = "HKLM:\SYSTEM\CurrentControlSet\Services\$AppleService"
+    if (Test-Path -LiteralPath $classic) {
+        $svc = Get-Service -Name $AppleService -ErrorAction SilentlyContinue
+        $state = if ($svc) { [string]$svc.Status } else { 'not registered' }
+        Write-Host "Apple's device service is installed ($state)."
+        return $true
+    }
+    $packages = 'HKLM:\SOFTWARE\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\PackageRepository\Packages'
+    $store = @(Get-ChildItem -LiteralPath $packages -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -like 'AppleInc.AppleDevices_*_nzyj5cx40ttqa' })
+    if ($store.Count -gt 0) {
+        Write-Host "Apple's device service is installed (Apple Devices app)."
+        return $true
+    }
+    return $false
+}
+
+function Request-AppleDevices([switch]$Unattended) {
+    # Offers the Store's Apple Devices app; the user accepts its terms in winget, so no --accept-*.
+    $ErrorActionPreference = 'Stop'
+    Write-Host "Apple's device service is not installed. CellGlide reaches the iPhone through it, and it comes with the Apple Devices app from the Microsoft Store."
+    $answer = 'n'
+    if (-not $Unattended) { $answer = Read-Host 'Install Apple Devices from the Microsoft Store now? [y/N]' }
+    if ($answer -match '^(y|yes)$') {
+        if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+            & winget.exe install --id $AppleStoreId --source msstore
+            if ($LASTEXITCODE -eq 0) { return }
+            Write-Host "winget did not install Apple Devices (exit $LASTEXITCODE)."
+        } else {
+            Write-Host 'winget is not available on this PC.'
+        }
+    }
+    Write-Host "CellGlide will be installed anyway; it works once Apple Devices is installed: winget install --id $AppleStoreId --source msstore"
+}
+
+function Get-CellGlidePackage {
+    # Downloads latest.json, the zip and SHA256SUMS into $WorkDir; latest.json, SHA256SUMS and
+    # the file itself must all agree on the hash.
+    param(
+        [string]$BaseUrl,
+        [string]$Arch,
+        [string]$WorkDir,
+        [scriptblock]$Download = { param($Url, $OutFile) Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $OutFile }
+    )
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $null = New-Item -ItemType Directory -Force -Path $WorkDir
+    $latestFile = Join-Path $WorkDir 'latest.json'
+    Write-Host "Downloading $BaseUrl/windows/latest.json"
+    & $Download "$BaseUrl/windows/latest.json" $latestFile
+    $latest = Read-Latest ([IO.File]::ReadAllText($latestFile)) $Arch $BaseUrl
+    $zip = Join-Path $WorkDir $latest.FileName
+    Write-Host "Downloading $($latest.Url)"
+    & $Download $latest.Url $zip
+    $sumsFile = Join-Path $WorkDir 'SHA256SUMS'
+    & $Download "$BaseUrl/windows/$($latest.Version)/SHA256SUMS" $sumsFile
+    $sums = Read-Sha256Sums ([IO.File]::ReadAllText($sumsFile))
+    if (-not $sums.ContainsKey($latest.FileName) -or $sums[$latest.FileName] -ne $latest.Sha256 -or
+        -not (Test-Download $zip $latest.Sha256)) {
+        throw "SHA-256 mismatch for $($latest.FileName)"
+    }
+    if ((Get-Item -LiteralPath $zip).Length -ne $latest.Size) { throw "Size mismatch for $($latest.FileName)" }
+    Write-Host "SHA-256 verified: $($latest.Sha256)"
+    return [pscustomobject]@{ ZipPath = $zip; Version = $latest.Version; TestBuild = $latest.TestBuild }
+}
+
+function Get-InstalledVersion {
+    $ErrorActionPreference = 'Stop'
+    $file = Join-Path $InstallDir 'version.txt'
+    if (Test-Path -LiteralPath $file -PathType Leaf) { return ([IO.File]::ReadAllText($file)).Trim() }
+    return ''
+}
+
+function New-PrivateWorkDir {
+    # A temporary folder only SYSTEM and Administrators can change, so nothing unelevated can
+    # swap the package between its hash check and the install.
+    $ErrorActionPreference = 'Stop'
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('cellglide-install-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $dir
+    Invoke-Native 'icacls.exe' @($dir, '/inheritance:r', '/Q',
+        '/grant:r', "${SidSystem}:(OI)(CI)F", '/grant:r', "${SidAdmins}:(OI)(CI)F") | Out-Null
+    return $dir
+}
+
+function Expand-Package([string]$Zip, [string]$Dest) {
+    # Unpacks the zip and checks it holds a CellGlide package.
+    $ErrorActionPreference = 'Stop'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Dest)
+    foreach ($f in 'version.txt', 'cellglide-service.exe', 'cellglide.exe', 'wintun.dll', 'uninstall.ps1', 'app\CellGlide.exe') {
+        if (-not (Test-Path -LiteralPath (Join-Path $Dest $f) -PathType Leaf)) { throw "The package has no $f" }
+    }
+}
+
+function Stop-CellGlideProcesses {
+    $ErrorActionPreference = 'Stop'
+    $ids = Select-ProcessesToStop @(Get-CimInstance -ClassName Win32_Process) $InstallDir
+    foreach ($id in $ids) {
+        Write-Host "Stopping process $id"
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-OurService {
+    $ErrorActionPreference = 'Stop'
+    $binPath = '"' + (Join-Path $InstallDir 'cellglide-service.exe') + '"'
+    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        # Not sc.exe config: Windows PowerShell 5.1 drops the embedded quotes when passing
+        # binPath= to a native program, leaving an unquoted path with spaces (the
+        # unquoted-service-path hole). Win32_Service.Change takes the string as is.
+        $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
+        $r = Invoke-CimMethod -InputObject $svc -MethodName Change -Arguments @{
+            PathName = $binPath; StartMode = 'Automatic'; DisplayName = $ServiceName;
+            StartName = 'LocalSystem'; StartPassword = ''
+        }
+        if ($r.ReturnValue -ne 0) { throw "Win32_Service.Change failed (return $($r.ReturnValue))" }
+        Write-Host "Updated service $ServiceName"
+    } else {
+        New-Service -Name $ServiceName -BinaryPathName $binPath -StartupType Automatic `
+            -DisplayName $ServiceName | Out-Null
+        Write-Host "Created service $ServiceName"
+    }
+    Invoke-Native 'sc.exe' @('failure', $ServiceName, 'reset=', '86400',
+        'actions=', 'restart/2000/restart/5000/restart/30000') | Out-Null
+    # NT SERVICE\CellGlide resolves only once the service has an unrestricted SID.
+    Invoke-Native 'sc.exe' @('sidtype', $ServiceName, 'unrestricted') | Out-Null
+    # Minimal privilege set, measured on a real iPhone in W1 Task 14 Step 3.
+    Invoke-Native 'sc.exe' @('privs', $ServiceName,
+        'SeChangeNotifyPrivilege/SeImpersonatePrivilege/SeLoadDriverPrivilege/SeCreateGlobalPrivilege/SeAuditPrivilege') | Out-Null
+}
+
+function Lock-DataItem($item) {
+    # Takes ownership of one file or folder and resets its ACL to what it inherits, never
+    # recursing (icacls /T would follow a junction). Checked before and after, so a link
+    # swapped in between is caught: once locked, its owner can no longer change it.
+    $ErrorActionPreference = 'Stop'
+    if (Test-ReparsePoint $item) { Refuse-ReparsePoint $item.FullName }
+    Invoke-Native 'icacls.exe' @($item.FullName, '/setowner', $SidAdmins, '/C', '/Q') | Out-Null
+    Invoke-Native 'icacls.exe' @($item.FullName, '/reset', '/C', '/Q') | Out-Null
+    if (Test-ReparsePoint (Get-Item -LiteralPath $item.FullName -Force)) {
+        Refuse-ReparsePoint $item.FullName
+    }
+}
+
+function Lock-DataTree([string]$Dir) {
+    # Top-down: a folder is locked before its entries are listed, so nobody else can add a
+    # link to it while the rest is done.
+    $ErrorActionPreference = 'Stop'
+    foreach ($child in @(Get-ChildItem -LiteralPath $Dir -Force)) {
+        Lock-DataItem $child
+        if ($child.PSIsContainer) { Lock-DataTree $child.FullName }
+    }
+}
+
+function Set-DataDirAcl {
+    # Root: no inheritance from ProgramData; SYSTEM and Administrators full control, the
+    # service SID modify. health\ adds Users read (the GUI reads health files). logs\ keeps
+    # only the inherited entries: users must not be able to plant files the service reads.
+    # Anyone can create folders in ProgramData, so a pre-existing CellGlide folder may hold
+    # anything, links included: the root is locked first, then each entry in turn, and a
+    # junction or symbolic link anywhere stops the install before any ACL goes through it.
+    $ErrorActionPreference = 'Stop'
+    $health = Join-Path $DataDir 'health'
+    $logs = Join-Path $DataDir 'logs'
+    if (Test-Path -LiteralPath $DataDir) {
+        $root = Get-Item -LiteralPath $DataDir -Force
+        if (Test-ReparsePoint $root) { Refuse-ReparsePoint $DataDir }
+    } else {
+        New-Item -ItemType Directory -Path $DataDir | Out-Null
+    }
+    Invoke-Native 'icacls.exe' @($DataDir, '/setowner', $SidAdmins, '/C', '/Q') | Out-Null
+    Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/Q',
+        '/grant:r', "${SidSystem}:(OI)(CI)F",
+        '/grant:r', "${SidAdmins}:(OI)(CI)F",
+        '/grant:r', "NT SERVICE\${ServiceName}:(OI)(CI)M") | Out-Null
+    if (Test-ReparsePoint (Get-Item -LiteralPath $DataDir -Force)) { Refuse-ReparsePoint $DataDir }
+    # Only administrators can add to the root now; created here, they are locked below too.
+    New-Item -ItemType Directory -Force -Path $health, $logs | Out-Null
+    Lock-DataTree $DataDir
+    Invoke-Native 'icacls.exe' @($health, '/Q', '/grant:r', "${SidUsers}:(OI)(CI)RX") | Out-Null
+}
+
+function New-StartMenuShortcut {
+    $ErrorActionPreference = 'Stop'
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($Shortcut)
+    $link.TargetPath = Join-Path $InstallDir 'app\CellGlide.exe'
+    $link.WorkingDirectory = Join-Path $InstallDir 'app'
+    $link.IconLocation = (Join-Path $InstallDir 'app\CellGlide.exe') + ',0'
+    $link.Description = 'CellGlide'
+    $link.Save()
+    $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    Write-Host "Created $Shortcut"
+}
+
+function Set-UninstallEntry([string]$Version) {
+    $ErrorActionPreference = 'Stop'
+    $bytes = (Get-ChildItem -LiteralPath $InstallDir -Recurse -Force -File | Measure-Object -Property Length -Sum).Sum
+    $entry = Get-UninstallEntry $InstallDir $Version ([long][math]::Ceiling($bytes / 1KB))
+    if (-not (Test-Path -LiteralPath $UninstallKey)) { $null = New-Item -Path $UninstallKey }
+    foreach ($name in $entry.Keys) {
+        $type = if ($name -in 'NoModify', 'NoRepair', 'EstimatedSize') { 'DWord' } else { 'String' }
+        $null = New-ItemProperty -LiteralPath $UninstallKey -Name $name -Value $entry[$name] -PropertyType $type -Force
+    }
+    Write-Host 'Added CellGlide to Settings > Apps > Installed apps'
+}
+
+function Start-AppAsUser {
+    # An elevated process starts the app through explorer.exe, so it runs as the signed-in
+    # user without administrator rights.
+    $ErrorActionPreference = 'Stop'
+    $exe = Join-Path $InstallDir 'app\CellGlide.exe'
+    if (Test-Elevated) { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$exe`"" }
+    else { Start-Process -FilePath $exe }
+}
+
+function Invoke-Doctor {
+    # Prints "cellglide doctor"; failed checks do not change the exit code.
+    $ErrorActionPreference = 'Continue'
+    Write-Host 'cellglide doctor:'
+    & (Join-Path $InstallDir 'cellglide.exe') doctor 2>&1 | ForEach-Object { Write-Host "  $_" }
+}
+
+# ---- Elevation ----
+
+function Invoke-ElevatedChild {
+    # Runs this script's own text elevated with -ElevatedPart and prints the child's log here.
+    param(
+        [string]$ScriptText,
+        [string[]]$Arguments,
+        [scriptblock]$Start = { param($Path, $ArgList)
+            $p = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList (ConvertTo-CommandLine $ArgList)
+            if ($p) { $null = $p.Handle }
+            $p }
+    )
+    $ErrorActionPreference = 'Stop'
+    if ([string]::IsNullOrEmpty($ScriptText)) { throw "Cannot find the running script's text" }
+    $id = [guid]::NewGuid().ToString('N')
+    $scriptFile = Join-Path ([IO.Path]::GetTempPath()) "cellglide-install-$id.ps1"
+    $logFile = Join-Path ([IO.Path]::GetTempPath()) "cellglide-install-$id.log"
+    [IO.File]::WriteAllText($scriptFile, $ScriptText, (New-Object Text.UTF8Encoding($false)))
+    try {
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptFile, '-ElevatedPart', '-LogPath', $logFile) + @($Arguments)
+        $proc = $null
+        try { $proc = & $Start $scriptFile $argList } catch { $proc = $null }
+        if (-not $proc) {
+            Write-Host 'Installation cancelled.'
+            return 1
+        }
+        $proc.WaitForExit()
+        if (Test-Path -LiteralPath $logFile) {
+            foreach ($line in (Get-TranscriptBody @(Get-Content -LiteralPath $logFile))) { Write-Host $line }
+        }
+        return [int]$proc.ExitCode
+    } finally {
+        Remove-Item -LiteralPath $scriptFile, $logFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ElevatedPart([string]$BaseUrl, [string]$ZipPath, [string]$Arch) {
+    # Steps 4-8 and starting the service. Nothing changes before the package is verified; a
+    # failure later starts the existing service again.
+    $ErrorActionPreference = 'Stop'
+    $work = $null
+    try {
+        $work = New-PrivateWorkDir
+        if ($ZipPath) {
+            $zip = Join-Path $work (Split-Path -Leaf $ZipPath)
+            Copy-Item -LiteralPath $ZipPath -Destination $zip
+            Write-Host "Package: $ZipPath"
+            Write-Host "SHA-256: $((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant())"
+            Write-Host "Compare it with SHA256SUMS at $DefaultBase/windows/<version>/SHA256SUMS."
+            $expected = ''
+        } else {
+            $package = Get-CellGlidePackage $BaseUrl $Arch (Join-Path $work 'download')
+            $zip = $package.ZipPath
+            $expected = $package.Version
+        }
+        $staged = Join-Path $work 'package'
+        Expand-Package $zip $staged
+        $version = ([IO.File]::ReadAllText((Join-Path $staged 'version.txt'))).Trim()
+        if ($expected -and $version -ne $expected) {
+            throw "the package is version $version, latest.json says $expected"
+        }
+        $wantMachine = if ($Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
+        if ((Get-PeMachine (Join-Path $staged 'cellglide-service.exe')) -ne $wantMachine) {
+            throw "the package is not the $Arch build"
+        }
+        $installed = Get-InstalledVersion
+        switch (Get-InstallAction $installed $version) {
+            'Install' { Write-Host "Installing $version" }
+            'Upgrade' { Write-Host "Upgrading $installed -> $version" }
+            'Reinstall' { Write-Host "Reinstalling $version" }
+            'Downgrade' { Write-Host "Downgrading $installed -> $version" }
+        }
+
+        if (-not (Test-Elevated)) { throw 'the elevated part needs administrator rights' }
+        Stop-CellGlideProcesses
+        if (-not (Stop-OurService)) { throw "$AdapterName is still present 10 seconds after stopping the service" }
+        Install-Files $staged $InstallDir
+        Write-Host "Installed files in $InstallDir"
+        Set-OurService
+        Set-DataDirAcl
+        Write-Host "Prepared $DataDir"
+        New-StartMenuShortcut
+        Set-UninstallEntry $version
+        Start-Service -Name $ServiceName
+        (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        Write-Host "Service $ServiceName is running."
+        return 0
+    } catch {
+        $reason = $_.Exception.Message
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -ne 'Running') {
+            try { Start-Service -Name $ServiceName; Write-Host "Started the existing $ServiceName service again." }
+            catch { Write-Host "Could not start the existing $ServiceName service: $($_.Exception.Message)" }
+        }
+        Write-Host "Installation failed: $reason"
+        return 1
+    } finally {
+        if ($work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# ---- Main ----
+
+function Invoke-CellGlideInstall {
+    param(
+        [string]$BaseUrl = '',
+        [string]$ZipPath = '',
+        [switch]$Unattended,
+        [switch]$ElevatedPart,
+        [string]$Arch = '',
+        [string]$LogPath = ''
+    )
+    $ErrorActionPreference = 'Stop'
+    try {
+        if ($ElevatedPart) {
+            if ($LogPath) { $null = Start-Transcript -LiteralPath $LogPath -Force }
+            try {
+                if (-not $Arch) { $Arch = ConvertTo-CellGlideArch (Get-NativeMachine) }
+                return (Invoke-ElevatedPart (Resolve-BaseUrl $BaseUrl '') $ZipPath $Arch)
+            } finally {
+                if ($LogPath) { $null = Stop-Transcript }
+            }
+        }
+
+        # Steps 1-3 in the user's own process.
+        $base = Resolve-BaseUrl $BaseUrl $env:CELLGLIDE_PKG_BASE
+        if ($ZipPath) {
+            if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) { throw "$ZipPath does not exist" }
+            $ZipPath = (Resolve-Path -LiteralPath $ZipPath).ProviderPath
+        }
+        $machine = Get-NativeMachine
+        $arch = ConvertTo-CellGlideArch $machine
+        if (-not $arch) {
+            Write-Host ('CellGlide runs on x64 and ARM64 Windows only (this PC is 0x{0:X4}).' -f $machine)
+            return 2
+        }
+        $check = Test-WindowsSupported ([Environment]::OSVersion.Version.Build) $arch
+        if (-not $check.Ok) {
+            Write-Host $check.Reason
+            return 2
+        }
+        if (Test-SmartAppControlBlocks (Get-SmartAppControlState)) {
+            Write-Host 'Smart App Control is on in enforcement mode. It blocks programs that are not signed, and this CellGlide build is not signed yet, so it could not run. Nothing was changed.'
+            Write-Host 'A signed CellGlide will follow; see https://cellglide.com.'
+            return 2
+        }
+        if (-not (Test-AppleService)) { Request-AppleDevices -Unattended:$Unattended }
+        if ($arch -eq 'arm64') {
+            $testBuild = $true
+            if (-not $ZipPath) {
+                try {
+                    $json = (Invoke-WebRequest -UseBasicParsing -Uri "$base/windows/latest.json").Content
+                    $testBuild = (Read-Latest $json $arch $base).TestBuild
+                } catch { $testBuild = $true }
+            }
+            if ($testBuild) { Write-Host 'Note: the ARM64 build is a test build, not yet tested on real hardware.' }
+        }
+        Write-Host $EndUserNotice
+        Write-Host "(That file is THIRD-PARTY-LICENSES.txt in $InstallDir.)"
+
+        # Steps 4-8, elevated.
+        if (Test-Elevated) {
+            $code = Invoke-ElevatedPart $base $ZipPath $arch
+        } else {
+            $childArgs = @('-BaseUrl', $base, '-Arch', $arch)
+            if ($ZipPath) { $childArgs += @('-ZipPath', $ZipPath) }
+            $code = Invoke-ElevatedChild $CellGlideInstallText $childArgs
+        }
+        if ($code -ne 0) { return $code }
+
+        # Steps 9-10 back in the user's process.
+        $version = Get-InstalledVersion
+        if (-not $Unattended) { Start-AppAsUser }
+        Invoke-Doctor
+        Write-Host "CellGlide $version is installed. Uninstall it from Settings > Apps > Installed apps, or run: irm https://pkg.cellglide.com/uninstall.ps1 | iex"
+        return 0
+    } catch {
+        Write-Host "Installation failed: $($_.Exception.Message)"
+        return 1
+    }
+}
+
+$code = Invoke-CellGlideInstall -BaseUrl $BaseUrl -ZipPath $ZipPath -Unattended:$Unattended -ElevatedPart:$ElevatedPart -Arch $Arch -LogPath $LogPath
+if ($PSCommandPath) { exit $code }

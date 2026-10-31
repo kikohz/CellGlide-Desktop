@@ -464,6 +464,28 @@ Speed test finished
   - Pester 21/21。
 - 没有用手机流量，没有动网络，没有需要拍快照的步骤。
 
+### Task 5：install.ps1（2026-10-31）
+
+- **测试**：`scripts/test-windows-scripts.ps1` 75 个全过（新增 54 个：Install 43、InstallFiles 8、DataDirAcl 3，后者带 `Elevated` 标签）。`check-windows-core.ps1` exit 0。`scripts/tests/test-install-dev-datadir.ps1` 的三个用例原样搬进 `DataDirAcl.Tests.ps1`（目标改为 install.ps1 的 `Set-DataDirAcl`），旧文件删除。
+- **变异验证**：捕获语句换回 `$MyInvocation.MyCommand.ScriptBlock.ToString()` 时 `iex hands the script its own text` 失败；去掉 `Install-Files` 的回滚时三个交换测试失败；base URL 正则放宽为任意主机时 `Base URL accepts only production and loopback` 失败。
+- **本地源**：`dist\windows\local\`（`windows\latest.json` 手写，x64 哈希 `e1f4e951…8fe7`、大小 37,881,012；`windows\1.0.0\` 放 x64 zip 和由 `SHA256SUMS.x64` 复制的 `SHA256SUMS`；`install.ps1`），`python -I -m http.server 8770 --bind 127.0.0.1`。zip 是 Task 4 在 140a849 出的包。没有访问 pkg.cellglide.com。
+- **基线**：开发安装（`install-dev.ps1 -Release`），服务 Running，无卸载项、无快捷方式；快照 A 当天新拍。
+- **实装（都在会话 0 的管理员 shell 里，`-Unattended`）**：
+
+  | 次 | 方式 | 输出 | 退出码 | 快照与 A 比较 |
+  |---|---|---|---|---|
+  | F2 | `-BaseUrl https://example.com` | `Installation failed: Unsupported download location: https://example.com`，立即结束 | 1 | 未改动 |
+  | F1 | `latest.json` 的 x64 哈希改一位 | 下载后 `Installation failed: SHA-256 mismatch for CellGlide-1.0.0-windows-x64.zip`；服务 PID 前后都是 26420，安装目录所有文件的修改时间不变，无 `.new` / `.old`、无卸载项、无快捷方式 | 1 | — |
+  | R1 | `-File install.ps1 -BaseUrl http://127.0.0.1:8770`（从开发安装升级） | `SHA-256 verified`、`Installing 1.0.0`、各步、`Service CellGlide is running.`、doctor 结果（无 iPhone 一项 ✗）、结束语 | 0 | identical |
+  | R2 | 真实提权子进程：`Invoke-ElevatedChild`（默认的 `Start-Process -Verb RunAs`，从已提权的 shell 发起，没有 UAC 提示） | 父进程逐行打印子进程日志（无 transcript 头尾），`Reinstalling 1.0.0`；`%TEMP%` 下的临时脚本和日志都已删除 | 0 | identical |
+  | R3 | `-ZipPath dist\...\x64.zip` | 打印包的 SHA-256 `e1f4e951…8fe7`、`Reinstalling 1.0.0` | 0 | identical |
+  | F3 | 用 `FileShare.None` 占住 `THIRD-PARTY-LICENSES.txt` 再装 | 旧目录改名失败：`Started the existing CellGlide service again.`、`Installation failed: Access to the path 'C:\Program Files\CellGlide' is denied.`；服务 Running，文件修改时间不变，无 `.new` / `.old` | 1 | identical |
+
+  - R1 之后：`sc.exe qc` 的路径带引号；`qfailure`（86400，restart 2000/5000/30000）、`qsidtype`（UNRESTRICTED）、`qprivs`（五项）与 `install-dev.ps1` 设置的相同；`app\CellGlide.exe` 存在；`version.txt` 为 1.0.0；卸载项 `DisplayVersion` 1.0.0、`EstimatedSize` 98810、`UninstallString` 指向 `uninstall.ps1`；快捷方式指向 `app\CellGlide.exe`；安装目录继承 Program Files 的 ACL；数据目录 ACL 与安装前逐行相同。
+  - 一次失误：R3 第一次运行时，我把输出接到了 `Select-Object -First`，管道提前结束，安装进程在 `Prepared` 之后被杀，服务停在 Stopped，私有临时目录留在 `%TEMP%`。删掉那个目录后重跑 R3，安装照常完成（服务 Running）。这说明中途被杀的安装可以靠重跑恢复。
+- **还原**：`install-dev.ps1 -Uninstall`（删服务、安装目录、我们 GUID 的 Tcpip/Tcpip6 接口键，保留数据目录）→ 删快捷方式和卸载项 → `install-dev.ps1 -Release`。卸载后、重装后各拍快照，与 A 比较都是 identical。最终状态与安装前记录逐项对比：服务配置、数据目录 ACL、无卸载项、无快捷方式、无 `.new` / `.old`、HKCU Run 都相同。只有两处不同：一是 `cellglide-service.exe` 和 `cellglide.exe` 按当前 HEAD 重新编译，哈希变了；二是我们 GUID 的接口键被删掉了，下次隧道建立时会重新生成。
+- 没有用手机流量（iPhone 已拔下），没有动其他网卡、DNS 或路由，没有向桌面发送任何输入。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
