@@ -543,6 +543,32 @@ public class DesktopTests
     }
 
     [Fact]
+    public void Autostart_toggle_on_rewrites_a_value_that_points_elsewhere()
+    {
+        var run = new FakeRunKey { [Autostart.ValueName] = "\"D:\\old\\CellGlide.exe\" --tray" };
+        var autostart = new Autostart(run, new FakeApproved(), @"C:\A B\CellGlide.exe");
+        // Another place's value shows as off; turning it on writes this executable's and reads back On.
+        Assert.Equal(AutostartState.Off, autostart.Read());
+        Assert.Equal(new AutostartChange(AutostartState.On, null), AutostartToggle.Apply(autostart, true));
+        Assert.Equal("\"C:\\A B\\CellGlide.exe\" --tray", run[Autostart.ValueName]);
+        Assert.Equal(1, run.Writes);
+    }
+
+    [Fact]
+    public void Autostart_toggle_writes_nothing_while_disabled_by_the_system()
+    {
+        var old = "\"D:\\old\\CellGlide.exe\" --tray";
+        var run = new FakeRunKey { [Autostart.ValueName] = old };
+        var approved = new FakeApproved { [Autostart.ValueName] = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
+        var autostart = new Autostart(run, approved, @"C:\A B\CellGlide.exe");
+        // Turning it on would write a different value (a rewrite): nothing is tried, either way.
+        Assert.Equal(new AutostartChange(AutostartState.DisabledBySystem, null), AutostartToggle.Apply(autostart, true));
+        Assert.Equal(new AutostartChange(AutostartState.DisabledBySystem, null), AutostartToggle.Apply(autostart, false));
+        Assert.Equal(0, run.Writes);
+        Assert.Equal(old, run[Autostart.ValueName]);
+    }
+
+    [Fact]
     public void Service_toggle_sends_only_a_user_change_that_differs()
     {
         // The switch shows the service's value; setting it to that value (a redraw) sends nothing.
@@ -562,6 +588,9 @@ sealed class FakeRunKey : IRunKey
     /// <summary>Every write and delete throws, as the registry does when access is denied.</summary>
     public bool Fail { get; set; }
 
+    /// <summary>How many writes and deletes were tried (failed ones too).</summary>
+    public int Writes { get; private set; }
+
     public string this[string name]
     {
         get => _values[name];
@@ -574,6 +603,7 @@ sealed class FakeRunKey : IRunKey
 
     public void Write(string name, string value)
     {
+        Writes++;
         if (Fail)
         {
             throw new UnauthorizedAccessException();
@@ -583,6 +613,7 @@ sealed class FakeRunKey : IRunKey
 
     public void Delete(string name)
     {
+        Writes++;
         if (Fail)
         {
             throw new UnauthorizedAccessException();

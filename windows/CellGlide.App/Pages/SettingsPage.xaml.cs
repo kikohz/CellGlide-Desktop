@@ -30,7 +30,9 @@ public sealed partial class SettingsPage : Page
     /// <summary>Set while the code itself moves the controls, so their events are not taken for a user's.</summary>
     bool _rendering;
     AutostartState _autostartState;
-    string? _autostartError;
+    // Why reading the Run key failed (cleared by the next read that works), and why the last click's write failed.
+    string? _autostartReadError;
+    string? _autostartWriteError;
     // "Copied" is the page's own short-lived state; the number lets only the last copy's timer turn it back.
     bool _copied;
     int _copies;
@@ -93,11 +95,12 @@ public sealed partial class SettingsPage : Page
         try
         {
             _autostartState = _autostart.Read();
+            _autostartReadError = null;
         }
         catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
         {
             _autostartState = AutostartState.Off;
-            _autostartError = L.T("settings.autostart_failed", "error", e.Message);
+            _autostartReadError = L.T("settings.autostart_failed", "error", e.Message);
         }
         Render();
     }
@@ -144,9 +147,11 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetHelpText(AutostartSwitch, L.T(disabled ? "settings.launch_disabled_by_system" : "settings.launch_note"));
             DisabledBySystemLine.Foreground = Show.Brush(Tone.Orange);
             DisabledBySystemLine.Visibility = Show.Visible(disabled);
-            AutostartErrorLine.Text = _autostartError ?? "";
+            // Never together with the disabled line: while Windows has turned us off, that line is the one that counts.
+            var autostartError = disabled ? null : _autostartWriteError ?? _autostartReadError;
+            AutostartErrorLine.Text = autostartError ?? "";
             AutostartErrorLine.Foreground = Show.Brush(Tone.Red);
-            AutostartErrorLine.Visibility = Show.Visible(_autostartError);
+            AutostartErrorLine.Visibility = Show.Visible(autostartError);
 
             // Open on plug: the app's preference.
             OpenOnPlugSwitch.IsOn = _settings.Prefs?.OpenOnPlug ?? false;
@@ -225,13 +230,15 @@ public sealed partial class SettingsPage : Page
         {
             var change = AutostartToggle.Apply(_autostart, on);
             _autostartState = change.State;
-            _autostartError = change.Error is { } error ? L.T("settings.autostart_failed", "error", error) : null;
+            _autostartReadError = null;
+            _autostartWriteError = change.Error is { } error ? L.T("settings.autostart_failed", "error", error) : null;
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
         {
             // Not even readable: say why, and show it as off.
             _autostartState = AutostartState.Off;
-            _autostartError = L.T("settings.autostart_failed", "error", ex.Message);
+            _autostartReadError = L.T("settings.autostart_failed", "error", ex.Message);
+            _autostartWriteError = null;
         }
         Render();
     }
