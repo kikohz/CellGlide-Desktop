@@ -449,9 +449,51 @@ async fn service_restart_resumes_state() {
     let id = rt.send(Command::Toggle);
     assert_eq!(reply_of(&events, id).await, ReplyResult::done());
     assert_eq!(
+        count(
+            &events,
+            |e| matches!(e, Event::PhonePlugged { serial } if serial == SERIAL)
+        ),
+        0
+    );
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn a_service_restart_plugs_nothing_that_was_there() {
+    let mut svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(disconnected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    svc.stop().await;
+    wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    // Back, but it hasn't listed the iPhones yet; then the same iPhone shows up again.
+    svc.snapshots.send_replace(Snapshot {
+        devices: Vec::new(),
+        selected: None,
+        ..disconnected_snapshot()
+    });
+    events.lock().unwrap().clear();
+    svc.restart().await;
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    events.lock().unwrap().clear();
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
         count(&events, |e| matches!(e, Event::PhonePlugged { .. })),
         0
     );
+    // An iPhone that was never there before is plugged in.
+    svc.snapshots.send_replace(Snapshot {
+        devices: vec![SERIAL.into(), "B".into()],
+        ..disconnected_snapshot()
+    });
+    wait_for(
+        &events,
+        |e| matches!(e, Event::PhonePlugged { serial } if serial == "B"),
+    )
+    .await;
     rt.shutdown();
 }
 

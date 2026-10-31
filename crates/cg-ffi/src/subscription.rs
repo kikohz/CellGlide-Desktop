@@ -152,8 +152,9 @@ struct Follower {
     /// The last reason sent for the service being away. A retry that fails the same way (OS
     /// detail aside) isn't said again.
     down: Option<ServiceDown>,
-    /// The iPhones of the last snapshot; `None` before the first snapshot of each subscription
-    /// round, so the phones already there don't count as plugged in.
+    /// The iPhones of the last snapshot; `None` before the subscription's first snapshot, so the
+    /// phones already there don't count as plugged in. Kept while the service is away: when it
+    /// comes back (often listing no iPhones at first), the ones it had are not plugged in again.
     known: Option<KnownDevices>,
 }
 
@@ -186,7 +187,6 @@ impl Follower {
     fn down(&mut self, down: ServiceDown) -> Vec<Event> {
         self.shared.keep(None);
         self.view = None;
-        self.known = None;
         if self
             .down
             .as_ref()
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn the_service_going_is_said_once_and_resets_everything() {
+    fn the_service_going_is_said_once_and_keeps_the_phones_it_saw() {
         let _g = cg_i18n::lock_for_tests();
         let t0 = Instant::now();
         let mut f = Follower::new(Arc::default());
@@ -333,14 +333,25 @@ mod tests {
             f.tick(at(5), &TimeZone::UTC).is_empty(),
             "no state while away"
         );
-        // Back with one more phone: the first snapshot of the round plugs nothing, and the
-        // same view as before the service went is sent again.
+        // Back, first listing no iPhones, then the one it had and a new one: the phones seen
+        // before the service went are not plugged in again, the new one is; and the same view
+        // as before the service went is sent again.
+        let none = Snapshot {
+            devices: Vec::new(),
+            ..s.clone()
+        };
+        let later = t0 + Duration::from_secs(120);
+        assert_eq!(
+            kinds(&f.snapshot(none, at(6), &TimeZone::UTC, later)),
+            ["state"]
+        );
         let more = Snapshot {
-            devices: vec!["A".into(), "B".into()],
+            devices: vec![crate::testing::SERIAL.into(), "B".into()],
             ..s
         };
-        let events = f.snapshot(more, at(6), &TimeZone::UTC, t0 + Duration::from_secs(120));
-        assert_eq!(kinds(&events), ["state"]);
+        let events = f.snapshot(more, at(7), &TimeZone::UTC, later);
+        assert_eq!(kinds(&events), ["state", "plugged"]);
+        assert_eq!(events[1], Event::PhonePlugged { serial: "B".into() });
         assert_eq!(
             kinds(&f.down(stopped())),
             ["gone"],
