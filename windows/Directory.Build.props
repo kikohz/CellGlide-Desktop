@@ -6,6 +6,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <LangVersion>latest</LangVersion>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- Both Windows architectures are restored every time, so the lock files record both and a
+         `-r win-arm64` build or publish finds them already there (and leaves them unchanged). -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <!-- Where cellglide_native.dll is found: cargo's debug output unless given with -p:CellGlideNativeDir=... -->
     <CellGlideNativeDir Condition="'$(CellGlideNativeDir)' == ''">$(MSBuildThisFileDirectory)..\target\debug\</CellGlideNativeDir>
     <!-- A directory given on the command line may lack its trailing slash. -->

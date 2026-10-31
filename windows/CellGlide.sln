@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.Core", "CellGlide
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.Tests", "CellGlide.Tests\CellGlide.Tests.csproj", "{51851D20-AF0E-4AD7-ACB4-3ED2950A9594}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.Probe", "CellGlide.Probe\CellGlide.Probe.csproj", "{325B732D-B393-4247-BF24-CA6FA70E8DDE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -41,6 +43,18 @@ Global
 		{51851D20-AF0E-4AD7-ACB4-3ED2950A9594}.Release|x64.Build.0 = Release|Any CPU
 		{51851D20-AF0E-4AD7-ACB4-3ED2950A9594}.Release|x86.ActiveCfg = Release|Any CPU
 		{51851D20-AF0E-4AD7-ACB4-3ED2950A9594}.Release|x86.Build.0 = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|x64.Build.0 = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Debug|x86.Build.0 = Debug|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x64.ActiveCfg = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x64.Build.0 = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x86.ActiveCfg = Release|Any CPU
+		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A console tool that drives cellglide_native.dll through CellGlide.Core (status, a small speed test, the leak test). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>CellGlide.Probe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CellGlide.Core\CellGlide.Core.csproj" />
+  </ItemGroup>
+
+</Project>

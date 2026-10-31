@@ -193,6 +193,23 @@ Speed test finished
 - 结束时设置恢复默认（严格 DNS 开），隧道已断开；pktmon 过滤器列表清空（开始前也是空的）。
 - 不测速。手机流量约 0.3 MB（`This session` 242 KB，加上断开前的少量后台流量）。
 
+## W2 cellglide_native.dll（W2 Task 13，2026-10-30）
+
+工具：`windows/CellGlide.Probe`（控制台小程序，经 CellGlide.Core 的 `NativeCore` + `EventHub` + `InlineDispatcher` 调 `cellglide_native.dll`），在 `windows\` 里运行：`dotnet run --project CellGlide.Probe -- status|speed-small|leak`。每行是「时间 + 事件名 + DLL 给的文字」，程序自己只写用法说明。环境：iPhone 16e / Cricket 5G NSA，Wi‑Fi 对比网卡，debug 服务用 `scripts\install-dev.ps1` 重装为当前 HEAD。
+
+| 项目 | 结果 |
+| --- | --- |
+| 1. `status --seconds 60`，期间 `Restart-Service CellGlide`（23:10:34.7 发出，0.6 秒返回） | **通过**。23:10:34.847 `service_gone`「The CellGlide service stopped」；23:10:36.857 恢复 `state`（Waiting for USB → Checking the phone's exit），同时 `phone_plugged 00008140-…`；23:10:37.398 「Connected, this computer is using the phone's network」+「Strict DNS: on (DNS queries can only go through the phone)」，手机卡片「Cricket · 5G NSA」。服务停到恢复连接约 2.6 秒，C# 没有重新订阅。退出码 0。 |
+| 2. `speed-small`（caps 下行 10 MB、上行 5 MB、5 秒，include_wifi，confirmed） | **通过**。iPhone 腿 Done：延迟 119 ms、下行 **39.7 Mbps**、上行 **1.6 Mbps**（经过宽限期「Waiting for the server to confirm the upload…」后确认，不是 0.0）；Wi‑Fi 腿 Done：79 ms、下行 **78.6 Mbps**、上行 **39.5 Mbps**。verdict「Wi‑Fi download is 2.0x faster than the iPhone.」，历史最新一条 `2026-10-30 23:11 | ↓ 39.7 ↑ 1.6 Mbps · 119 ms | ↓ 78.6 ↑ 39.5 Mbps · 79 ms | Cricket · 5G NSA`。各腿带 cap reached 的说明。退出码 0。手机流量：`This session` 257 KB → 12.3 MB，约 **12.0 MB**。 |
+| 3. `leak` | **通过**。leakcheck 服务端接受 Windows 客户端（未出现 `leak.unavailable`）。结论「No leak」：全部查询经 Cloudflare 加密 DNS（1 组 16 个地址），出口「AT&T Enterprises, LLC · Arizona, US」。退出码 0，流量不到 0.1 MB。 |
+| 4. `cellglide.exe disconnect` 后拍快照 | **`identical`**（基线在重装服务之前新拍：`target\t13\snap-before.json`，之后 `snap-after.json`）。 |
+| 5. Release：`cargo build -p cg-ffi --release`；`dotnet run -c Release -p:CellGlideNativeDir=..\..\target\release\ --project CellGlide.Probe -- status --seconds 10` | **通过**。打印「Disconnected」状态，退出码 0；输出目录里的 DLL 与 `target\release\cellglide_native.dll` 哈希相同。注意 `CellGlideNativeDir` 的相对路径按各项目目录解析，所以是 `..\..\target\…`。 |
+| ARM64（只编不跑） | `cargo build -p cg-ffi --target aarch64-pc-windows-msvc` 成功；`dotnet build CellGlide.Core -c Debug -r win-arm64` 成功、0 警告；`dotnet publish CellGlide.Probe -c Release -r win-arm64 --self-contained false` 成功，`CellGlide.Probe.exe` 和 `cellglide_native.dll` 都是 ARM64 PE。锁文件不变（`Directory.Build.props` 的 `RuntimeIdentifiers` 是 `win-x64;win-arm64`，两个 RID 都记在锁文件里）。 |
+
+- 观察：小测速时 iPhone 腿的阶段文字刚进上行时有一帧「Testing Upload… 2 / 10 s」再回到「1 / 10 s」，以及 caps 下仍写「/ 10 s」，都是 Task 10 已记下的阶段文字问题，不影响结果。
+- 结束时：隧道已断开，服务 Running。
+- **手机流量**：本任务约 **12.6 MB**（重启前的会话约 0.2 MB，重启后的会话到断开 12.4 MB）。**W2 累计约 111 MB**（预算 300 MB）。W2 没有跑过完整测速。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
