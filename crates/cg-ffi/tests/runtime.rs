@@ -1472,3 +1472,45 @@ async fn a_new_language_relabels_the_speed_legs() {
     );
     rt.shutdown();
 }
+
+#[tokio::test]
+async fn caps_with_nothing_to_measure_are_refused() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+    let good = small().unwrap();
+    for caps in [
+        SpeedCaps {
+            seconds: 0,
+            ..good.clone()
+        },
+        SpeedCaps {
+            download_bytes: 0,
+            ..good.clone()
+        },
+        SpeedCaps {
+            upload_bytes: 0,
+            ..good.clone()
+        },
+    ] {
+        let id = rt.send(Command::SpeedStart {
+            include_wifi: false,
+            confirmed: true,
+            caps: Some(caps.clone()),
+        });
+        let reply = reply_of(&events, id).await;
+        assert!(
+            matches!(reply, ReplyResult::Err { .. }),
+            "{caps:?}: {reply:?}"
+        );
+    }
+    assert_eq!(
+        count(
+            &events,
+            |e| matches!(e, Event::SpeedProgress { view } if view.running)
+        ),
+        0
+    );
+    rt.shutdown();
+}

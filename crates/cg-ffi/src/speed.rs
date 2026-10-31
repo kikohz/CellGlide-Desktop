@@ -181,6 +181,12 @@ fn params(caps: Option<&SpeedCaps>) -> Params {
     }
 }
 
+/// Limits a test can run within: at least a second, and some bytes each way. (Zero seconds
+/// would make the progress `0 / 0`.)
+fn caps_measure_something(caps: &SpeedCaps) -> bool {
+    caps.seconds >= 1 && caps.download_bytes > 0 && caps.upload_bytes > 0
+}
+
 /// `Command::SpeedStart`.
 pub(crate) async fn start(
     context: &Context,
@@ -188,6 +194,15 @@ pub(crate) async fn start(
     confirmed: bool,
     caps: Option<SpeedCaps>,
 ) -> ReplyResult {
+    if let Some(caps) = &caps
+        && !caps_measure_something(caps)
+    {
+        // Developer-only limits: the English detail follows the sentence, as for a bad command.
+        return ReplyResult::err(format!(
+            "{} (caps: seconds >= 1, download_bytes > 0, upload_bytes > 0)",
+            tr("reason.bad_request", &[])
+        ));
+    }
     if context.speed.lock().run.is_some() {
         return ReplyResult::err(tr("speed.already_running", &[]));
     }

@@ -163,21 +163,38 @@ fn leg(leg: &SpeedLeg) -> SpeedLegView {
         Stage::Failed(e) => (StageView::Failed, Some(error_text(e))),
         Stage::Cancelled => (StageView::Cancelled, None),
     };
+    // JSON has no NaN or infinity (serde_json writes them as `null`, which the app can't read
+    // into a number): a reading that isn't a number is no reading.
+    let (latency, download, upload) = (
+        r.latency.and_then(finite),
+        r.download.and_then(finite),
+        r.upload.and_then(finite),
+    );
+    let series: Vec<f64> = r
+        .download_series
+        .iter()
+        .map(|v| finite(*v).unwrap_or(0.0))
+        .collect();
     SpeedLegView {
         label: session::route_label(&leg.route),
         phone: leg.phone(),
         stage,
         stage_text: stage_text(p),
         error,
-        numbers: numbers(r.latency, r.download, r.upload),
-        latency: r.latency,
-        download: r.download,
-        upload: r.upload,
-        progress: p.progress.clamp(0.0, 1.0),
+        numbers: numbers(latency, download, upload),
+        latency,
+        download,
+        upload,
+        progress: finite(p.progress).unwrap_or(0.0).clamp(0.0, 1.0),
         waiting: p.waiting && p.stage == Stage::Upload,
-        curve: ui::curve_points(&r.download_series),
+        curve: ui::curve_points(&series),
         notes: r.notes.iter().map(note_text).collect(),
     }
+}
+
+/// `value` when it is a number JSON can carry.
+fn finite(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
 }
 
 fn record(record: &Record, tz: &TimeZone) -> SpeedRecordView {
@@ -360,5 +377,31 @@ mod tests {
         };
         let records = [bare];
         assert_eq!(speed(&page(&[], &records), &tz).history[0].carrier, None);
+    }
+
+    #[test]
+    fn numbers_that_are_not_finite_never_reach_the_page() {
+        let _g = cg_i18n::lock_for_tests();
+        let mut odd = leg_at(true, Stage::Download, Some(f64::INFINITY));
+        odd.progress.progress = f64::NAN;
+        odd.progress.result.latency = Some(f64::NAN);
+        odd.progress.result.upload = Some(f64::NEG_INFINITY);
+        odd.progress.result.download_series = vec![1.0, f64::NAN, f64::INFINITY, 2.0];
+        let legs = [odd];
+        let view = speed(&page(&legs, &[]), &TimeZone::UTC);
+        let json = serde_json::to_value(&view).unwrap();
+        let leg = &json["legs"][0];
+        // A non-finite f64 would be written as `null`, which the app's `double` can't read.
+        assert_eq!(leg["progress"], serde_json::json!(0.0));
+        for field in ["latency", "download", "upload"] {
+            assert!(leg[field].is_null(), "{field}: {}", leg[field]);
+        }
+        let curve = leg["curve"].as_array().unwrap();
+        assert_eq!(curve.len(), 4);
+        assert!(
+            curve.iter().all(|p| p["x"].is_f64() && p["y"].is_f64()),
+            "{curve:?}"
+        );
+        assert_eq!(serde_json::from_value::<SpeedView>(json).unwrap(), view);
     }
 }
