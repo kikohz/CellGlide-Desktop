@@ -67,6 +67,16 @@ public sealed class DiagnosticsViewModel : CoreViewModel
     /// <summary>Parameter: where to save, or null for the Downloads folder (never over a file there).</summary>
     public IAsyncRelayCommand<DiagnosticsSaveTarget?> SaveCommand { get; }
 
+    /// <summary>
+    /// The form changed (range, email or note): the bundle on hand no longer matches it, so it can be neither
+    /// sent nor saved until it is previewed again (cg-gui pages/diagnostics.rs). What was already saved stays saved.
+    /// </summary>
+    public void Discard()
+    {
+        Json = null;
+        FileName = null;
+    }
+
     async Task PrepareAsync(DiagnosticsInput? input)
     {
         if (input is null)
@@ -87,6 +97,9 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         if (Json is { } json && await RunAsync(new DiagnosticsSendCommand(json)) is SentValue sent)
         {
             Code = sent.Code;
+            // A sent bundle is done with: another report needs a new preview (cg-gui pages/diagnostics.rs).
+            Json = null;
+            FileName = null;
         }
     }
 

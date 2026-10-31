@@ -108,8 +108,8 @@ public sealed partial class MainWindow : Window
         Section.Overview => new OverviewPage(_shell, Open),
         Section.SpeedTest => new SpeedPage(App.Current.Speed, App.Current.Settings),
         Section.DnsLeak => new LeakPage(App.Current.Leak),
-        Section.History => new HistoryPage(),
-        Section.Diagnostics => new DiagnosticsPage(),
+        Section.History => new HistoryPage(App.Current.History),
+        Section.Diagnostics => new DiagnosticsPage(App.Current.Diagnostics),
         Section.Settings => new SettingsPage(),
         _ => new AboutPage(),
     };

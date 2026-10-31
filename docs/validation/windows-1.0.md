@@ -285,6 +285,29 @@ Speed test finished
 - **实测中修的问题**：出口那行原来带 `AutomationProperties.LabeledBy`（指向「Your exit」），UIA 就把它的名字换成了「Your exit」，读屏读不到出口本身（Task 6 在「Change…」按钮上遇到过同一现象）。去掉 LabeledBy 后重测，名字是 `T-Mobile USA, Inc. · California, US`。另外腿的说明（notes）原来每帧重建，UIA 偶尔读到刚建好、还没排版的空行，改为内容变了才重建。
 - **没有实测到**：检查清单（`OffersChecks` 只在 DNS 未被 CellGlide 管理时为真，本机造不出来）；`Esc` 关提醒（会话 1 锁屏，没法发按键；`Cancel` 按钮和 Esc 走同一个 `ContentDialogResult.None` 分支）；勾「不再提示」后继续（会写真实偏好，之后测速不再提醒）。
 
+### 连接历史页与诊断页（W3 Task 8，2026-10-31）
+
+- **实测方式**：同 Task 6、7，会话 1 临时交互计划任务（`CGT8`、`CGT8B`、`CGT8D`，用完都删了）跑 UI Automation 驱动脚本；另存为对话框用 Win32 消息驱动（`WM_SETTEXT` 写文件名框 1001，`IDOK`，替换确认框按 `Yes`）。Debug 构建，`CELLGLIDE_LANG=en`。**除了对本地假服务的发送那一步，App 启动时 `CELLGLIDE_DIAG_TARGET` 都指向一个没人监听的本地端口（`http://127.0.0.1:18081/v1/reports`）**，即使误点发送也只会本地失败。结束时没有残留进程、计划任务和测试文件。
+- **连接历史**：
+  1. 今天：日期 `Today, Oct 31`，图例 `OK` / `Unstable` / `Interrupted` / `Not sharing`，刻度 `00:00 06:00 12:00 18:00 24:00`，事件从新到旧（`05:22 Sharing stopped`、`05:19 Sharing started`、`04:59 USB connected`……），与 `cellglide.exe history` 的列表逐条一致；`Next` 不可点。
+  2. 往前翻：`Yesterday, Oct 30`、`Thursday, Oct 29`（`Nothing recorded this day`）……到 `Sunday, Oct 25` 时 **`Previous` 不可点**，`Next` 可点；在这一天停 6 秒，页面不变（刷新只对今天）。往后翻回今天，`Next` 不可点。
+  3. 展开：10 月 30 日有 3 条带详情的事件（`Computer connection stuck`、两条 `Cable connection dropped`），只有它们是 Expander（读屏名是事件标题）。展开 `09:28 Computer connection stuck` 后内容是 `Cable latency 6 ms` `iPhone latency 72 ms` `Packet loss 0%` `Network 5G NSA` `iPhone temperature OK`，与 `cellglide.exe history --day 2026-10-30` 那一行的详情一致；再过 6 秒（经过一次刷新周期）仍是展开状态。
+  4. 5 秒刷新：停在今天，06:05:04 用 `cellglide.exe connect` 连接，**不动页面**，06:05:06 列表顶上出现 `06:05 Sharing started`；06:05:40 `disconnect`，06:05:42 出现 `06:05 Sharing stopped`。连接前拍了基线快照（当天新拍），断开后再拍，`-Compare` **identical**。手机流量：`This session` 38.4 → 38.4 MB（约 0）。
+- **诊断（真机，只预览和保存）**：
+  1. 打开页面：`Save to File`、`Save As…`、`Send` 都不可点，下面是 `View what will be sent before sending.`。
+  2. `View what will be sent…`：约 16 秒后预览框（读屏名 `What will be sent`，只读、等宽、可滚动）出现内容，140958 字符（UTF‑8 140958 字节），开头 `{ "app": "1.0.0", "createdAt": …`；三个按钮变为可点，提示消失。
+  3. `Save to File`：`C:\Users\iloss\Downloads`（`shell:Downloads` 的真实路径）出现 `cellglide-diagnostics-20261031-060722.json`，140958 字节（= 预览的字节数）；页面显示 `Saved to C:\Users\iloss\Downloads\cellglide-diagnostics-20261031-060722.json` 和 `Show in Folder`。DLL 的文件名按保存时的时间取，隔几秒再存一次得到的是另一个时间的名字（`…-060728.json`），所以为了看到 `-2`，先在「下载」里放了接下来 40 秒的同名占位文件，再点保存：得到 **`cellglide-diagnostics-20261031-060746-2.json`**，同名的占位文件没有被动过（占位文件随后删掉）。
+  4. `Save As…`：系统保存对话框，建议文件名 `cellglide-diagnostics-20261031-061058.json`（DLL 的 `FileName`），类型 `Diagnostics (JSON) (*.json)`；选「下载」里已有的 `…-060722.json`（事先改成 11 字节的 `OLD CONTENT`）→ 对话框弹出 `Confirm Save As`（`Yes` / `No`）→ `Yes` → 文件变成 141402 字节，是合法 JSON，`createdAt` 与当时预览的一致，预览也是 141402 字节；目录里没有留下临时文件。
+  5. `Show in Folder`：打开 `Downloads - File Explorer`，选中的项是 `cellglide-diagnostics-20261031-060722.json`。
+  6. 改表单：在 `Email` 里输入后，预览消失，`Save to File`、`Save As…`、`Send` 变为不可点，提示重新出现；已保存那一行保留。
+  7. **脱敏检查**：对保存的 3 个文件做不区分大小写的查找，用户名 `iloss`、计算机名（`$env:COMPUTERNAME`）、用户 SID `S-1-5-21-…-1001` 都是 **0 处**（`S-1-5-21` 也是 0 处）。测试文件随后全部删除。
+- **发送（只对本地假服务）**：另开 `cargo run -p cg-diag --example fake_diag_server -- 18080`（只监听 `127.0.0.1:18080`），以 `CELLGLIDE_DIAG_TARGET=http://127.0.0.1:18080/v1/reports` 启动 Debug 构建：预览（142290 字符 / 142290 字节）→ `Send` → 页面显示 `Sent`、`CG-LOCAL1`、`Just send us this code.`，假服务打印 `POST /v1/reports HTTP/1.1 142290 bytes`，**与预览的 UTF‑8 长度一致**；发送后预览清空，`Send` 不可点（再发要重新预览）。停掉假服务，重新预览后再发送：页面显示 DLL 的句子 `Couldn't send. Try again later, or use Save to File and send us the file.`，`Send` 仍可点（同一份内容可以重试）。
+- **Release 核对**：`Select-String -Path target\release\cellglide_native.dll -Pattern CELLGLIDE_DIAG_TARGET -SimpleMatch` **没有结果**（Debug 版的 DLL 有 1 处）；发布目录里的 `cellglide_native.dll` 与 `target\release` 的哈希相同。
+- **发送未对正式服务（`diag.cellglide.com`）做过；W4 须经用户同意。**
+- **AOT 发布版冒烟**：历史页显示今天的列表；诊断页预览正常；`Save As…` 能弹出系统保存对话框（没有保存，没有点 `Send`：发布版只会发往正式服务）。
+- **实测中修的问题**：`Save As…` 第一次点击时 App 崩溃（`0xc000027b`，stowed exception）：`FileTypeChoices.Add(…, [".json"])` 的集合表达式在 CsWinRT 下抛 `InvalidCastException`（没有那个对象的 COM 包装）。改成显式 `new List<string> { ".json" }`，并把整个对话框过程放进 try；重测通过，AOT 版也能弹出对话框。
+- **截图**：会话 1 锁屏，没有截图；色条、图例、Expander 的样子留给 Task 10 用眼睛看。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

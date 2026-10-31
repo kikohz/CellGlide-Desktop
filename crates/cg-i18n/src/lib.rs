@@ -336,6 +336,8 @@ pub const KEYS: &[&str] = &[
     "diag.failed_gui",
     "diag.save",
     "diag.open_folder",
+    "diag.save_as",
+    "diag.file_type",
     "diag.save_failed",
     "diag.no_home",
     "leak.running",

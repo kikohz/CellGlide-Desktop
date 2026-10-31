@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A day's 24-hour strip and its hour labels, as cg-gui's widgets/strip.rs and pages/history.rs ticks:
+     28 high with 6 corners, the hour labels 5 below it. -->
+<UserControl
+    x:Class="CellGlide.App.Controls.DayStrip"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Spacing="5">
+        <!-- The strip itself is a picture; the day's events are listed in words below it. -->
+        <Border x:Name="Frame" Height="28" CornerRadius="6" AutomationProperties.AccessibilityView="Raw">
+            <Canvas x:Name="Plot" />
+        </Border>
+        <Canvas x:Name="Labels" Height="16" />
+    </StackPanel>
+</UserControl>

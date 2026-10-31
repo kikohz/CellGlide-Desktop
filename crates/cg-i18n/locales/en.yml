@@ -169,6 +169,8 @@ diag:
   failed_gui: "Couldn't send. Try again later, or use Save to File and send us the file."
   save: "Save to File"
   open_folder: "Show in Folder"
+  save_as: "Save As…"
+  file_type: "Diagnostics (JSON)"
   save_failed: "Couldn't save: %{reason}"
   no_home: "Couldn't find your home folder"
 leak:

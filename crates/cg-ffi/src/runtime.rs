@@ -55,7 +55,7 @@ impl Config {
             download_dir: cg_diag::save::default_dir(),
             speed_server: Server::cloudflare(),
             leak_target: Target::leakcheck(),
-            diag_target: cg_diag::upload::Target::production(),
+            diag_target: diag_target(diag_override().as_deref()),
             uplink: cg_tools::uplink::physical_uplink,
             resolve: cg_tools::dns_leak::system_resolve,
             retry: Duration::from_secs(2),
@@ -63,6 +63,50 @@ impl Config {
             route_override: None,
         }
     }
+}
+
+/// Where diagnostics are sent. A debug build may point them at a local fake for acceptance:
+/// `http://127.0.0.1:<port><path>` or `http://localhost:<port><path>`; anything else (https,
+/// another host, junk, nothing) is production.
+#[cfg(debug_assertions)]
+pub(crate) fn diag_target(over: Option<&str>) -> cg_diag::upload::Target {
+    over.and_then(loopback_target)
+        .unwrap_or_else(cg_diag::upload::Target::production)
+}
+
+/// A release build always sends to production: no override is read, and its name is not in the DLL.
+#[cfg(not(debug_assertions))]
+pub(crate) fn diag_target(_over: Option<&str>) -> cg_diag::upload::Target {
+    cg_diag::upload::Target::production()
+}
+
+/// The debug build's override, `CELLGLIDE_DIAG_TARGET`.
+#[cfg(debug_assertions)]
+fn diag_override() -> Option<String> {
+    std::env::var("CELLGLIDE_DIAG_TARGET").ok()
+}
+
+/// A release build reads nothing: the variable's name stays out of the DLL.
+#[cfg(not(debug_assertions))]
+fn diag_override() -> Option<String> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn loopback_target(url: &str) -> Option<cg_diag::upload::Target> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = rest.split_at(rest.find('/')?);
+    let (host, port) = authority.split_once(':')?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some(cg_diag::upload::Target {
+        host: host.to_string(),
+        port,
+        tls: false,
+        path: path.to_string(),
+    })
 }
 
 /// The app's language from a tag such as `zh-CN`; empty for the system's.
@@ -490,6 +534,37 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn diag_override_accepts_only_loopback_http() {
+        use cg_diag::upload::Target;
+        let local = diag_target(Some("http://127.0.0.1:18080/v1/reports"));
+        assert_eq!(
+            (
+                local.host.as_str(),
+                local.port,
+                local.tls,
+                local.path.as_str()
+            ),
+            ("127.0.0.1", 18080, false, "/v1/reports")
+        );
+        assert_eq!(diag_target(Some("http://localhost:9/x")).host, "localhost");
+        for other in [
+            None,
+            Some("https://127.0.0.1:1/x"),
+            Some("http://diag.cellglide.com/v1/reports"),
+            Some("http://10.0.0.1:80/x"),
+            Some("junk"),
+            Some("http://127.0.0.1/x"),
+            Some("http://127.0.0.1:0/x"),
+            Some("http://127.0.0.1:18080"),
+            Some("http://127.0.0.1.evil.com:80/x"),
+            Some("http://user@127.0.0.1:80/x"),
+        ] {
+            assert_eq!(diag_target(other), Target::production(), "{other:?}");
+        }
+    }
 
     #[test]
     fn panic_messages_are_kept() {

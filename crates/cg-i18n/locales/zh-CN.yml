@@ -169,6 +169,8 @@ diag:
   failed_gui: "发送失败，请稍后再试，或用「保存到文件」把文件发给我们。"
   save: "保存到文件"
   open_folder: "打开所在文件夹"
+  save_as: "另存为…"
+  file_type: "诊断文件（JSON）"
   save_failed: "无法保存：%{reason}"
   no_home: "找不到个人文件夹"
 leak:

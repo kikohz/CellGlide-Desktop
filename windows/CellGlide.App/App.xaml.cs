@@ -51,6 +51,10 @@ public partial class App : Application
 
     public LeakViewModel Leak { get; private set; } = null!;
 
+    public HistoryViewModel History { get; private set; } = null!;
+
+    public DiagnosticsViewModel Diagnostics { get; private set; } = null!;
+
     /// <summary>Set once quitting has begun: windows close for real, nothing opens any more.</summary>
     public bool IsQuitting { get; private set; }
 
@@ -76,6 +80,8 @@ public partial class App : Application
         Settings = new SettingsViewModel(Hub);
         Speed = new SpeedViewModel(Hub, Settings) { Caps = _options.SpeedCaps };
         Leak = new LeakViewModel(Hub);
+        History = new HistoryViewModel(Hub);
+        Diagnostics = new DiagnosticsViewModel(Hub);
         _lifetime = new AppLifetime(Hub, core, Speed, Leak);
 
         Hub.PhonePlugged += OnPhonePlugged;

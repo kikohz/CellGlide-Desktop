@@ -302,25 +302,98 @@ public class ViewModelTests
         Assert.Equal("cellglide.json", diagnostics.FileName);
         Assert.True(diagnostics.SendCommand.CanExecute(null));
 
-        core.Next = new ReplyOk(new SentValue("R-123"));
-        await diagnostics.SendCommand.ExecuteAsync(null);
-        Assert.Equal(new DiagnosticsSendCommand("{}"), core.Sent[1]);
-        Assert.Equal("R-123", diagnostics.Code);
-
         core.Next = new ReplyOk(new SavedValue(@"C:\Users\me\Downloads\cellglide.json"));
         await diagnostics.SaveCommand.ExecuteAsync(null);
-        Assert.Equal(new DiagnosticsSaveCommand("{}", null, false), core.Sent[2]);
+        Assert.Equal(new DiagnosticsSaveCommand("{}", null, false), core.Sent[1]);
         Assert.Equal(@"C:\Users\me\Downloads\cellglide.json", diagnostics.SavedPath);
 
         // A file the user chose and confirmed replacing in the save dialog.
         core.Next = new ReplyOk(new SavedValue(@"D:\report.json"));
         await diagnostics.SaveCommand.ExecuteAsync(new DiagnosticsSaveTarget(@"D:\report.json", true));
-        Assert.Equal(new DiagnosticsSaveCommand("{}", @"D:\report.json", true), core.Sent[3]);
+        Assert.Equal(new DiagnosticsSaveCommand("{}", @"D:\report.json", true), core.Sent[2]);
         Assert.Equal(@"D:\report.json", diagnostics.SavedPath);
 
+        // A failed send keeps the bundle, so the same bytes can be sent again.
         core.Next = new ReplyErr("no network");
         await diagnostics.SendCommand.ExecuteAsync(null);
         Assert.Equal("no network", diagnostics.Error);
+        Assert.Equal("{}", diagnostics.Json);
+
+        core.Next = new ReplyOk(new SentValue("R-123"));
+        await diagnostics.SendCommand.ExecuteAsync(null);
+        Assert.Equal(new DiagnosticsSendCommand("{}"), core.Sent[4]);
+        Assert.Equal("R-123", diagnostics.Code);
+        // A sent bundle is done with: another report needs a new preview (cg-gui pages/diagnostics.rs).
+        Assert.Null(diagnostics.Json);
+        Assert.False(diagnostics.SendCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Changing_the_form_discards_the_previewed_bundle()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var diagnostics = new DiagnosticsViewModel(hub);
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        core.Next = new ReplyOk(new SavedValue(@"C:\d\cellglide.json"));
+        await diagnostics.SaveCommand.ExecuteAsync(null);
+        diagnostics.Discard();
+        Assert.Null(diagnostics.Json);
+        Assert.Null(diagnostics.FileName);
+        Assert.False(diagnostics.SendCommand.CanExecute(null));
+        Assert.False(diagnostics.SaveCommand.CanExecute(null));
+        // What was already saved stays saved, with its folder still one click away.
+        Assert.Equal(@"C:\d\cellglide.json", diagnostics.SavedPath);
+        Assert.Equal(2, core.Sent.Count);
+    }
+
+    [Fact]
+    public async Task Refresh_reloads_only_today()
+    {
+        var reply = Assert.IsType<ReplyEvent>(Samples.Event("reply_history_today.json"));
+        var (core, hub) = Fake(autoReply: reply.Result);
+        var history = new HistoryViewModel(hub);
+        await history.LoadCommand.ExecuteAsync(null);
+        await history.RefreshCommand.ExecuteAsync(null);
+        Assert.Equal(2, core.Sent.Count);
+        await history.LoadCommand.ExecuteAsync("2026-10-29");
+        await history.RefreshCommand.ExecuteAsync(null);
+        Assert.Equal(3, core.Sent.Count);
+        Assert.Equal("2026-10-29", history.RequestedDay);
+    }
+
+    [Fact]
+    public async Task Landing_on_the_newest_day_follows_today()
+    {
+        // The sample is 2026-10-30 with nothing after it: the service's today.
+        var reply = Assert.IsType<ReplyEvent>(Samples.Event("reply_history_today.json"));
+        var (core, hub) = Fake(autoReply: reply.Result);
+        var history = new HistoryViewModel(hub);
+        await history.LoadCommand.ExecuteAsync("2026-10-30");
+        Assert.Null(history.RequestedDay);
+        await history.RefreshCommand.ExecuteAsync(null);
+        Assert.Equal(new HistoryRequest(null), Assert.IsType<RequestCommand>(core.Sent[1]).Request);
+    }
+
+    [Fact]
+    public async Task History_refresh_waits_for_a_load_and_late_answers_are_dropped()
+    {
+        var (core, hub) = Fake();
+        var history = new HistoryViewModel(hub);
+        static HistoryView Day(string day, string? next) => new(day, day, null, next, [], [], [], []);
+        var today = history.LoadCommand.ExecuteAsync(null);
+        // A load is out: the refresh asks nothing.
+        await history.RefreshCommand.ExecuteAsync(null);
+        Assert.Single(core.Sent);
+        // The user pages back before today's answer came.
+        var older = history.LoadCommand.ExecuteAsync("2026-10-29");
+        core.Raise(new ReplyEvent(core.SentIds[1], new ReplyOk(new HistoryValue(Day("2026-10-29", "2026-10-30")))));
+        await older;
+        core.Raise(new ReplyEvent(core.SentIds[0], new ReplyOk(new HistoryValue(Day("2026-10-30", null)))));
+        await today;
+        Assert.Equal("2026-10-29", history.View?.Day);
+        Assert.Equal("2026-10-29", history.RequestedDay);
     }
 
     [Fact]
