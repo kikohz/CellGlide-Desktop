@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <RootNamespace>CellGlide.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+  </ItemGroup>
+
+  <!-- The Rust side: built by `cargo build -p cg-ffi`, copied next to whatever references this project.
+       Always, not PreserveNewest: switching between the debug and release DLL must not keep the newer one. -->
+  <ItemGroup>
+    <None Include="$(CellGlideNativeDll)" Link="cellglide_native.dll" CopyToOutputDirectory="Always" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="CheckCellGlideNative" BeforeTargets="BeforeBuild" Condition="!Exists('$(CellGlideNativeDll)')">
+    <Error Text="$(CellGlideNativeDll) is missing: run 'cargo build -p cg-ffi' first (or pass -p:CellGlideNativeDir=...)." />
+  </Target>
+
+</Project>
