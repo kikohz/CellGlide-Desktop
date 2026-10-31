@@ -549,6 +549,89 @@ async fn subscribing_twice_keeps_one_subscription() {
     rt.shutdown();
 }
 
+/// The position of the first event matching `pred`.
+fn position(events: &Collected, pred: impl Fn(&Event) -> bool) -> Option<usize> {
+    events.lock().unwrap().iter().position(pred)
+}
+
+#[tokio::test]
+async fn a_panicking_subscription_recovers_without_a_new_subscribe() {
+    let svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(connected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.connected),
+    )
+    .await;
+    events.lock().unwrap().clear();
+    cellglide_native::testing::panic_subscription_next(&rt);
+    // The next snapshot makes the subscription panic, as a bug in a view would.
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(&events, |e| matches!(e, Event::Fault { .. })).await;
+    // The stale "connected" page is replaced at once, then the service is followed again
+    // without the app asking.
+    let gone = wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    let Event::ServiceGone { text, .. } = gone else {
+        unreachable!()
+    };
+    assert!(text.contains("panic"), "{text}");
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if !view.connected),
+    )
+    .await;
+    let fault = position(&events, |e| matches!(e, Event::Fault { .. })).unwrap();
+    let gone = position(&events, |e| matches!(e, Event::ServiceGone { .. })).unwrap();
+    let state = position(&events, |e| matches!(e, Event::State { .. })).unwrap();
+    assert!(
+        fault < gone && gone < state,
+        "{:#?}",
+        events.lock().unwrap()
+    );
+    // Toggle acts on the new snapshot; the phone that was there all along wasn't plugged in.
+    let id = rt.send(Command::Toggle);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::PhonePlugged { .. })),
+        0
+    );
+    // Once the service stops, the app hears of it again.
+    let mut svc = svc;
+    svc.stop().await;
+    wait_for(
+        &events,
+        |e| matches!(e, Event::ServiceGone { text, .. } if !text.contains("panic")),
+    )
+    .await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn a_panicking_speed_page_follows_again() {
+    let svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(connected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
+    )
+    .await;
+    cellglide_native::testing::panic_speed_watch_next(&rt);
+    wait_for(&events, |e| matches!(e, Event::Fault { .. })).await;
+    events.lock().unwrap().clear();
+    // The phone goes: the page still follows, with no new Subscribe.
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if !view.start_enabled),
+    )
+    .await;
+    rt.shutdown();
+}
+
 #[tokio::test]
 async fn toggle_follows_the_wish() {
     let svc = FakeService::start(Replies::default()).await;

@@ -15,6 +15,22 @@ mod shape;
 /// The serial of the iPhone in [`connected_snapshot`] and [`disconnected_snapshot`].
 pub const SERIAL: &str = "00008140-000000000000002C";
 
+/// The subscription panics on the next update it takes, as a bug in a view would.
+pub fn panic_subscription_next(runtime: &crate::runtime::Runtime) {
+    let shared = &runtime.context().shared;
+    shared
+        .panic_next
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The speed page's watch panics the next time it wakes up.
+pub fn panic_speed_watch_next(runtime: &crate::runtime::Runtime) {
+    let speed = &runtime.context().speed;
+    speed
+        .panic_next
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Events delivered by calling `sink` right away on the emitting thread.
 pub fn events_into(sink: Box<dyn Fn(Event) + Send>) -> Events {
     Events::direct(sink)

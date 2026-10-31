@@ -3,7 +3,9 @@
 //! when it is back), and [`Event::PhonePlugged`] when an iPhone is plugged in. Every
 //! `Config::tick` the view is worked out again at the current time and sent if it changed, so
 //! the durations in the health line move; after `SetLang` the last `State` or `ServiceGone` is
-//! said again at once in the new language. `Command::Toggle` acts on the last snapshot.
+//! said again at once in the new language. `Command::Toggle` acts on the last snapshot. A panic
+//! while following is an [`Event::Fault`] followed by a `ServiceGone` (`reason.internal`), and
+//! after `Config::retry` the service is followed again: the app never has to subscribe again.
 
 use crate::api::{Event, ReplyResult};
 use crate::runtime::{Context, panic_message};
@@ -12,7 +14,7 @@ use cg_i18n::tr;
 use cg_ipc::client::{self, Update};
 use cg_ipc::describe::{
     self,
-    ui::{self, KnownDevices, ServiceDown},
+    ui::{self, DownReason, KnownDevices, ServiceDown},
 };
 use cg_ipc::{Endpoint, Snapshot};
 use futures::FutureExt;
@@ -37,8 +39,8 @@ pub(crate) struct Shared {
     /// The snapshot, the language or the preferences changed: the speed and leak pages look
     /// again.
     pub(crate) pages: Notify,
-    /// Tests: the subscription panics on its next update.
-    #[cfg(test)]
+    /// Tests only (`testing::panic_subscription_next`): the subscription panics on its next
+    /// update, as a bug in a view would.
     pub(crate) panic_next: AtomicBool,
 }
 
@@ -79,35 +81,42 @@ pub(crate) fn subscribe(context: &Context) -> ReplyResult {
     let context = context.clone();
     tokio::spawn(async move {
         let cancel = context.cancel.clone();
-        let run = AssertUnwindSafe(follow(&context)).catch_unwind();
-        let ended = tokio::select! {
-            () = cancel.cancelled() => None,
-            ended = run => Some(ended),
-        };
+        let mut follower = Follower::new(context.shared.clone());
+        loop {
+            let run = AssertUnwindSafe(follow(&context, &mut follower)).catch_unwind();
+            let ended = tokio::select! {
+                () = cancel.cancelled() => None,
+                ended = run => Some(ended),
+            };
+            let Some(Err(payload)) = ended else { break };
+            // A panic: the app hears of it, the page it shows stops claiming the last state
+            // (the snapshot is dropped first, so `Toggle` doesn't act on it either), and the
+            // service is followed again after `retry`, without the app subscribing again.
+            let message = panic_message(&*payload);
+            let gone = follower.crashed(message.clone());
+            context.events.emit(Event::Fault { message });
+            context.events.emit(gone);
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(context.config.retry) => {}
+            }
+        }
         // The snapshot no longer holds once nothing follows the service: `Toggle` must not act
-        // on it. Cleared before the app hears of a panic, so whatever it sends next sees that.
+        // on it.
         context.shared.keep(None);
         context.shared.subscribed.store(false, Ordering::SeqCst);
-        // A panic ends this subscription only: the app hears of it and may subscribe again.
-        if let Some(Err(payload)) = ended {
-            context.events.emit(Event::Fault {
-                message: panic_message(&*payload),
-            });
-        }
     });
     ReplyResult::done()
 }
 
-async fn follow(context: &Context) {
+async fn follow(context: &Context, follower: &mut Follower) {
     let config = &context.config;
     let mut updates = client::watch(config.endpoint.clone(), config.retry);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + config.tick, config.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut follower = Follower::new(context.shared.clone());
     loop {
         let events = tokio::select! {
             update = updates.recv() => {
-                #[cfg(test)]
                 if context.shared.panic_next.swap(false, Ordering::SeqCst) {
                     panic!("a test asked the subscription to panic");
                 }
@@ -190,6 +199,18 @@ impl Follower {
         vec![event]
     }
 
+    /// Following the service panicked (`detail` says how): no snapshot holds any more, and
+    /// `ServiceGone` says so until it is followed again. The iPhones seen so far are kept, so
+    /// the ones still there aren't taken for plugged in.
+    fn crashed(&mut self, detail: String) -> Event {
+        self.shared.keep(None);
+        self.view = None;
+        let down = ServiceDown::new(DownReason::Internal { detail });
+        let event = gone(&down);
+        self.down = Some(down);
+        event
+    }
+
     fn tick(&mut self, now: Timestamp, tz: &TimeZone) -> Vec<Event> {
         let Some(snapshot) = self.shared.snapshot() else {
             return Vec::new();
@@ -245,7 +266,6 @@ pub(crate) async fn toggle(endpoint: &Endpoint, shared: &Shared) -> ReplyResult 
 mod tests {
     use super::*;
     use crate::testing::{connected_snapshot, disconnected_snapshot};
-    use cg_ipc::describe::ui::DownReason;
     use cg_ipc::health::IssueCause;
     use cg_ipc::{Check, CheckId};
     use std::time::Duration;
@@ -473,7 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn a_panicking_subscription_is_a_fault_and_can_be_started_again() {
+    fn a_panicking_subscription_is_a_fault_then_follows_again_by_itself() {
+        let _g = cg_i18n::lock_for_tests();
         let (rt, events, _dir) = offline_runtime();
         let shared = rt.shared();
         // A snapshot from before (as if the service had been there): the panic drops it.
@@ -482,26 +503,33 @@ mod tests {
         rt.send(crate::api::Command::Subscribe);
         wait_until(&events, |e| {
             e.iter()
-                .any(|e| matches!(e, Event::Fault { message } if message.contains("panic")))
+                .any(|e| matches!(e, Event::ServiceGone { text, .. } if text.contains("panic")))
         });
-        wait_until(&events, |_| !shared.subscribed.load(Ordering::SeqCst));
         assert_eq!(
             shared.snapshot(),
             None,
             "a panicked subscription keeps no snapshot"
         );
-        assert!(
-            !events
-                .lock()
-                .unwrap()
+        {
+            let events = events.lock().unwrap();
+            let said: Vec<&Event> = events
                 .iter()
-                .any(|e| matches!(e, Event::ServiceGone { .. }))
-        );
-        rt.send(crate::api::Command::Subscribe);
-        wait_until(&events, |e| {
-            e.iter().any(|e| matches!(e, Event::ServiceGone { .. }))
-        });
+                .filter(|e| matches!(e, Event::Fault { .. } | Event::ServiceGone { .. }))
+                .collect();
+            assert!(
+                matches!(&said[..2], [Event::Fault { message }, Event::ServiceGone { text, .. }]
+                    if message.contains("panic")
+                        && *text == tr("reason.internal", &[("detail", message)])),
+                "{events:#?}"
+            );
+        }
+        // Still subscribed: after `retry` the (missing) service is followed again, and the
+        // real reason is said.
         assert!(shared.subscribed.load(Ordering::SeqCst));
+        wait_until(&events, |e| {
+            e.iter()
+                .any(|e| matches!(e, Event::ServiceGone { text, .. } if !text.contains("panic")))
+        });
         rt.shutdown();
     }
 }

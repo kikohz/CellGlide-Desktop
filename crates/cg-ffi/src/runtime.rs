@@ -290,6 +290,11 @@ impl Runtime {
         self.context.shared.clone()
     }
 
+    /// What every command's handler is given.
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
     /// The switch that stops delivery to `sink`, even what is already queued; it keeps working
     /// after the runtime itself has been handed elsewhere.
     pub(crate) fn gate(&self) -> EventGate {

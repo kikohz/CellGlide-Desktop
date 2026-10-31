@@ -158,6 +158,9 @@ pub enum DownReason {
     VersionMismatch { service: String },
     /// It couldn't be reached; the doctor's service check says why.
     Unreachable { check: Check },
+    /// What follows the service failed on our side (`detail` is the developer's words); it
+    /// starts over by itself.
+    Internal { detail: String },
 }
 
 impl DownReason {
@@ -172,6 +175,7 @@ impl DownReason {
             DownReason::Unreachable { check } => describe::checks(std::slice::from_ref(check))
                 .trim_end()
                 .into(),
+            DownReason::Internal { detail } => tr("reason.internal", &[("detail", detail)]),
         }
     }
 

@@ -36,6 +36,9 @@ pub(crate) struct Speed {
     state: Mutex<State>,
     /// The page follows the uplink, the snapshot, the preferences and the language.
     watching: AtomicBool,
+    /// Tests only (`testing::panic_speed_watch_next`): the page's watch panics when it next
+    /// wakes up.
+    pub(crate) panic_next: AtomicBool,
 }
 
 #[derive(Default)]
@@ -102,7 +105,8 @@ async fn uplink(context: &Context) -> Option<String> {
 }
 
 /// After `Subscribe`: sends the page now, then whenever something it shows changes. Once per
-/// runtime; it ends with the runtime.
+/// runtime; it ends with the runtime. A panic is a `Fault`, and after `Config::retry` the page
+/// is followed again by itself (`Subscribe` doesn't start it twice).
 pub(crate) fn watch(context: &Context) {
     if context.speed.watching.swap(true, Ordering::SeqCst) {
         return;
@@ -110,15 +114,20 @@ pub(crate) fn watch(context: &Context) {
     let context = context.clone();
     tokio::spawn(async move {
         let cancel = context.cancel.clone();
-        let run = AssertUnwindSafe(follow(&context)).catch_unwind();
-        let ended = tokio::select! {
-            () = cancel.cancelled() => None,
-            ended = run => Some(ended),
-        };
-        if let Some(Err(payload)) = ended {
+        loop {
+            let run = AssertUnwindSafe(follow(&context)).catch_unwind();
+            let ended = tokio::select! {
+                () = cancel.cancelled() => None,
+                ended = run => Some(ended),
+            };
+            let Some(Err(payload)) = ended else { break };
             context.events.emit(Event::Fault {
                 message: panic_message(&*payload),
             });
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(context.config.retry) => {}
+            }
         }
         context.speed.watching.store(false, Ordering::SeqCst);
     });
@@ -135,6 +144,9 @@ async fn follow(context: &Context) {
             }
             () = context.shared.pages.notified() => None,
         };
+        if context.speed.panic_next.swap(false, Ordering::SeqCst) {
+            panic!("a test asked the speed page's watch to panic");
+        }
         {
             let mut state = context.speed.lock();
             if let Some(found) = looked_up
