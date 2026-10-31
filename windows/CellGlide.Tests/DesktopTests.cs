@@ -357,6 +357,42 @@ public class DesktopTests
     }
 
     [Fact]
+    public void Tray_menu_is_rebuilt_only_when_its_items_change()
+    {
+        // Each read of a sample is a new list with new records, as each state event is.
+        var connected = Samples.Overview().Chrome.Menu;
+        Assert.True(TrayMenu.Same(connected, Samples.Overview().Chrome.Menu));
+        Assert.False(TrayMenu.Same(connected, Samples.Chrome().Menu));            // Disconnect -> Connect
+        Assert.False(TrayMenu.Same(null, connected));                             // nothing built yet
+        Assert.False(TrayMenu.Same(connected, null));
+        var disabled = connected.Select(i => i.Kind == MenuKind.Toggle ? i with { Enabled = false } : i).ToList();
+        Assert.False(TrayMenu.Same(connected, disabled));
+        Assert.False(TrayMenu.Same(connected, connected.Take(5).ToList()));
+        Assert.False(TrayMenu.Same(connected, connected.Reverse().ToList()));
+    }
+
+    [Fact]
+    public void The_click_that_took_the_activation_does_not_reopen_the_panel()
+    {
+        var t0 = TimeSpan.FromSeconds(100);
+        var guard = new ReopenGuard();
+        // Nothing closed it: a click opens.
+        Assert.True(guard.AllowsOpen(t0));
+        // Closed on losing activation; the click 200 ms later is the one that took it.
+        guard.ClosedOnDeactivation(t0);
+        Assert.False(guard.AllowsOpen(t0 + TimeSpan.FromMilliseconds(200)));
+        // The guard is used up: the next click opens.
+        Assert.True(guard.AllowsOpen(t0 + TimeSpan.FromMilliseconds(250)));
+        // A click well after the close opens.
+        guard.ClosedOnDeactivation(t0);
+        Assert.True(guard.AllowsOpen(t0 + TimeSpan.FromMilliseconds(400)));
+        // Exactly at the limit counts as after it.
+        guard.ClosedOnDeactivation(t0);
+        Assert.True(guard.AllowsOpen(t0 + ReopenGuard.Default));
+        Assert.Equal(TimeSpan.FromMilliseconds(300), ReopenGuard.Default);
+    }
+
+    [Fact]
     public void Tray_guid_is_stable_per_path()
     {
         var a = TrayIdentity.GuidFor(@"C:\Program Files\CellGlide\app\CellGlide.exe");

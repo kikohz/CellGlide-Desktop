@@ -18,6 +18,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <Ellipse Width="10" Height="10" Margin="0,4,0,0" VerticalAlignment="Top"
+                             AutomationProperties.AccessibilityView="Raw"
                              Fill="{x:Bind StatusBrush(Shell.Overview), Mode=OneWay}" />
                     <StackPanel Grid.Column="1" Spacing="2">
                         <TextBlock FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap"
@@ -43,6 +44,7 @@
                 <Button x:Name="HealthButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
                         Padding="0,2,0,2" Background="Transparent" BorderThickness="0"
                         Visibility="{x:Bind HealthVisible(Shell.Overview), Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind HealthLine(Shell.Overview), Mode=OneWay}"
                         Click="OnHealthClick">
                     <Grid ColumnSpacing="6">
                         <Grid.ColumnDefinitions>
@@ -50,11 +52,11 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <Ellipse Width="8" Height="8" VerticalAlignment="Center"
+                        <Ellipse Width="8" Height="8" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
                                  Fill="{x:Bind HealthBrush(Shell.Overview), Mode=OneWay}" />
                         <TextBlock Grid.Column="1" FontSize="13" TextWrapping="Wrap" VerticalAlignment="Center"
                                    Text="{x:Bind HealthLine(Shell.Overview), Mode=OneWay}" />
-                        <FontIcon Grid.Column="2" FontSize="10" Glyph="&#xE76C;" VerticalAlignment="Center"
+                        <FontIcon Grid.Column="2" FontSize="10" Glyph="&#xE76C;" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </Grid>
                 </Button>

@@ -69,6 +69,7 @@ public partial class App : Application
             Exit();
             return;
         }
+        Show.Watch(queue);
         Hub = new EventHub(core, new DispatcherQueueDispatcher(queue));
         L.Hub = Hub;
         Shell = new ShellViewModel(Hub);

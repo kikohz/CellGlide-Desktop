@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CellGlide.App.Hosting;
 using CellGlide.App.Shell;
@@ -27,13 +26,12 @@ public sealed partial class PanelWindow : Window
     const int WidthDips = 340;
     const int HeightDips = 460;
     const int MarginDips = 12;
-    static readonly TimeSpan ReopenGuard = TimeSpan.FromMilliseconds(300);
 
     readonly Guid _trayId;
     readonly Action<Section?> _openWindow;
     readonly Func<Task> _quit;
+    readonly ReopenGuard _reopenGuard = new();
     bool _isOpen;
-    long? _hidOnDeactivationAt;
 
     /// <param name="trayId">The tray icon's GUID, to ask the shell where it is.</param>
     /// <param name="openWindow">Opens the main window (at a section, or where it was).</param>
@@ -59,6 +57,8 @@ public sealed partial class PanelWindow : Window
 
         Activated += OnActivated;
         AppWindow.Closing += OnClosing;
+        // The dots' brushes follow a switch to or from high contrast.
+        Show.Changed += () => Bindings.Update();
     }
 
     public ShellViewModel Shell { get; }
@@ -77,9 +77,7 @@ public sealed partial class PanelWindow : Window
             Dismiss();
             return;
         }
-        var guarded = _hidOnDeactivationAt is { } at && Stopwatch.GetElapsedTime(at) < ReopenGuard;
-        _hidOnDeactivationAt = null;
-        if (!guarded)
+        if (_reopenGuard.AllowsOpen(Now()))
         {
             Open();
         }
@@ -119,9 +117,11 @@ public sealed partial class PanelWindow : Window
         if (args.WindowActivationState == WindowActivationState.Deactivated && _isOpen)
         {
             Dismiss();
-            _hidOnDeactivationAt = Stopwatch.GetTimestamp();
+            _reopenGuard.ClosedOnDeactivation(Now());
         }
     }
+
+    static TimeSpan Now() => TimeSpan.FromMilliseconds(Environment.TickCount64);
 
     void OnClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {

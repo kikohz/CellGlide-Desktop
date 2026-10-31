@@ -35,7 +35,8 @@
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="DownText" VerticalAlignment="Center" />
             <TextBlock x:Name="UpText" Grid.Column="1" VerticalAlignment="Center" />
-            <c:TrailChart x:Name="Trail" Grid.Column="3" VerticalAlignment="Center" />
+            <!-- A picture of the speeds next to it; the numbers are the readable part. -->
+            <c:TrailChart x:Name="Trail" Grid.Column="3" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw" />
         </Grid>
 
         <Rectangle x:Name="QualityRule" Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />

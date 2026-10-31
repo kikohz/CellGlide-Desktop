@@ -29,6 +29,9 @@ public sealed partial class PhoneCard : UserControl
         InitializeComponent();
         _secondary = BatteryText.Foreground;
         Apply();
+        // The tone brushes follow a switch to or from high contrast while the card is shown.
+        Loaded += (_, _) => Show.Changed += Apply;
+        Unloaded += (_, _) => Show.Changed -= Apply;
     }
 
     public PhoneCardView? View

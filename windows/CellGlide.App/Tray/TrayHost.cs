@@ -71,6 +71,10 @@ sealed class TrayHost : IDisposable
         shell.PropertyChanged += OnShellChanged;
         // Raised on a background thread when the Windows mode (light or dark) changes.
         _settings.ColorValuesChanged += OnColorValuesChanged;
+        // The icon's frame follows the scale of the monitor it is on: its message window gets
+        // WM_DPICHANGED when that scale changes, and a restarted taskbar may sit elsewhere.
+        _icon.TrayIcon.MessageWindow.DpiChanged += OnPlacementChanged;
+        _icon.TrayIcon.MessageWindow.TaskbarCreated += OnPlacementChanged;
     }
 
     /// <summary>The icon's GUID; the panel asks the shell where this icon is.</summary>
@@ -89,6 +93,8 @@ sealed class TrayHost : IDisposable
         _disposed = true;
         _shell.PropertyChanged -= OnShellChanged;
         _settings.ColorValuesChanged -= OnColorValuesChanged;
+        _icon.TrayIcon.MessageWindow.DpiChanged -= OnPlacementChanged;
+        _icon.TrayIcon.MessageWindow.TaskbarCreated -= OnPlacementChanged;
         _icon.Dispose();
     }
 
@@ -102,7 +108,13 @@ sealed class TrayHost : IDisposable
 
     void OnColorValuesChanged(UISettings sender, object args) => Post(Update);
 
-    /// <summary>Shows the current chrome: icon file, tooltip, menu.</summary>
+    void OnPlacementChanged(object? sender, EventArgs e) => Post(Update);
+
+    /// <summary>
+    /// Shows the current chrome: icon file, tooltip, menu. The taskbar's mode and the icon's size are
+    /// read again every time (also on each state event), so they are never stale for long even if a
+    /// change notification is missed; the menu is rebuilt only when its items differ.
+    /// </summary>
     void Update()
     {
         if (_disposed)
@@ -125,7 +137,7 @@ sealed class TrayHost : IDisposable
             // The shell lost the icon (Explorer restarting); it is added again with these values.
             Debug.WriteLine("CellGlide: updating the tray icon failed: " + e.Message);
         }
-        if (chrome is not null && !ReferenceEquals(chrome.Menu, _menuShown))
+        if (chrome is not null && !TrayMenu.Same(_menuShown, chrome.Menu))
         {
             BuildMenu(chrome.Menu);
         }
@@ -134,7 +146,7 @@ sealed class TrayHost : IDisposable
     void UpdateIcon(TrayLook look)
     {
         var file = TrayIcons.FileFor(look, TrayNative.LightTaskbar());
-        var size = TrayNative.SmallIconSize();
+        var size = TrayNative.TrayIconSize(TrayNative.IconRect(Id));
         if (file == _iconFile && size == _iconSize)
         {
             return;

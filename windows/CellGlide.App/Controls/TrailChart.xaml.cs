@@ -25,6 +25,8 @@ public sealed partial class TrailChart : UserControl
     {
         InitializeComponent();
         SizeChanged += (_, _) => Redraw();
+        Loaded += (_, _) => Show.Changed += Redraw;
+        Unloaded += (_, _) => Show.Changed -= Redraw;
     }
 
     /// <summary>The trail's runs (<see cref="PhoneCardView.Trail"/>), x and values 0–1.</summary>

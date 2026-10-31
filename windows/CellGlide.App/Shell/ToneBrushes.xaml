@@ -3,7 +3,9 @@
     The DLL's tones (cg_ipc::describe::ui::Tone) as brushes, with the RGB of cg-gui's
     widgets/kit.rs (the Mac's system colours), so dots and badges read the same on every platform.
     Light and Dark use the same colours; High Contrast uses the system's text colour, so a dot is
-    never a colour the user's contrast theme does not allow. Show.Brush(Tone) looks them up.
+    never a colour the user's contrast theme does not allow (for XAML that uses them as ThemeResource).
+    Show.Brush(Tone) takes Light/Dark from here; under high contrast it reads the system's current
+    text colours itself, and Show.Changed has painters repaint when the theme or contrast changes.
 -->
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

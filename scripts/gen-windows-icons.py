@@ -113,12 +113,17 @@ STATES = {
 }
 
 
+# Squares are products, never `** 2`: CPython's float power goes through the platform's pow(),
+# which is not required to round correctly; * is IEEE-exact everywhere.
+
+
 def in_round_rect(x, y, x0, y0, x1, y1, r):
     if x < x0 or x > x1 or y < y0 or y > y1:
         return False
     cx = min(max(x, x0 + r), x1 - r)
     cy = min(max(y, y0 + r), y1 - r)
-    return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+    dx, dy = x - cx, y - cy
+    return dx * dx + dy * dy <= r * r
 
 
 def in_rect(x, y, x0, y0, x1, y1):
@@ -145,7 +150,8 @@ def in_phone(x, y, arcs):
 
 
 def in_dot(x, y):
-    return (x - 12.5) ** 2 + (y - 3.5) ** 2 <= 9
+    dx, dy = x - 12.5, y - 3.5
+    return dx * dx + dy * dy <= 9
 
 
 def tray_frame(size, ink, arcs, dot):

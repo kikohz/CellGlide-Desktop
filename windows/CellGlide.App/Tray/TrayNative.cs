@@ -70,8 +70,30 @@ static unsafe partial class TrayNative
     /// <summary>Physical pixels of <paramref name="dips"/> at <paramref name="dpi"/>.</summary>
     public static int Scale(int dips, uint dpi) => (int)Math.Round(dips * dpi / 96.0);
 
-    /// <summary>The size of a small icon (the tray's) at the system DPI, in pixels.</summary>
-    public static int SmallIconSize() => GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) is > 0 and var size ? size : 16;
+    /// <summary>
+    /// The size of a small icon (the tray's), in pixels, at the current DPI of the monitor the icon is
+    /// on; before the shell has placed the icon, of the primary monitor (where the notification area
+    /// is). Read afresh each time, so a changed scale is picked up.
+    /// </summary>
+    public static int TrayIconSize(PixelRect? icon)
+    {
+        nint monitor;
+        if (icon is { } r)
+        {
+            var rect = new RECT { left = r.Left, top = r.Top, right = r.Right, bottom = r.Bottom };
+            monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+        }
+        else
+        {
+            monitor = MonitorFromPoint(default, MONITOR_DEFAULTTOPRIMARY);
+        }
+        uint dpiX, dpiY;
+        if (GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != 0 || dpiX == 0)
+        {
+            dpiX = 96;
+        }
+        return GetSystemMetricsForDpi(SM_CXSMICON, dpiX) is > 0 and var size ? size : 16;
+    }
 
     /// <summary>Whether the taskbar is light (Settings, Personalization, Colors: Windows mode light).</summary>
     public static bool LightTaskbar()
@@ -91,6 +113,7 @@ static unsafe partial class TrayNative
     const uint ABE_LEFT = 0;
     const uint ABE_TOP = 1;
     const uint ABE_RIGHT = 2;
+    const uint MONITOR_DEFAULTTOPRIMARY = 1;
     const uint MONITOR_DEFAULTTONEAREST = 2;
     const int MDT_EFFECTIVE_DPI = 0;
     const int SM_CXSMICON = 49;
@@ -158,9 +181,6 @@ static unsafe partial class TrayNative
 
     [LibraryImport("shcore.dll")]
     private static partial int GetDpiForMonitor(nint monitor, int dpiType, uint* dpiX, uint* dpiY);
-
-    [LibraryImport("user32.dll")]
-    private static partial uint GetDpiForSystem();
 
     [LibraryImport("user32.dll")]
     private static partial int GetSystemMetricsForDpi(int index, uint dpi);
