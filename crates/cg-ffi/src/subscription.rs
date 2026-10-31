@@ -6,6 +6,9 @@
 //! said again at once in the new language. `Command::Toggle` acts on the last snapshot. A panic
 //! while following is an [`Event::Fault`] followed by a `ServiceGone` (`reason.internal`), and
 //! after `Config::retry` the service is followed again: the app never has to subscribe again.
+//! A panic that keeps happening is said once: `Fault` only when its message differs from the
+//! last panic's, `ServiceGone` only when the reason changed, until a `State` has been sent
+//! again.
 
 use crate::api::{Event, ReplyResult};
 use crate::runtime::{Context, panic_message};
@@ -39,9 +42,10 @@ pub(crate) struct Shared {
     /// The snapshot, the language or the preferences changed: the speed and leak pages look
     /// again.
     pub(crate) pages: Notify,
-    /// Tests only (`testing::panic_subscription_next`): the subscription panics on its next
-    /// update, as a bug in a view would.
-    pub(crate) panic_next: AtomicBool,
+    /// Tests only (`testing::panic_subscription`): the subscription panics on each of this many
+    /// next updates, as a bug in a view would.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) panic_left: std::sync::atomic::AtomicU32,
 }
 
 impl Shared {
@@ -82,6 +86,9 @@ pub(crate) fn subscribe(context: &Context) -> ReplyResult {
     tokio::spawn(async move {
         let cancel = context.cancel.clone();
         let mut follower = Follower::new(context.shared.clone());
+        // The last panic's message, until a `State` is sent again: the same panic again is not
+        // a new `Fault`.
+        let mut last_panic: Option<String> = None;
         loop {
             let run = AssertUnwindSafe(follow(&context, &mut follower)).catch_unwind();
             let ended = tokio::select! {
@@ -93,9 +100,17 @@ pub(crate) fn subscribe(context: &Context) -> ReplyResult {
             // (the snapshot is dropped first, so `Toggle` doesn't act on it either), and the
             // service is followed again after `retry`, without the app subscribing again.
             let message = panic_message(&*payload);
+            if std::mem::take(&mut follower.recovered) {
+                last_panic = None;
+            }
             let gone = follower.crashed(message.clone());
-            context.events.emit(Event::Fault { message });
-            context.events.emit(gone);
+            if last_panic.as_ref() != Some(&message) {
+                last_panic = Some(message.clone());
+                context.events.emit(Event::Fault { message });
+            }
+            if let Some(gone) = gone {
+                context.events.emit(gone);
+            }
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = tokio::time::sleep(context.config.retry) => {}
@@ -117,7 +132,13 @@ async fn follow(context: &Context, follower: &mut Follower) {
     loop {
         let events = tokio::select! {
             update = updates.recv() => {
-                if context.shared.panic_next.swap(false, Ordering::SeqCst) {
+                #[cfg(any(test, feature = "testing"))]
+                if context
+                    .shared
+                    .panic_left
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+                    .is_ok()
+                {
                     panic!("a test asked the subscription to panic");
                 }
                 match update {
@@ -156,6 +177,8 @@ struct Follower {
     /// phones already there don't count as plugged in. Kept while the service is away: when it
     /// comes back (often listing no iPhones at first), the ones it had are not plugged in again.
     known: Option<KnownDevices>,
+    /// A `State` was sent since the subscription loop last looked: a panic after it is news.
+    recovered: bool,
 }
 
 impl Follower {
@@ -165,6 +188,7 @@ impl Follower {
             view: None,
             down: None,
             known: None,
+            recovered: false,
         }
     }
 
@@ -175,9 +199,11 @@ impl Follower {
         tz: &TimeZone,
         instant: Instant,
     ) -> Vec<Event> {
-        self.down = None;
         let plugged = ui::plugged_serial(&mut self.known, &snapshot.devices, instant);
         let view = views::overview(&snapshot, now, tz);
+        // Only now that the view is made: a view that panics leaves the reason said before
+        // (the panic's) in place, so the same panic again isn't said again.
+        self.down = None;
         self.shared.keep(Some(snapshot));
         let mut events: Vec<Event> = self.show(view).into_iter().collect();
         events.extend(plugged.map(|serial| Event::PhonePlugged { serial }));
@@ -200,15 +226,23 @@ impl Follower {
     }
 
     /// Following the service panicked (`detail` says how): no snapshot holds any more, and
-    /// `ServiceGone` says so until it is followed again. The iPhones seen so far are kept, so
-    /// the ones still there aren't taken for plugged in.
-    fn crashed(&mut self, detail: String) -> Event {
+    /// `ServiceGone` says so until it is followed again; `None` when that is already the
+    /// reason last said (the same panic again, with no snapshot in between). The iPhones seen
+    /// so far are kept, so the ones still there aren't taken for plugged in.
+    fn crashed(&mut self, detail: String) -> Option<Event> {
         self.shared.keep(None);
         self.view = None;
         let down = ServiceDown::new(DownReason::Internal { detail });
+        if self
+            .down
+            .as_ref()
+            .is_some_and(|said| said.same_reason(&down))
+        {
+            return None;
+        }
         let event = gone(&down);
         self.down = Some(down);
-        event
+        Some(event)
     }
 
     fn tick(&mut self, now: Timestamp, tz: &TimeZone) -> Vec<Event> {
@@ -237,6 +271,7 @@ impl Follower {
             return None;
         }
         self.view = Some(view.clone());
+        self.recovered = true;
         Some(Event::State {
             view: Box::new(view),
         })
@@ -357,6 +392,25 @@ mod tests {
             ["gone"],
             "said again after a snapshot"
         );
+    }
+
+    #[test]
+    fn the_same_panic_again_is_not_said_again_until_a_state_was_sent() {
+        let _g = cg_i18n::lock_for_tests();
+        let mut f = Follower::new(Arc::default());
+        f.snapshot(connected_snapshot(), at(0), &TimeZone::UTC, Instant::now());
+        assert!(std::mem::take(&mut f.recovered), "a State was sent");
+        assert_eq!(
+            kinds(&f.crashed("boom".into()).into_iter().collect::<Vec<_>>()),
+            ["gone"]
+        );
+        assert!(f.crashed("boom".into()).is_none(), "the same panic again");
+        assert!(f.crashed("bang".into()).is_some(), "another panic");
+        assert!(!f.recovered);
+        // The service seen again: the next panic is said, even the same one.
+        f.snapshot(connected_snapshot(), at(1), &TimeZone::UTC, Instant::now());
+        assert!(f.recovered);
+        assert!(f.crashed("bang".into()).is_some());
     }
 
     #[test]
@@ -510,7 +564,7 @@ mod tests {
         let shared = rt.shared();
         // A snapshot from before (as if the service had been there): the panic drops it.
         shared.keep(Some(connected_snapshot()));
-        shared.panic_next.store(true, Ordering::SeqCst);
+        shared.panic_left.store(1, Ordering::SeqCst);
         rt.send(crate::api::Command::Subscribe);
         wait_until(&events, |e| {
             e.iter()

@@ -610,6 +610,7 @@ name = "cg-ffi"
 version = "1.0.0"
 dependencies = [
  "cg-diag",
+ "cg-ffi",
  "cg-i18n",
  "cg-ipc",
  "cg-tools",

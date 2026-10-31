@@ -8,9 +8,11 @@ use cg_ipc::describe::ui::CheckRow;
 use cg_tools::prefs::Prefs;
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "testing"))]
 mod samples;
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub use samples::{command_samples, event_samples};
 
 /// What the app asks for. `cg_send` answers each with a number; the result comes back as an

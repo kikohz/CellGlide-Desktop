@@ -1,4 +1,4 @@
-//! For this crate's tests only: events without a runtime, and the page tests' snapshots and day.
+//! For this crate's tests only (`cfg(test)` or the `testing` feature, never in the DLL): events without a runtime, and the page tests' snapshots and day.
 
 use crate::api::Event;
 use cg_ipc::health::{
@@ -15,12 +15,13 @@ mod shape;
 /// The serial of the iPhone in [`connected_snapshot`] and [`disconnected_snapshot`].
 pub const SERIAL: &str = "00008140-000000000000002C";
 
-/// The subscription panics on the next update it takes, as a bug in a view would.
-pub fn panic_subscription_next(runtime: &crate::runtime::Runtime) {
+/// The subscription panics on each of the next `times` updates it takes, as a bug in a view
+/// would.
+pub fn panic_subscription(runtime: &crate::runtime::Runtime, times: u32) {
     let shared = &runtime.context().shared;
     shared
-        .panic_next
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+        .panic_left
+        .store(times, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The speed page's watch panics the next time it wakes up.

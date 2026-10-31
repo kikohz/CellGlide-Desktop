@@ -80,6 +80,7 @@ enum Message {
     Stop,
 }
 
+#[cfg(any(test, feature = "testing"))]
 type Sink = Box<dyn Fn(Event) + Send + 'static>;
 
 /// Posts events to the event thread (or, for tests, straight to a sink).
@@ -90,6 +91,8 @@ pub struct Events(Delivery);
 enum Delivery {
     /// The event thread's queue, and how many events wait in it.
     Queue(mpsc::Sender<Message>, Arc<AtomicUsize>),
+    /// Tests only (`testing::events_into`): straight to a sink on the emitting thread.
+    #[cfg(any(test, feature = "testing"))]
     Direct(Arc<Mutex<Sink>>),
 }
 
@@ -103,6 +106,7 @@ impl Events {
                     queued.fetch_sub(1, Ordering::SeqCst);
                 }
             }
+            #[cfg(any(test, feature = "testing"))]
             Delivery::Direct(sink) => {
                 let sink = sink.lock().unwrap_or_else(PoisonError::into_inner);
                 sink(event);
@@ -111,6 +115,7 @@ impl Events {
     }
 
     /// Calls `sink` on the emitting thread; no event thread.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn direct(sink: Sink) -> Events {
         Events(Delivery::Direct(Arc::new(Mutex::new(sink))))
     }
@@ -294,7 +299,8 @@ impl Runtime {
         self.context.shared.clone()
     }
 
-    /// What every command's handler is given.
+    /// What every command's handler is given (for the test hooks).
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }

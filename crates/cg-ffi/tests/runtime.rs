@@ -640,7 +640,7 @@ async fn a_panicking_subscription_recovers_without_a_new_subscribe() {
     )
     .await;
     events.lock().unwrap().clear();
-    cellglide_native::testing::panic_subscription_next(&rt);
+    cellglide_native::testing::panic_subscription(&rt, 1);
     // The next snapshot makes the subscription panic, as a bug in a view would.
     svc.snapshots.send_replace(disconnected_snapshot());
     wait_for(&events, |e| matches!(e, Event::Fault { .. })).await;
@@ -679,6 +679,57 @@ async fn a_panicking_subscription_recovers_without_a_new_subscribe() {
         |e| matches!(e, Event::ServiceGone { text, .. } if !text.contains("panic")),
     )
     .await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn persistent_panic_says_fault_and_gone_once() {
+    let svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(connected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.connected),
+    )
+    .await;
+    events.lock().unwrap().clear();
+    // The next three updates panic: the first after this snapshot, then the first snapshot of
+    // each of the next two retries.
+    cellglide_native::testing::panic_subscription(&rt, 3);
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if !view.connected),
+    )
+    .await;
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::Fault { .. })),
+        1,
+        "{:#?}",
+        events.lock().unwrap()
+    );
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::ServiceGone { .. })),
+        1,
+        "{:#?}",
+        events.lock().unwrap()
+    );
+    events.lock().unwrap().clear();
+    // Once a State was sent, a panic is news again.
+    cellglide_native::testing::panic_subscription(&rt, 1);
+    svc.snapshots.send_replace(connected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.connected),
+    )
+    .await;
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::Fault { .. })),
+        1,
+        "{:#?}",
+        events.lock().unwrap()
+    );
     rt.shutdown();
 }
 

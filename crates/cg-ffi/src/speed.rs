@@ -38,6 +38,7 @@ pub(crate) struct Speed {
     watching: AtomicBool,
     /// Tests only (`testing::panic_speed_watch_next`): the page's watch panics when it next
     /// wakes up.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) panic_next: AtomicBool,
 }
 
@@ -144,6 +145,7 @@ async fn follow(context: &Context) {
             }
             () = context.shared.pages.notified() => None,
         };
+        #[cfg(any(test, feature = "testing"))]
         if context.speed.panic_next.swap(false, Ordering::SeqCst) {
             panic!("a test asked the speed page's watch to panic");
         }

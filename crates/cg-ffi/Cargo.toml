@@ -14,6 +14,10 @@ workspace = true
 name = "cellglide_native"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Hooks for this crate's own tests (`testing`): never in the DLL the app ships.
+testing = []
+
 [dependencies]
 cg-diag.workspace = true
 cg-i18n.workspace = true
@@ -30,6 +34,8 @@ tokio-util.workspace = true
 csbindgen.workspace = true
 
 [dev-dependencies]
+# The integration tests use the test hooks.
+cg-ffi = { path = ".", features = ["testing"] }
 cg-i18n = { workspace = true, features = ["testing"] }
 cg-tools = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true

@@ -355,13 +355,16 @@ impl KnownDevices {
     }
 }
 
-/// Whether the snapshot's `devices` has an iPhone that was plugged in, updating `known`.
-/// Without a previous list (first snapshot, service restarted) nothing was plugged in.
+/// Whether the snapshot's `devices` has an iPhone that was plugged in since the last call,
+/// updating `known`; [`plugged_serial`] says which one. With no list yet (`known` is `None`) the
+/// list starts from `devices` and nothing was plugged in. Whether a service restart starts the
+/// list over is the caller's choice: the Linux window sets `known` back to `None`, the Windows
+/// DLL keeps it, so the iPhones it saw before aren't plugged in again.
 pub fn plugged_in(known: &mut Option<KnownDevices>, devices: &[String], now: Instant) -> bool {
     plugged_serial(known, devices, now).is_some()
 }
 
-/// [`plugged_in`], naming the iPhone that was plugged in.
+/// [`plugged_in`], naming the iPhone that was plugged in (the first in `devices` order).
 pub fn plugged_serial(
     known: &mut Option<KnownDevices>,
     devices: &[String],

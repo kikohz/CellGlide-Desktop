@@ -121,6 +121,9 @@ pub async fn subscribe(endpoint: &Endpoint) -> Result<mpsc::Receiver<Snapshot>, 
 
 /// How long a reply may take before the window stops waiting.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a subscription may stay silent before [`watch`] asks the service whether it still
+/// holds. The service only sends a snapshot when something changed, so silence alone is normal.
+pub const SILENCE: Duration = Duration::from_secs(30);
 /// The diagnostics bundle reads the journal, which can take a while.
 pub const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -186,8 +189,11 @@ pub enum Update {
 /// The service's snapshots for as long as the receiver is kept: handshake, subscribe, and each
 /// snapshot as it comes. When the subscription can't start or ends, a `Down` says why, and
 /// after `retry` it starts over; a service that takes the connection but doesn't start the
-/// subscription within [`TIMEOUT`] is down too ([`DownReason::Timeout`]). Dropping the
-/// receiver ends it.
+/// subscription within [`TIMEOUT`] is down too ([`DownReason::Timeout`]). A subscription
+/// silent for [`SILENCE`] is checked with `Status` on a second connection: no answer within
+/// [`TIMEOUT`] is `Down(Timeout)` and a retry; a snapshot other than the last one heard means
+/// the subscription stopped hearing about changes, and it is replaced without a `Down`; the
+/// same snapshot means all is well, and nothing is sent. Dropping the receiver ends it.
 pub fn watch(endpoint: Endpoint, retry: Duration) -> mpsc::Receiver<Update> {
     let (tx, rx) = mpsc::channel(16);
     tokio::spawn(async move {
@@ -223,19 +229,11 @@ async fn start_watching(
 async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Update>) {
     loop {
         let down = match start_watching(endpoint).await {
-            Ok((first, mut updates)) => {
-                let mut snapshot = first;
-                loop {
-                    if tx.send(Update::Snapshot(Box::new(snapshot))).await.is_err() {
-                        return;
-                    }
-                    match updates.recv().await {
-                        Some(next) => snapshot = next,
-                        None => break,
-                    }
-                }
-                ServiceDown::new(DownReason::Gone)
-            }
+            Ok((first, updates)) => match follow(endpoint, first, updates, tx).await {
+                Ended::Unheard => return,
+                Ended::Stale => continue,
+                Ended::Down(down) => down,
+            },
             Err(problem) => problem,
         };
         if tx.send(Update::Down(down)).await.is_err() {
@@ -245,9 +243,79 @@ async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Upda
     }
 }
 
+/// How following one subscription ended.
+enum Ended {
+    /// Nobody listens to the watch any more.
+    Unheard,
+    /// The service has moved on without telling this subscription: subscribe again at once.
+    Stale,
+    /// No snapshots for now, and why.
+    Down(ServiceDown),
+}
+
+/// What a silent subscription turned out to be.
+enum Silence {
+    /// The service still has the snapshot it last sent: nothing changed.
+    Quiet,
+    /// The service has another snapshot than the one it last sent.
+    Stale,
+    /// The service didn't answer `Status` within [`TIMEOUT`], or not with a snapshot.
+    Hung,
+}
+
+/// Asks for the snapshot on a connection of its own and compares it with `last`, the last one
+/// the subscription sent.
+async fn probe(endpoint: &Endpoint, last: &Snapshot) -> Silence {
+    match tokio::time::timeout(TIMEOUT, request(endpoint, &Request::Status)).await {
+        Ok(Ok(Response::Status { snapshot })) if snapshot == *last => Silence::Quiet,
+        Ok(Ok(Response::Status { .. })) => Silence::Stale,
+        _ => Silence::Hung,
+    }
+}
+
+/// Sends `first` and every later snapshot of the subscription; after [`SILENCE`] without one,
+/// [`probe`]s. A snapshot that arrives while the probe waits wins over the probe.
+async fn follow(
+    endpoint: &Endpoint,
+    first: Snapshot,
+    mut updates: mpsc::Receiver<Snapshot>,
+    tx: &mpsc::Sender<Update>,
+) -> Ended {
+    let mut last = first;
+    loop {
+        if tx
+            .send(Update::Snapshot(Box::new(last.clone())))
+            .await
+            .is_err()
+        {
+            return Ended::Unheard;
+        }
+        let next = loop {
+            tokio::select! {
+                next = updates.recv() => break next,
+                () = tokio::time::sleep(SILENCE) => {}
+            }
+            tokio::select! {
+                next = updates.recv() => break next,
+                silence = probe(endpoint, &last) => match silence {
+                    Silence::Quiet => {}
+                    Silence::Stale => return Ended::Stale,
+                    Silence::Hung => return Ended::Down(ServiceDown::new(DownReason::Timeout)),
+                },
+            }
+        };
+        match next {
+            Some(snapshot) => last = snapshot,
+            None => return Ended::Down(ServiceDown::new(DownReason::Gone)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
     /// How a test server answers.
@@ -263,9 +331,38 @@ mod tests {
         /// `Hello` with our protocol, then a subscription that never sends a snapshot (the
         /// connection kept open).
         Mute,
+        /// `Hello` with our protocol; a subscription of one default snapshot, then nothing more
+        /// (kept open); `Status` never answered: a service stuck after the subscription started.
+        Hang,
+        /// `Hello` with our protocol; a subscription of one default snapshot (kept open), and
+        /// `Status` answers the same snapshot: healthy, with nothing new to say.
+        Quiet,
+        /// `Hello` with our protocol; the first subscription sends one default snapshot, every
+        /// later one and every `Status` a snapshot that wants a connection (all kept open): a
+        /// subscription that stopped hearing about changes.
+        Stale,
     }
 
-    async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, behaviour: Behaviour) {
+    /// What a test server was asked.
+    #[derive(Default)]
+    struct Counts {
+        subscribes: AtomicUsize,
+        statuses: AtomicUsize,
+    }
+
+    /// The snapshot [`Behaviour::Stale`] moved on to.
+    fn wanting() -> Snapshot {
+        Snapshot {
+            wants_connection: true,
+            ..Snapshot::default()
+        }
+    }
+
+    async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(
+        stream: S,
+        behaviour: Behaviour,
+        counts: Arc<Counts>,
+    ) {
         if let Behaviour::Silent = behaviour {
             let _held = stream;
             std::future::pending::<()>().await;
@@ -273,25 +370,44 @@ mod tests {
         }
         let (r, mut w) = tokio::io::split(stream);
         let mut r = BufReader::new(r);
+        let status = |snapshot| crate::to_line(&Response::Status { snapshot });
         while let Ok(Some(line)) = crate::read_line(&mut r).await {
             let request = crate::from_line::<Request>(&line).unwrap();
-            let reply = match request {
-                Request::Subscribe if matches!(behaviour, Behaviour::Mute) => {
+            let earlier_subscribes = match request {
+                Request::Subscribe => counts.subscribes.fetch_add(1, Ordering::SeqCst),
+                Request::Status => {
+                    counts.statuses.fetch_add(1, Ordering::SeqCst);
+                    0
+                }
+                _ => 0,
+            };
+            let reply = match (behaviour, &request) {
+                (Behaviour::Mute, Request::Subscribe) | (Behaviour::Hang, Request::Status) => {
                     std::future::pending::<()>().await;
                     return;
                 }
-                Request::Subscribe => {
-                    let status = crate::to_line(&Response::Status {
-                        snapshot: Snapshot::default(),
-                    });
-                    [status.clone(), status].concat()
+                (Behaviour::Hang | Behaviour::Quiet, Request::Subscribe) => {
+                    status(Snapshot::default())
                 }
-                Request::Hello if matches!(behaviour, Behaviour::Service | Behaviour::Mute) => {
-                    crate::to_line(&Response::Hello {
-                        protocol: crate::PROTOCOL_VERSION,
-                        version: "test".into(),
-                    })
+                (Behaviour::Quiet, Request::Status) => status(Snapshot::default()),
+                (Behaviour::Stale, Request::Subscribe) if earlier_subscribes == 0 => {
+                    status(Snapshot::default())
                 }
+                (Behaviour::Stale, Request::Subscribe | Request::Status) => status(wanting()),
+                (_, Request::Subscribe) => {
+                    [status(Snapshot::default()), status(Snapshot::default())].concat()
+                }
+                (
+                    Behaviour::Service
+                    | Behaviour::Mute
+                    | Behaviour::Hang
+                    | Behaviour::Quiet
+                    | Behaviour::Stale,
+                    Request::Hello,
+                ) => crate::to_line(&Response::Hello {
+                    protocol: crate::PROTOCOL_VERSION,
+                    version: "test".into(),
+                }),
                 _ => crate::to_line(&Response::Ok),
             };
             if w.write_all(&reply).await.is_err() {
@@ -315,17 +431,25 @@ mod tests {
     #[cfg(windows)]
     type Keep = ();
 
-    #[cfg(unix)]
     fn test_server_as(behaviour: Behaviour) -> (Endpoint, Keep) {
+        let (endpoint, keep, _counts) = test_server_counting(behaviour);
+        (endpoint, keep)
+    }
+
+    /// A test server answering as `behaviour`, and what it has been asked.
+    #[cfg(unix)]
+    fn test_server_counting(behaviour: Behaviour) -> (Endpoint, Keep, Arc<Counts>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let counts = Arc::<Counts>::default();
+        let kept = counts.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(stream, behaviour));
+                tokio::spawn(serve(stream, behaviour, kept.clone()));
             }
         });
-        (Endpoint::Unix(path), dir)
+        (Endpoint::Unix(path), dir, counts)
     }
 
     #[cfg(windows)]
@@ -347,7 +471,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn test_server_as(behaviour: Behaviour) -> (Endpoint, Keep) {
+    fn test_server_counting(behaviour: Behaviour) -> (Endpoint, Keep, Arc<Counts>) {
         use tokio::net::windows::named_pipe::ServerOptions;
         let name = random_pipe_name();
         let mut server = ServerOptions::new()
@@ -355,16 +479,19 @@ mod tests {
             .create(&name)
             .unwrap();
         let pipe_name = name.clone();
+        let counts = Arc::<Counts>::default();
+        let kept = counts.clone();
         tokio::spawn(async move {
             loop {
                 if server.connect().await.is_err() {
                     break;
                 }
                 let next = ServerOptions::new().create(&pipe_name).unwrap();
-                tokio::spawn(serve(std::mem::replace(&mut server, next), behaviour));
+                let stream = std::mem::replace(&mut server, next);
+                tokio::spawn(serve(stream, behaviour, kept.clone()));
             }
         });
-        (Endpoint::Pipe(name), ())
+        (Endpoint::Pipe(name), (), counts)
     }
 
     #[tokio::test]
@@ -659,5 +786,48 @@ mod tests {
             panic!("{first:?}");
         };
         assert!(is_text_of(&down.text, "gui.service_timeout"), "{down:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_service_after_the_first_snapshot_is_down() {
+        let (endpoint, _keep, _counts) = test_server_counting(Behaviour::Hang);
+        let mut rx = watch(endpoint, Duration::from_secs(2));
+        assert!(matches!(rx.recv().await, Some(Update::Snapshot(_))));
+        let next = tokio::time::timeout(SILENCE + TIMEOUT + Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap();
+        assert!(matches!(next, Some(Update::Down(d)) if matches!(d.reason, DownReason::Timeout)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_healthy_service_is_probed_and_keeps_its_subscription() {
+        let (endpoint, _keep, counts) = test_server_counting(Behaviour::Quiet);
+        let mut rx = watch(endpoint, Duration::from_secs(2));
+        assert!(matches!(rx.recv().await, Some(Update::Snapshot(_))));
+        assert!(
+            tokio::time::timeout(SILENCE * 3 + Duration::from_secs(1), rx.recv())
+                .await
+                .is_err(),
+            "nothing new, nothing sent"
+        );
+        assert!(
+            counts.statuses.load(Ordering::SeqCst) >= 2,
+            "the silence was probed"
+        );
+        assert_eq!(counts.subscribes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_subscription_is_replaced_silently() {
+        let (endpoint, _keep, counts) = test_server_counting(Behaviour::Stale);
+        let mut rx = watch(endpoint, Duration::from_secs(2));
+        let Some(Update::Snapshot(first)) = rx.recv().await else {
+            panic!()
+        };
+        let Some(Update::Snapshot(second)) = rx.recv().await else {
+            panic!("expected a snapshot, not Down")
+        };
+        assert!(!first.wants_connection && second.wants_connection);
+        assert_eq!(counts.subscribes.load(Ordering::SeqCst), 2);
     }
 }
