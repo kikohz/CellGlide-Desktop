@@ -2,18 +2,24 @@
 Installs or upgrades CellGlide on Windows 11.
 
   irm https://pkg.cellglide.com/install.ps1 | iex
-  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 [-BaseUrl <url>] [-ZipPath <zip>] [-Unattended]
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 [-ZipPath <zip>] [-Unattended]
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -BaseUrl http://127.0.0.1:<port> -AllowLoopback [-Unattended]
 
 Checks the system, Smart App Control and Apple's device service in the user's own process; the
 download, the file swap, the service, the data directory ACLs, the Start menu shortcut and the
-Installed-apps entry are done elevated (one UAC prompt: this script's own text runs again with
--ElevatedPart, and its log is printed here). Then the app is started as the user and
-"cellglide doctor" runs.
+Installed-apps entry are done elevated (one UAC prompt). The elevated child is started with a
+small -EncodedCommand bootstrap that reads this script's own text from %TEMP% once, checks its
+SHA-256 against the hash the parent computed, and runs it from memory with -ElevatedPart; the
+child's log is shown here afterwards. Then the app is started as the user and "cellglide doctor"
+runs.
 
--BaseUrl (or the CELLGLIDE_PKG_BASE environment variable) may only be https://pkg.cellglide.com
-or a loopback http://127.0.0.1:<port> / http://localhost:<port> source. -ZipPath installs a
-local package and prints its SHA-256 to compare with the published SHA256SUMS. -Unattended asks
-nothing and does not start the app.
+The packages come from https://pkg.cellglide.com. Only the -BaseUrl parameter changes that, and
+only to a loopback test source (http://127.0.0.1:<port> or http://localhost:<port>) together
+with -AllowLoopback; there is no environment variable, so "irm | iex" always uses production.
+-ZipPath installs a local package (a mapped network drive is turned into its UNC path, which the
+elevated child can see) and prints its SHA-256 to compare with the published SHA256SUMS.
+-Unattended asks nothing and does not start the app. Run through iex, the script runs in a child
+scope and leaves no functions or variables in the session.
 
 Only CellGlide's own service, files, shortcut, uninstall entry and data directory are touched;
 no other adapter, DNS setting or route is changed. Exit codes: 0 installed, 1 failed or
@@ -25,8 +31,20 @@ param(
     [switch]$Unattended,
     [switch]$ElevatedPart,
     [string]$Arch = '',
-    [string]$LogPath = ''
+    [string]$LogPath = '',
+    [switch]$AllowLoopback
 )
+
+# This script's own full text, whether it runs with -File, through iex or from the elevated
+# bootstrap: the elevated child runs exactly this text (decision 4), never a second download.
+$CellGlideInstallText = { }.Ast.Extent.StartScriptPosition.GetFullScript()
+if (-not ($MyInvocation.MyCommand.ScriptBlock -and $MyInvocation.MyCommand.ScriptBlock.ToString() -ceq $CellGlideInstallText)) {
+    # Run through iex, in the caller's own scope: run the same text again in a child scope and
+    # remove what the param block and the line above defined here.
+    $null = & ([scriptblock]::Create($CellGlideInstallText))
+    Remove-Variable -Name CellGlideInstallText, BaseUrl, ZipPath, Unattended, ElevatedPart, Arch, LogPath, AllowLoopback -ErrorAction SilentlyContinue
+    return
+}
 
 $InstallDir = 'C:\Program Files\CellGlide'
 $ServiceName = 'CellGlide'
@@ -46,9 +64,6 @@ $SidAdmins = '*S-1-5-32-544'
 $SidUsers = '*S-1-5-32-545'
 # The first line of packaging/licenses/windows-end-user-notice.txt, word for word.
 $EndUserNotice = 'CellGlide includes Microsoft Windows App SDK and Windows SDK components that are licensed to you under the Microsoft Software License Terms reproduced in this file (the Windows App SDK terms and the Windows SDK terms); by installing or using CellGlide you agree to those terms for those components.'
-# This script's own full text, whether it runs with -File or through iex: the elevated child
-# runs exactly this text (decision 4), never a second download.
-$CellGlideInstallText = { }.Ast.Extent.StartScriptPosition.GetFullScript()
 
 # ---- Shared with uninstall.ps1 (decision 3: kept identical) ----
 
@@ -168,14 +183,22 @@ function Refuse-ReparsePoint([string]$Path) {
 
 # ---- Pure checks ----
 
-function Resolve-BaseUrl([string]$Param, [string]$Env) {
-    # The parameter wins over the environment variable; production or a loopback source only.
+function Resolve-BaseUrl([string]$Param, [switch]$AllowLoopback) {
+    # Production, or with -AllowLoopback a loopback test source (http, 127.0.0.1 or localhost,
+    # an explicit port, nothing else); there is no environment variable.
     $ErrorActionPreference = 'Stop'
-    $value = if ($Param) { $Param } elseif ($Env) { $Env } else { $DefaultBase }
-    $value = $value.TrimEnd('/')
+    $value = if ($Param) { $Param } else { $DefaultBase }
+    if ($value.EndsWith('/')) { $value = $value.Substring(0, $value.Length - 1) }
     if ($value -ceq $DefaultBase) { return $value }
-    if ($value -cmatch '^http://(127\.0\.0\.1|localhost):(\d{1,5})$' -and [int]$Matches[2] -ge 1 -and [int]$Matches[2] -le 65535) {
-        return $value
+    if ($value -cmatch '\A(http)://(127\.0\.0\.1|localhost):(\d{1,5})\z') {
+        $port = [int]$Matches[3]
+        $uri = $null
+        if ($port -ge 1 -and $port -le 65535 -and [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri) -and
+            $uri.Scheme -ceq 'http' -and $uri.IsLoopback -and $uri.Host -cin @('127.0.0.1', 'localhost') -and
+            $uri.Port -eq $port -and $uri.UserInfo -eq '' -and $uri.PathAndQuery -eq '/' -and $uri.Fragment -eq '') {
+            if ($AllowLoopback) { return $value }
+            throw "Unsupported download location: $value (a loopback test source needs -AllowLoopback)"
+        }
     }
     throw "Unsupported download location: $value"
 }
@@ -232,15 +255,19 @@ function Read-Latest([string]$Json, [string]$Arch, [string]$BaseUrl) {
     }
 }
 
-function Read-Sha256Sums([string]$Text) {
-    # "<hex>  <name>" or "<hex> *<name>" per line; file name -> lower-case hash.
+function Read-Sha256Sums([string]$Text, [string]$Require = '') {
+    # "<hex>  <name>" or "<hex> *<name>" per line; file name -> lower-case hash. A malformed
+    # line, a name listed twice, or (with -Require) a missing name is refused.
     $ErrorActionPreference = 'Stop'
     $sums = @{}
     foreach ($line in ($Text -split "`r?`n")) {
         if ($line.Trim() -eq '') { continue }
-        if ($line -notmatch '^([0-9a-fA-F]{64}) [ *](\S.*)$') { throw "SHA256SUMS: bad line '$line'" }
-        $sums[$Matches[2]] = $Matches[1].ToLowerInvariant()
+        if ($line -notmatch '\A([0-9a-fA-F]{64}) [ *](\S[^\r\n]*)\z') { throw "SHA256SUMS: bad line '$line'" }
+        $name = $Matches[2]
+        if ($sums.ContainsKey($name)) { throw "SHA256SUMS: duplicate entry for $name" }
+        $sums[$name] = $Matches[1].ToLowerInvariant()
     }
+    if ($Require -and -not $sums.ContainsKey($Require)) { throw "SHA256SUMS: no entry for $Require" }
     return $sums
 }
 
@@ -269,6 +296,15 @@ function Install-Files([string]$Source, [string]$Target) {
     $new = "$Target.new"
     $old = "$Target.old"
     $targetLeaf = Split-Path -Leaf $Target
+    # Nothing here follows a link: a junction or symbolic link at or under any of the four
+    # directories stops the install before anything is moved or deleted.
+    foreach ($dir in @($Source, $Target, $new, $old)) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $item = Get-Item -LiteralPath $dir -Force
+        if ((Test-ReparsePoint $item) -or ($item.PSIsContainer -and @(Get-ReparsePoints $dir).Count -gt 0)) {
+            throw "$dir is or holds a junction or symbolic link; nothing was replaced."
+        }
+    }
     # An earlier run that died between the two renames left only .old: that is the old version.
     if ((Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $Target)) {
         Rename-Item -Path $old -NewName $targetLeaf
@@ -327,15 +363,57 @@ function Get-TranscriptBody([string[]]$Lines) {
     return $body.ToArray()
 }
 
-function ConvertTo-CommandLine([string[]]$ArgList) {
-    # Start-Process joins -ArgumentList with spaces as is: quote each argument the way
-    # CommandLineToArgvW reads it back.
+function ConvertTo-PSLiteral($Value) {
+    # A PowerShell literal for a string or a bool, for the bootstrap's text.
     $ErrorActionPreference = 'Stop'
-    $quoted = foreach ($a in $ArgList) {
-        $escaped = ($a -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1'
-        '"' + $escaped + '"'
+    if ($Value -is [bool] -or $Value -is [switch]) { if ($Value) { return '$true' } else { return '$false' } }
+    return "'" + ([string]$Value).Replace("'", "''") + "'"
+}
+
+function New-ChildBootstrap([string]$ScriptPath, [string]$Sha256, [hashtable]$Parameters) {
+    # The elevated child's whole program: read the script once, check its hash, run the bytes
+    # that were checked from memory (dot-sourced, so the script's $code is ours), exit with it.
+    # Exit 3 means the file was not the text the parent wrote.
+    $ErrorActionPreference = 'Stop'
+    $pairs = foreach ($key in @($Parameters.Keys | Sort-Object)) { "$key = $(ConvertTo-PSLiteral $Parameters[$key])" }
+    return @(
+        "`$ErrorActionPreference = 'Stop'"
+        "`$bytes = [IO.File]::ReadAllBytes($(ConvertTo-PSLiteral $ScriptPath))"
+        "`$sha = [Security.Cryptography.SHA256]::Create()"
+        "`$hash = -join (`$sha.ComputeHash(`$bytes) | ForEach-Object { `$_.ToString('x2') })"
+        "if (`$hash -cne $(ConvertTo-PSLiteral $Sha256.ToLowerInvariant())) { exit 3 }"
+        "`$sb = [scriptblock]::Create([Text.Encoding]::UTF8.GetString(`$bytes))"
+        "`$p = @{ $($pairs -join '; ') }"
+        "`$code = 1"
+        ". `$sb @p"
+        "exit `$code"
+    ) -join "`n"
+}
+
+function Copy-LogToParent([string]$Source, [string]$Dest) {
+    # The elevated child's log, without the transcript banners, written for the parent as a new
+    # file (never over an existing file or link) at the path the parent chose in its %TEMP%.
+    $ErrorActionPreference = 'Stop'
+    if ((Split-Path -Leaf $Dest) -notmatch '\Acellglide-install-[0-9a-f]{32}\.log\z') { throw "unexpected log path $Dest" }
+    $parent = Get-Item -LiteralPath (Split-Path -Parent $Dest) -Force
+    if (Test-ReparsePoint $parent) { throw "$($parent.FullName) is a junction or symbolic link" }
+    $text = (Get-TranscriptBody @(Get-Content -LiteralPath $Source)) -join "`r`n"
+    $stream = [IO.File]::Open($Dest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($text + "`r`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+}
+
+function ConvertTo-UncPath([string]$Path, [string]$DriveType, [string]$ProviderName) {
+    # A path on a mapped network drive, as its UNC path: the elevated child does not see the
+    # user's drive mappings. Other paths are returned as they are.
+    $ErrorActionPreference = 'Stop'
+    if ($DriveType -ne 'Network' -or $Path -notmatch '\A[A-Za-z]:\\') { return $Path }
+    if ($ProviderName -notmatch '\A\\\\[^\\]+\\[^\\]+') {
+        throw "$Path is on a network drive whose UNC path is unknown; copy the zip to a local folder and run again."
     }
-    return ($quoted -join ' ')
+    return $ProviderName.TrimEnd('\') + $Path.Substring(2)
 }
 
 function Get-PeMachine([string]$Path) {
@@ -419,8 +497,8 @@ function Request-AppleDevices([switch]$Unattended) {
 }
 
 function Get-CellGlidePackage {
-    # Downloads latest.json, the zip and SHA256SUMS into $WorkDir; latest.json, SHA256SUMS and
-    # the file itself must all agree on the hash.
+    # Downloads latest.json, the zip and SHA256SUMS into $WorkDir (a new folder); latest.json,
+    # SHA256SUMS and the file itself must all agree on the hash.
     param(
         [string]$BaseUrl,
         [string]$Arch,
@@ -429,25 +507,45 @@ function Get-CellGlidePackage {
     )
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $null = New-Item -ItemType Directory -Force -Path $WorkDir
-    $latestFile = Join-Path $WorkDir 'latest.json'
-    Write-Host "Downloading $BaseUrl/windows/latest.json"
-    & $Download "$BaseUrl/windows/latest.json" $latestFile
-    $latest = Read-Latest ([IO.File]::ReadAllText($latestFile)) $Arch $BaseUrl
-    $zip = Join-Path $WorkDir $latest.FileName
-    Write-Host "Downloading $($latest.Url)"
-    & $Download $latest.Url $zip
-    $sumsFile = Join-Path $WorkDir 'SHA256SUMS'
-    & $Download "$BaseUrl/windows/$($latest.Version)/SHA256SUMS" $sumsFile
-    $sums = Read-Sha256Sums ([IO.File]::ReadAllText($sumsFile))
-    if (-not $sums.ContainsKey($latest.FileName) -or $sums[$latest.FileName] -ne $latest.Sha256 -or
-        -not (Test-Download $zip $latest.Sha256)) {
-        throw "SHA-256 mismatch for $($latest.FileName)"
+    $protocols = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
+        $null = New-Item -ItemType Directory -Path $WorkDir
+        $latestFile = Join-Path $WorkDir 'latest.json'
+        Write-Host "Downloading $BaseUrl/windows/latest.json"
+        & $Download "$BaseUrl/windows/latest.json" $latestFile
+        $latest = Read-Latest ([IO.File]::ReadAllText($latestFile)) $Arch $BaseUrl
+        $zip = Join-Path $WorkDir $latest.FileName
+        Write-Host "Downloading $($latest.Url)"
+        & $Download $latest.Url $zip
+        $sumsFile = Join-Path $WorkDir 'SHA256SUMS'
+        & $Download "$BaseUrl/windows/$($latest.Version)/SHA256SUMS" $sumsFile
+        $sums = Read-Sha256Sums ([IO.File]::ReadAllText($sumsFile)) $latest.FileName
+        if ($sums[$latest.FileName] -ne $latest.Sha256 -or -not (Test-Download $zip $latest.Sha256)) {
+            throw "SHA-256 mismatch for $($latest.FileName)"
+        }
+        if ((Get-Item -LiteralPath $zip).Length -ne $latest.Size) { throw "Size mismatch for $($latest.FileName)" }
+        Write-Host "SHA-256 verified: $($latest.Sha256)"
+        return [pscustomobject]@{ ZipPath = $zip; Version = $latest.Version; TestBuild = $latest.TestBuild }
+    } finally {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols
     }
-    if ((Get-Item -LiteralPath $zip).Length -ne $latest.Size) { throw "Size mismatch for $($latest.FileName)" }
-    Write-Host "SHA-256 verified: $($latest.Sha256)"
-    return [pscustomobject]@{ ZipPath = $zip; Version = $latest.Version; TestBuild = $latest.TestBuild }
+}
+
+function Get-LatestTestBuild([string]$BaseUrl, [string]$Arch) {
+    # Whether latest.json marks this architecture as a test build; true when it cannot be read.
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $protocols = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
+        $json = (Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/windows/latest.json").Content
+        return [bool](Read-Latest $json $Arch $BaseUrl).TestBuild
+    } catch {
+        return $true
+    } finally {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols
+    }
 }
 
 function Get-InstalledVersion {
@@ -457,22 +555,64 @@ function Get-InstalledVersion {
     return ''
 }
 
-function New-PrivateWorkDir {
-    # A temporary folder only SYSTEM and Administrators can change, so nothing unelevated can
-    # swap the package between its hash check and the install.
+function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
+    # A new folder next to the install directory (Program Files: only administrators can create
+    # anything there, so nothing can be planted in advance), created in one step with an ACL of
+    # SYSTEM and Administrators (full control) and nothing inherited, owned by Administrators.
+    # Where the policy makes the user, not Administrators, the owner of what an elevated process
+    # creates, the files inside would be owned by the user, whose implicit owner rights would let
+    # an unelevated process change their ACL; an inherited OWNER RIGHTS entry that allows only
+    # reading the ACL removes those rights. Nothing unelevated can change the package, the
+    # extracted files or the log between the hash check and the install.
     $ErrorActionPreference = 'Stop'
-    $dir = Join-Path ([IO.Path]::GetTempPath()) ('cellglide-install-' + [guid]::NewGuid().ToString('N'))
-    $null = New-Item -ItemType Directory -Path $dir
-    Invoke-Native 'icacls.exe' @($dir, '/inheritance:r', '/Q',
-        '/grant:r', "${SidSystem}:(OI)(CI)F", '/grant:r', "${SidAdmins}:(OI)(CI)F") | Out-Null
+    $dir = Join-Path $Root ('CellGlide.work-' + [guid]::NewGuid().ToString('N'))
+    if (Test-Path -LiteralPath $dir) { throw "$dir already exists" }
+    $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $security = New-Object Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    $grants = @(
+        @('S-1-5-18', [Security.AccessControl.FileSystemRights]::FullControl),
+        @('S-1-5-32-544', [Security.AccessControl.FileSystemRights]::FullControl),
+        @('S-1-3-4', [Security.AccessControl.FileSystemRights]::ReadPermissions))
+    foreach ($grant in $grants) {
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (New-Object Security.Principal.SecurityIdentifier($grant[0])), $grant[1], $inherit,
+            [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $null = [IO.Directory]::CreateDirectory($dir, $security)
+    $item = Get-Item -LiteralPath $dir -Force
+    if (Test-ReparsePoint $item) { throw "$dir is a junction or symbolic link" }
+    if (@(Get-ChildItem -LiteralPath $dir -Force).Count -gt 0) { throw "$dir is not empty" }
+    $acl = Get-Acl -LiteralPath $dir
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    $others = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.IsInherited -or $_.AccessControlType -ne 'Allow' -or -not (
+            ($_.IdentityReference.Value -in 'S-1-5-18', 'S-1-5-32-544') -or
+            ($_.IdentityReference.Value -eq 'S-1-3-4' -and ($_.FileSystemRights -band -bnot [Security.AccessControl.FileSystemRights]::Synchronize) -eq [Security.AccessControl.FileSystemRights]::ReadPermissions)) })
+    if (-not $acl.AreAccessRulesProtected -or $others.Count -gt 0 -or $owner -notin 'S-1-5-32-544', 'S-1-5-18') {
+        throw "$dir did not get its private ACL"
+    }
     return $dir
 }
 
-function Expand-Package([string]$Zip, [string]$Dest) {
-    # Unpacks the zip and checks it holds a CellGlide package.
+function Remove-StaleWorkDirs([string]$Keep) {
+    # Work folders left by an install that was killed; never through a link.
     $ErrorActionPreference = 'Stop'
+    $root = Split-Path -Parent $InstallDir
+    foreach ($stale in @(Get-ChildItem -LiteralPath $root -Directory -Force -Filter 'CellGlide.work-*' -ErrorAction SilentlyContinue)) {
+        if ($stale.FullName -eq $Keep -or (Test-ReparsePoint $stale) -or @(Get-ReparsePoints $stale.FullName).Count -gt 0) { continue }
+        Remove-PathWithRetry $stale.FullName
+    }
+}
+
+function Expand-Package([string]$Zip, [string]$Dest) {
+    # Unpacks the zip into a new folder and checks it holds a CellGlide package and no links.
+    $ErrorActionPreference = 'Stop'
+    $null = New-Item -ItemType Directory -Path $Dest
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Dest)
+    if (@(Get-ReparsePoints $Dest).Count -gt 0) { throw 'The package holds a junction or symbolic link' }
     foreach ($f in 'version.txt', 'cellglide-service.exe', 'cellglide.exe', 'wintun.dll', 'uninstall.ps1', 'app\CellGlide.exe') {
         if (-not (Test-Path -LiteralPath (Join-Path $Dest $f) -PathType Leaf)) { throw "The package has no $f" }
     }
@@ -610,12 +750,16 @@ function Invoke-Doctor {
 # ---- Elevation ----
 
 function Invoke-ElevatedChild {
-    # Runs this script's own text elevated with -ElevatedPart and prints the child's log here.
+    # Writes this script's own text to %TEMP% and starts the elevated child with a bootstrap
+    # (-EncodedCommand) that runs that text only if its SHA-256 is the one computed here; then
+    # prints the log the child left for us. $Start gets the encoded bootstrap and, for tests,
+    # the paths and the hash.
     param(
         [string]$ScriptText,
-        [string[]]$Arguments,
-        [scriptblock]$Start = { param($Path, $ArgList)
-            $p = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList (ConvertTo-CommandLine $ArgList)
+        [hashtable]$Parameters,
+        [scriptblock]$Start = { param($EncodedCommand, $Info)
+            $p = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden `
+                -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $EncodedCommand"
             if ($p) { $null = $p.Handle }
             $p }
     )
@@ -624,45 +768,73 @@ function Invoke-ElevatedChild {
     $id = [guid]::NewGuid().ToString('N')
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) "cellglide-install-$id.ps1"
     $logFile = Join-Path ([IO.Path]::GetTempPath()) "cellglide-install-$id.log"
-    [IO.File]::WriteAllText($scriptFile, $ScriptText, (New-Object Text.UTF8Encoding($false)))
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($ScriptText)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    [IO.File]::WriteAllBytes($scriptFile, $bytes)
     try {
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptFile, '-ElevatedPart', '-LogPath', $logFile) + @($Arguments)
+        $childParams = @{}
+        if ($Parameters) { foreach ($key in @($Parameters.Keys)) { $childParams[$key] = $Parameters[$key] } }
+        $childParams['ElevatedPart'] = $true
+        $childParams['LogPath'] = $logFile
+        $bootstrap = New-ChildBootstrap $scriptFile $hash $childParams
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+        $info = @{ ScriptPath = $scriptFile; LogPath = $logFile; Sha256 = $hash; Bootstrap = $bootstrap }
         $proc = $null
-        try { $proc = & $Start $scriptFile $argList } catch { $proc = $null }
+        try { $proc = & $Start $encoded $info } catch { $proc = $null }
         if (-not $proc) {
             Write-Host 'Installation cancelled.'
             return 1
         }
         $proc.WaitForExit()
-        if (Test-Path -LiteralPath $logFile) {
-            foreach ($line in (Get-TranscriptBody @(Get-Content -LiteralPath $logFile))) { Write-Host $line }
+        $code = [int]$proc.ExitCode
+        $hadLog = Test-Path -LiteralPath $logFile
+        if ($hadLog) {
+            foreach ($line in @(Get-Content -LiteralPath $logFile)) { Write-Host $line }
         }
-        return [int]$proc.ExitCode
+        if ($code -eq 3) {
+            Write-Host 'Installation failed: the copy of the installer in %TEMP% changed before the elevated part could run it.'
+            return 1
+        }
+        if ($code -ne 0 -and -not $hadLog) {
+            Write-Host "Installation failed: the elevated part ended with exit code $code and left no log."
+        }
+        return $code
     } finally {
         Remove-Item -LiteralPath $scriptFile, $logFile -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Invoke-ElevatedPart([string]$BaseUrl, [string]$ZipPath, [string]$Arch) {
-    # Steps 4-8 and starting the service. Nothing changes before the package is verified; a
-    # failure later starts the existing service again.
+function Invoke-ElevatedPart([string]$BaseUrl, [string]$ZipPath, [string]$Arch, [string]$WorkDir = '') {
+    # Steps 4-8 and starting the service. Nothing changes before the package is verified. On a
+    # failure only the service this run stopped is started again, and only if it was running;
+    # a service this run created, or one already stopped, stays stopped, and nothing is started
+    # when the data directory's ACL step refused.
     $ErrorActionPreference = 'Stop'
-    $work = $null
+    $ownWork = -not $WorkDir
+    $stoppedByUs = $false
+    $step = 'prepare'
+    $before = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $wasRunning = [bool]($before -and $before.Status -eq 'Running')
     try {
-        $work = New-PrivateWorkDir
+        if ($Arch -cnotin @('x64', 'arm64')) { throw "unsupported architecture '$Arch'" }
+        if ($ownWork) { $WorkDir = New-PrivateWorkDir }
         if ($ZipPath) {
-            $zip = Join-Path $work (Split-Path -Leaf $ZipPath)
+            if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) {
+                throw "cannot find $ZipPath from the elevated part; use a local path or a UNC path"
+            }
+            $zip = Join-Path $WorkDir (Split-Path -Leaf $ZipPath)
             Copy-Item -LiteralPath $ZipPath -Destination $zip
             Write-Host "Package: $ZipPath"
             Write-Host "SHA-256: $((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant())"
             Write-Host "Compare it with SHA256SUMS at $DefaultBase/windows/<version>/SHA256SUMS."
             $expected = ''
         } else {
-            $package = Get-CellGlidePackage $BaseUrl $Arch (Join-Path $work 'download')
+            $package = Get-CellGlidePackage $BaseUrl $Arch (Join-Path $WorkDir 'download')
             $zip = $package.ZipPath
             $expected = $package.Version
         }
-        $staged = Join-Path $work 'package'
+        $staged = Join-Path $WorkDir 'package'
         Expand-Package $zip $staged
         $version = ([IO.File]::ReadAllText((Join-Path $staged 'version.txt'))).Trim()
         if ($expected -and $version -ne $expected) {
@@ -681,31 +853,55 @@ function Invoke-ElevatedPart([string]$BaseUrl, [string]$ZipPath, [string]$Arch) 
         }
 
         if (-not (Test-Elevated)) { throw 'the elevated part needs administrator rights' }
+        $step = 'stop'
+        Remove-StaleWorkDirs $WorkDir
         Stop-CellGlideProcesses
+        $stoppedByUs = $wasRunning
         if (-not (Stop-OurService)) { throw "$AdapterName is still present 10 seconds after stopping the service" }
+        $step = 'files'
         Install-Files $staged $InstallDir
         Write-Host "Installed files in $InstallDir"
+        $step = 'service'
         Set-OurService
+        $step = 'acl'
         Set-DataDirAcl
         Write-Host "Prepared $DataDir"
+        $step = 'entries'
         New-StartMenuShortcut
         Set-UninstallEntry $version
+        $step = 'start'
         Start-Service -Name $ServiceName
         (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
         Write-Host "Service $ServiceName is running."
         return 0
     } catch {
         $reason = $_.Exception.Message
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svc -and $svc.Status -ne 'Running') {
-            try { Start-Service -Name $ServiceName; Write-Host "Started the existing $ServiceName service again." }
-            catch { Write-Host "Could not start the existing $ServiceName service: $($_.Exception.Message)" }
+        if ($stoppedByUs -and $step -ne 'acl' -and $step -ne 'start') {
+            try { Start-Service -Name $ServiceName; Write-Host "Started the $ServiceName service again." }
+            catch { Write-Host "Could not start the $ServiceName service again: $($_.Exception.Message)" }
         }
         Write-Host "Installation failed: $reason"
         return 1
     } finally {
-        if ($work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($ownWork -and $WorkDir -and (Test-Path -LiteralPath $WorkDir)) { Remove-PathWithRetry $WorkDir }
     }
+}
+
+function Resolve-ZipPath([string]$Path) {
+    # The full path of -ZipPath, with a mapped network drive turned into its UNC path.
+    $ErrorActionPreference = 'Stop'
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Path does not exist" }
+    $full = (Resolve-Path -LiteralPath $Path).ProviderPath
+    if ($full -match '\A([A-Za-z]):\\') {
+        $letter = $Matches[1]
+        $drive = New-Object IO.DriveInfo($letter)
+        $provider = ''
+        if ([string]$drive.DriveType -eq 'Network') {
+            $provider = [string](Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${letter}:'").ProviderName
+        }
+        $full = ConvertTo-UncPath $full ([string]$drive.DriveType) $provider
+    }
+    return $full
 }
 
 # ---- Main ----
@@ -717,26 +913,33 @@ function Invoke-CellGlideInstall {
         [switch]$Unattended,
         [switch]$ElevatedPart,
         [string]$Arch = '',
-        [string]$LogPath = ''
+        [string]$LogPath = '',
+        [switch]$AllowLoopback
     )
     $ErrorActionPreference = 'Stop'
     try {
         if ($ElevatedPart) {
-            if ($LogPath) { $null = Start-Transcript -LiteralPath $LogPath -Force }
+            # The elevated child: everything, the log included, stays in the private folder; the
+            # parent gets a copy of the log when the work is done.
+            $work = New-PrivateWorkDir
+            $log = Join-Path $work 'install.log'
+            $null = Start-Transcript -LiteralPath $log -NoClobber
             try {
-                if (-not $Arch) { $Arch = ConvertTo-CellGlideArch (Get-NativeMachine) }
-                return (Invoke-ElevatedPart (Resolve-BaseUrl $BaseUrl '') $ZipPath $Arch)
+                return (Invoke-ElevatedPart (Resolve-BaseUrl $BaseUrl -AllowLoopback:$AllowLoopback) $ZipPath $Arch $work)
+            } catch {
+                Write-Host "Installation failed: $($_.Exception.Message)"
+                return 1
             } finally {
-                if ($LogPath) { $null = Stop-Transcript }
+                $null = Stop-Transcript
+                if ($LogPath) { try { Copy-LogToParent $log $LogPath } catch { } }
+                Remove-PathWithRetry $work
             }
         }
 
         # Steps 1-3 in the user's own process.
-        $base = Resolve-BaseUrl $BaseUrl $env:CELLGLIDE_PKG_BASE
-        if ($ZipPath) {
-            if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) { throw "$ZipPath does not exist" }
-            $ZipPath = (Resolve-Path -LiteralPath $ZipPath).ProviderPath
-        }
+        $base = Resolve-BaseUrl $BaseUrl -AllowLoopback:$AllowLoopback
+        if ($base -cne $DefaultBase) { Write-Host "Downloading from a local test source: $base" }
+        if ($ZipPath) { $ZipPath = Resolve-ZipPath $ZipPath }
         $machine = Get-NativeMachine
         $arch = ConvertTo-CellGlideArch $machine
         if (-not $arch) {
@@ -754,15 +957,8 @@ function Invoke-CellGlideInstall {
             return 2
         }
         if (-not (Test-AppleService)) { Request-AppleDevices -Unattended:$Unattended }
-        if ($arch -eq 'arm64') {
-            $testBuild = $true
-            if (-not $ZipPath) {
-                try {
-                    $json = (Invoke-WebRequest -UseBasicParsing -Uri "$base/windows/latest.json").Content
-                    $testBuild = (Read-Latest $json $arch $base).TestBuild
-                } catch { $testBuild = $true }
-            }
-            if ($testBuild) { Write-Host 'Note: the ARM64 build is a test build, not yet tested on real hardware.' }
+        if ($arch -eq 'arm64' -and ($ZipPath -or (Get-LatestTestBuild $base $arch))) {
+            Write-Host 'Note: the ARM64 build is a test build, not yet tested on real hardware.'
         }
         Write-Host $EndUserNotice
         Write-Host "(That file is THIRD-PARTY-LICENSES.txt in $InstallDir.)"
@@ -771,9 +967,9 @@ function Invoke-CellGlideInstall {
         if (Test-Elevated) {
             $code = Invoke-ElevatedPart $base $ZipPath $arch
         } else {
-            $childArgs = @('-BaseUrl', $base, '-Arch', $arch)
-            if ($ZipPath) { $childArgs += @('-ZipPath', $ZipPath) }
-            $code = Invoke-ElevatedChild $CellGlideInstallText $childArgs
+            $childParams = @{ BaseUrl = $base; Arch = $arch; AllowLoopback = [bool]$AllowLoopback }
+            if ($ZipPath) { $childParams['ZipPath'] = $ZipPath }
+            $code = Invoke-ElevatedChild $CellGlideInstallText $childParams
         }
         if ($code -ne 0) { return $code }
 
@@ -789,5 +985,5 @@ function Invoke-CellGlideInstall {
     }
 }
 
-$code = Invoke-CellGlideInstall -BaseUrl $BaseUrl -ZipPath $ZipPath -Unattended:$Unattended -ElevatedPart:$ElevatedPart -Arch $Arch -LogPath $LogPath
+$code = Invoke-CellGlideInstall -BaseUrl $BaseUrl -ZipPath $ZipPath -Unattended:$Unattended -ElevatedPart:$ElevatedPart -Arch $Arch -LogPath $LogPath -AllowLoopback:$AllowLoopback
 if ($PSCommandPath) { exit $code }

@@ -485,6 +485,24 @@ Speed test finished
   - 一次失误：R3 第一次运行时，我把输出接到了 `Select-Object -First`，管道提前结束，安装进程在 `Prepared` 之后被杀，服务停在 Stopped，私有临时目录留在 `%TEMP%`。删掉那个目录后重跑 R3，安装照常完成（服务 Running）。这说明中途被杀的安装可以靠重跑恢复。
 - **还原**：`install-dev.ps1 -Uninstall`（删服务、安装目录、我们 GUID 的 Tcpip/Tcpip6 接口键，保留数据目录）→ 删快捷方式和卸载项 → `install-dev.ps1 -Release`。卸载后、重装后各拍快照，与 A 比较都是 identical。最终状态与安装前记录逐项对比：服务配置、数据目录 ACL、无卸载项、无快捷方式、无 `.new` / `.old`、HKCU Run 都相同。只有两处不同：一是 `cellglide-service.exe` 和 `cellglide.exe` 按当前 HEAD 重新编译，哈希变了；二是我们 GUID 的接口键被删掉了，下次隧道建立时会重新生成。
 - 没有用手机流量（iPhone 已拔下），没有动其他网卡、DNS 或路由，没有向桌面发送任何输入。
+- **修复轮 1**（评审 Important #1–#4 与 Minor #5–#11，控制者裁定）：
+  - **测试**：Pester 106/106；`check-windows-core.ps1` exit 0。变异验证：
+    - 回滚时总是启动服务：8 个测试失败。
+    - 去掉引导脚本的哈希检查：「被改过的脚本不运行」失败。
+    - 去掉 iex 防护：「iex 不留下函数和变量」失败。
+    - 去掉 SHA256SUMS 的重复检查：2 个测试失败。
+  - **本地源**：在 1.0.0 之外，另把同一个 x64 zip 只改 `version.txt` 重新打包成 1.0.1（`4d3fcf1c…1fb0`），只用于升级测试。基线快照 A 当天新拍。
+
+    | 次 | 方式 | 结果 | 快照与 A 比较 |
+    |---|---|---|---|
+    | F | `-BaseUrl http://127.0.0.1:8770`，不加 `-AllowLoopback` | 立即报 `Unsupported download location: … (a loopback test source needs -AllowLoopback)`，exit 1 | 未改动 |
+    | F | `-BaseUrl https://example.com -AllowLoopback` | 立即报 `Unsupported download location`，exit 1 | 未改动 |
+    | F | `latest.json` 的哈希改一位 | `SHA-256 mismatch`，exit 1；服务 PID 前后都是 13152，文件修改时间不变，Program Files 下只有 `CellGlide`，没有卸载项和快捷方式 | 未改动 |
+    | R1 | `-File install.ps1 -BaseUrl … -AllowLoopback`（从开发安装升级） | 先打印 `Downloading from a local test source`，然后 `Installing 1.0.0`，exit 0；doctor 结果打印出来了 | identical |
+    | R2 | 真实提权子进程：`-EncodedCommand` 引导脚本校验 `%TEMP%` 里脚本的哈希后，从内存运行；子进程的 transcript 先写在私有目录里，再复制给父进程打印 | `Upgrading 1.0.0 -> 1.0.1`，exit 0；`version.txt` 和卸载项都是 1.0.1；没有留下 `CellGlide.work-*` 和 `%TEMP%\cellglide-install-*` | identical |
+    | F | 占住 `THIRD-PARTY-LICENSES.txt` 再重装 | 交换被拒，`Started the CellGlide service again.`（服务原本在运行，而且是本次停下的），exit 1；文件不变，没有 `.new` / `.old` / `.work-*` | identical |
+
+  - **还原**：`install-dev.ps1 -Uninstall` → 删快捷方式和卸载项 → `install-dev.ps1 -Release`。卸载后、重装后各拍快照，与 A 比较都是 identical。最终状态与本轮开始时的记录逐行相同，包括安装目录文件的哈希、服务配置、数据目录 ACL，并且没有卸载项、没有快捷方式，Program Files 下只有 `CellGlide`。我们 GUID 的接口键又被 `-Uninstall` 删掉了，下次隧道建立时会重新生成。
 
 ## 已知问题（W1 实测发现，未修）
 

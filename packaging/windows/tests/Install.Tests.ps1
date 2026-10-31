@@ -8,12 +8,19 @@ BeforeAll {
 }
 Describe 'install.ps1' {
     It 'Base URL accepts only production and loopback' {
-        Resolve-BaseUrl '' '' | Should -Be 'https://pkg.cellglide.com'
-        Resolve-BaseUrl '' 'http://127.0.0.1:8770/' | Should -Be 'http://127.0.0.1:8770'
-        Resolve-BaseUrl 'http://localhost:9' 'http://127.0.0.1:1' | Should -Be 'http://localhost:9'
-        foreach ($bad in 'https://evil.example', 'http://pkg.cellglide.com', 'http://10.0.0.1:80', 'https://127.0.0.1:1', 'file:///C:/x') {
-            { Resolve-BaseUrl $bad '' } | Should -Throw '*Unsupported download location*'
+        Resolve-BaseUrl '' | Should -Be 'https://pkg.cellglide.com'
+        Resolve-BaseUrl 'https://pkg.cellglide.com/' | Should -Be 'https://pkg.cellglide.com'
+        Resolve-BaseUrl 'http://127.0.0.1:8770/' -AllowLoopback | Should -Be 'http://127.0.0.1:8770'
+        Resolve-BaseUrl 'http://localhost:9' -AllowLoopback | Should -Be 'http://localhost:9'
+        foreach ($bad in 'https://evil.example', 'http://pkg.cellglide.com', 'http://10.0.0.1:80', 'https://127.0.0.1:1', 'file:///C:/x',
+                "http://127.0.0.1:80`n", 'http://127.0.0.1:1@evil.example:2', 'http://127.0.0.1:0', 'http://127.0.0.1:65536',
+                'http://127.0.0.1:80/x', 'http://127.0.0.1:80?x', 'http://LOCALHOST:80', 'http://127.0.0.1', 'https://PKG.cellglide.com') {
+            { Resolve-BaseUrl $bad -AllowLoopback } | Should -Throw '*Unsupported download location*' -Because $bad
         }
+    }
+    It 'a loopback source needs -AllowLoopback' {
+        { Resolve-BaseUrl 'http://127.0.0.1:8770' } | Should -Throw '*Unsupported download location*needs -AllowLoopback*'
+        { Resolve-BaseUrl 'http://localhost:8770' } | Should -Throw '*needs -AllowLoopback*'
     }
     It 'maps machines to packages' {
         ConvertTo-CellGlideArch 0x8664 | Should -Be 'x64'; ConvertTo-CellGlideArch 0xAA64 | Should -Be 'arm64'
@@ -54,6 +61,15 @@ Describe 'install.ps1' {
         $s['a.zip'] | Should -Be ('a' * 64); $s['b.zip'] | Should -Be ('c' * 64)
         { Read-Sha256Sums 'not a line' } | Should -Throw
     }
+    It 'SHA256SUMS refuses a duplicate, a malformed line and a missing entry' {
+        $x = "{0}  CellGlide-1.0.0-windows-arm64.zip`n{1}  CellGlide-1.0.0-windows-x64.zip`n" -f ('a' * 64), ('b' * 64)
+        (Read-Sha256Sums $x 'CellGlide-1.0.0-windows-x64.zip')['CellGlide-1.0.0-windows-x64.zip'] | Should -Be ('b' * 64)
+        { Read-Sha256Sums ($x + ('c' * 64) + "  CellGlide-1.0.0-windows-x64.zip`n") } | Should -Throw '*duplicate entry for CellGlide-1.0.0-windows-x64.zip*'
+        { Read-Sha256Sums ($x + ('c' * 63) + "  short.zip`n") } | Should -Throw '*bad line*'
+        { Read-Sha256Sums (('c' * 64) + "   ") } | Should -Throw '*bad line*'
+        { Read-Sha256Sums $x 'CellGlide-1.0.1-windows-x64.zip' } | Should -Throw '*no entry for CellGlide-1.0.1-windows-x64.zip*'
+        { Read-Sha256Sums '' 'a.zip' } | Should -Throw '*no entry*'
+    }
     It 'compares a download with its hash' {
         $f = Join-Path $TestDrive 'x.zip'; Set-Content $f 'x' -NoNewline
         Test-Download $f ('0' * 64) | Should -BeFalse
@@ -80,15 +96,26 @@ Describe 'install.ps1' {
         Set-Content (Join-Path $src 'SHA256SUMS') (('0' * 64) + '  CellGlide-1.0.0-windows-x64.zip')
         { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' (Join-Path $TestDrive 'w3') $fake } | Should -Throw '*SHA-256 mismatch*'
         Set-Content (Join-Path $src 'SHA256SUMS') ("$good  CellGlide-1.0.0-windows-arm64.zip")
-        { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' (Join-Path $TestDrive 'w4') $fake } | Should -Throw '*SHA-256 mismatch*'
+        { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' (Join-Path $TestDrive 'w4') $fake } | Should -Throw '*no entry for CellGlide-1.0.0-windows-x64.zip*'
+        Set-Content (Join-Path $src 'SHA256SUMS') ("$good  CellGlide-1.0.0-windows-x64.zip`n$good  CellGlide-1.0.0-windows-x64.zip")
+        { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' (Join-Path $TestDrive 'w5') $fake } | Should -Throw '*duplicate entry*'
+    }
+    It 'downloads go into a new folder only, and TLS settings are put back' {
+        $before = [Net.ServicePointManager]::SecurityProtocol
+        $existing = Join-Path $TestDrive 'exists'; $null = New-Item -ItemType Directory $existing
+        { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' $existing { throw 'not reached' } } | Should -Throw
+        [Net.ServicePointManager]::SecurityProtocol | Should -Be $before
+        { Get-CellGlidePackage 'http://127.0.0.1:1' 'x64' (Join-Path $TestDrive 'w6') { throw 'offline' } } | Should -Throw '*offline*'
+        [Net.ServicePointManager]::SecurityProtocol | Should -Be $before
     }
     It 'A hash mismatch stops before anything changes' {
+        Mock New-PrivateWorkDir { $d = Join-Path $TestDrive ('work-' + [guid]::NewGuid().ToString('N')); $null = New-Item -ItemType Directory $d; $d }
         Mock Get-CellGlidePackage { throw 'SHA-256 mismatch for CellGlide-1.0.0-windows-x64.zip' }
         Mock Stop-CellGlideProcesses {}; Mock Stop-OurService { $true }; Mock Install-Files {}
         Mock Set-OurService {}; Mock Set-DataDirAcl {}; Mock Set-UninstallEntry {}; Mock New-StartMenuShortcut {}
         Mock Start-Service {}; Mock Write-Host {}
         Invoke-ElevatedPart 'https://pkg.cellglide.com' '' 'x64' | Should -Be 1
-        foreach ($changer in 'Stop-CellGlideProcesses', 'Stop-OurService', 'Install-Files', 'Set-OurService', 'Set-DataDirAcl', 'Set-UninstallEntry', 'New-StartMenuShortcut') {
+        foreach ($changer in 'Stop-CellGlideProcesses', 'Stop-OurService', 'Install-Files', 'Set-OurService', 'Set-DataDirAcl', 'Set-UninstallEntry', 'New-StartMenuShortcut', 'Start-Service') {
             Should -Invoke $changer -Times 0 -Exactly -Because $changer
         }
         Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed:*SHA-256 mismatch*' }
@@ -98,8 +125,9 @@ Describe 'install.ps1' {
             $script:calls = New-Object System.Collections.Generic.List[string]
             $script:work = Join-Path $TestDrive ('work-' + [guid]::NewGuid().ToString('N'))
             Mock New-PrivateWorkDir { $null = New-Item -ItemType Directory $script:work; $script:work }
+            Mock Remove-StaleWorkDirs {}
             Mock Get-CellGlidePackage { [pscustomobject]@{ ZipPath = 'pkg.zip'; Version = '1.0.0'; TestBuild = $false } }
-            Mock Expand-Package { $null =New-Item -ItemType Directory $Dest; Set-Content (Join-Path $Dest 'version.txt') $script:packageVersion }
+            Mock Expand-Package { $null = New-Item -ItemType Directory $Dest; Set-Content (Join-Path $Dest 'version.txt') $script:packageVersion }
             Mock Get-PeMachine { 0x8664 }
             Mock Get-InstalledVersion { $script:installedVersion }
             Mock Test-Elevated { $true }
@@ -111,9 +139,12 @@ Describe 'install.ps1' {
             Mock New-StartMenuShortcut { $script:calls.Add('shortcut') }
             Mock Set-UninstallEntry { $script:calls.Add("entry $Version") }
             Mock Start-Service { $script:calls.Add('start') }
-            Mock Get-Service { [pscustomobject]@{ Status = 'Stopped' } | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { } -PassThru }
+            # The service as it was when the run began; $null = no service yet.
+            Mock Get-Service {
+                if ($null -eq $script:serviceStatus) { return $null }
+                [pscustomobject]@{ Status = $script:serviceStatus } | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { } -PassThru }
             Mock Write-Host {}
-            $script:packageVersion = '1.0.0'; $script:installedVersion = ''; $script:stopResult = $true
+            $script:packageVersion = '1.0.0'; $script:installedVersion = ''; $script:stopResult = $true; $script:serviceStatus = 'Running'
         }
         It 'runs the steps in order after the package is verified' {
             Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 0
@@ -129,26 +160,54 @@ Describe 'install.ps1' {
         It 'a package whose version.txt differs from latest.json changes nothing' {
             $script:packageVersion = '1.0.1'
             Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
-            $script:calls.Count | Should -Be 1                       # only the restart attempt
-            $script:calls[0] | Should -Be 'start'
+            $script:calls.Count | Should -Be 0                        # not even a service start
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed:*1.0.1*latest.json*' }
         }
         It 'a package for the other architecture changes nothing' {
             Mock Get-PeMachine { 0xAA64 }
             Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
-            Should -Invoke Install-Files -Times 0 -Exactly
-            Should -Invoke Stop-CellGlideProcesses -Times 0 -Exactly
+            $script:calls.Count | Should -Be 0
         }
-        It 'an adapter that does not go away stops the install and restarts the service' {
+        It 'an architecture other than x64 or arm64 is refused before anything' {
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x86' | Should -Be 1
+            Should -Invoke Get-CellGlidePackage -Times 0 -Exactly
+            Should -Invoke New-PrivateWorkDir -Times 0 -Exactly
+            $script:calls.Count | Should -Be 0
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -eq "Installation failed: unsupported architecture 'x86'" }
+        }
+        It 'an adapter that does not go away stops the install and restarts the service it stopped' {
             $script:stopResult = $false
             Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
             ($script:calls -join ',') | Should -Be 'processes,stop,start'
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed:*cellglide0*' }
         }
-        It 'a failed swap restarts the existing service' {
+        It 'a failed swap restarts the service it stopped' {
             Mock Install-Files { $script:calls.Add('files'); throw 'locked' }
             Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
             ($script:calls -join ',') | Should -Be 'processes,stop,files,start'
+        }
+        It 'a service that was already stopped stays stopped after a failure' {
+            $script:serviceStatus = 'Stopped'
+            Mock Install-Files { $script:calls.Add('files'); throw 'locked' }
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
+            ($script:calls -join ',') | Should -Be 'processes,stop,files'
+        }
+        It 'a service this run created is never started after a failure' {
+            $script:serviceStatus = $null
+            Mock Set-DataDirAcl { $script:calls.Add('acl'); throw 'C:\ProgramData\CellGlide\logs is a junction or symbolic link.' }
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
+            ($script:calls -join ',') | Should -Be 'processes,stop,files,service,acl'
+        }
+        It 'a refused data directory ACL starts nothing, even a service that was running' {
+            Mock Set-DataDirAcl { $script:calls.Add('acl'); throw 'C:\ProgramData\CellGlide\logs is a junction or symbolic link.' }
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
+            ($script:calls -join ',') | Should -Be 'processes,stop,files,service,acl'
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed:*junction*' }
+        }
+        It 'a later failure after the ACL step restarts the service it stopped' {
+            Mock New-StartMenuShortcut { $script:calls.Add('shortcut'); throw 'COM failed' }
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' | Should -Be 1
+            ($script:calls -join ',') | Should -Be 'processes,stop,files,service,acl,shortcut,start'
         }
         It 'a local zip is copied into the private folder and its hash printed' {
             $zip = Join-Path $TestDrive 'local.zip'; Set-Content $zip 'local' -NoNewline
@@ -157,6 +216,18 @@ Describe 'install.ps1' {
             Should -Invoke Expand-Package -ParameterFilter { $Zip -eq (Join-Path $script:work 'local.zip') }
             $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq "SHA-256: $hash" }
+        }
+        It 'a local zip the elevated part cannot see is refused with a clear message' {
+            Invoke-ElevatedPart '' 'Z:\nowhere\pkg.zip' 'x64' | Should -Be 1
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed: cannot find Z:\nowhere\pkg.zip*local path or a UNC path' }
+            $script:calls.Count | Should -Be 0
+        }
+        It 'a work folder handed in by the child is used and left for the child to remove' {
+            $given = Join-Path $TestDrive 'given'; $null = New-Item -ItemType Directory $given
+            Invoke-ElevatedPart 'http://127.0.0.1:8770' '' 'x64' $given | Should -Be 0
+            Should -Invoke New-PrivateWorkDir -Times 0 -Exactly
+            Should -Invoke Get-CellGlidePackage -ParameterFilter { $WorkDir -eq (Join-Path $given 'download') }
+            Test-Path $given | Should -BeTrue
         }
     }
     Context 'the main flow' {
@@ -185,20 +256,34 @@ Describe 'install.ps1' {
             Should -Invoke Get-NativeMachine -Times 0 -Exactly
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'Installation failed: Unsupported download location: https://example.com' }
         }
+        It 'a loopback source without -AllowLoopback stops at once' {
+            Invoke-CellGlideInstall -BaseUrl 'http://127.0.0.1:8770' -Unattended | Should -Be 1
+            Should -Invoke Get-NativeMachine -Times 0 -Exactly
+            Should -Invoke Invoke-ElevatedChild -Times 0 -Exactly
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed: Unsupported download location: http://127.0.0.1:8770*-AllowLoopback*' }
+        }
+        It 'CELLGLIDE_PKG_BASE is ignored' {
+            $env:CELLGLIDE_PKG_BASE = 'http://127.0.0.1:8770'
+            try { Invoke-CellGlideInstall -Unattended | Should -Be 0 }
+            finally { Remove-Item Env:\CELLGLIDE_PKG_BASE }
+            Should -Invoke Invoke-ElevatedChild -Times 1 -Exactly -ParameterFilter { $Parameters.BaseUrl -eq 'https://pkg.cellglide.com' -and -not $Parameters.AllowLoopback }
+        }
         It 'an unknown machine needs a supported PC' {
             Mock Get-NativeMachine { [uint16]0x014C }
             Invoke-CellGlideInstall -Unattended | Should -Be 2
             Should -Invoke Invoke-ElevatedChild -Times 0 -Exactly
         }
-        It 'without administrator rights the child gets the base, the architecture and the full zip path' {
+        It 'without administrator rights the child gets the base, the architecture, the loopback switch and the full zip path' {
             $zip = Join-Path $TestDrive 'pkg.zip'; Set-Content $zip 'z'
             Push-Location $TestDrive
-            try { Invoke-CellGlideInstall -BaseUrl 'http://127.0.0.1:8770/' -ZipPath 'pkg.zip' -Unattended | Should -Be 0 }
+            try { Invoke-CellGlideInstall -BaseUrl 'http://127.0.0.1:8770/' -AllowLoopback -ZipPath 'pkg.zip' -Unattended | Should -Be 0 }
             finally { Pop-Location }
             Should -Invoke Invoke-ElevatedChild -Times 1 -Exactly -ParameterFilter {
-                $ScriptText -eq $CellGlideInstallText -and
-                ($Arguments -join '|') -eq "-BaseUrl|http://127.0.0.1:8770|-Arch|x64|-ZipPath|$zip"
+                $ScriptText -eq $CellGlideInstallText -and $Parameters.Count -eq 4 -and
+                $Parameters.BaseUrl -eq 'http://127.0.0.1:8770' -and $Parameters.Arch -eq 'x64' -and
+                $Parameters.AllowLoopback -eq $true -and $Parameters.ZipPath -eq $zip
             }
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'Downloading from a local test source: http://127.0.0.1:8770' }
             Should -Invoke Invoke-Doctor -Times 1 -Exactly
             Should -Invoke Start-AppAsUser -Times 0 -Exactly
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'CellGlide 1.0.0 is installed.*' }
@@ -224,6 +309,82 @@ Describe 'install.ps1' {
         It 'shows the end-user notice before the install' {
             Invoke-CellGlideInstall -Unattended | Should -Be 0
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq $EndUserNotice }
+        }
+    }
+    Context 'checks of the PC, with the registry and services mocked' {
+        BeforeEach { Mock Write-Host {} }
+        It 'Smart App Control is read from the CI policy key' {
+            $script:sac = $null
+            Mock Get-ItemProperty -ParameterFilter { $Path -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -and $Name -eq 'VerifiedAndReputablePolicyState' } {
+                if ($null -eq $script:sac) { return $null }
+                [pscustomobject]@{ VerifiedAndReputablePolicyState = $script:sac } }
+            Get-SmartAppControlState | Should -Be 0
+            foreach ($v in 0, 1, 2) { $script:sac = $v; Get-SmartAppControlState | Should -Be $v }
+            Should -Invoke Get-ItemProperty -Times 4 -Exactly -ParameterFilter { $Path -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' }
+        }
+        It 'Apple''s service is found as the classic service' {
+            Mock Test-Path -ParameterFilter { $LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Services\Apple Mobile Device Service' } { $true }
+            Mock Get-Service -ParameterFilter { $Name -eq 'Apple Mobile Device Service' } { [pscustomobject]@{ Status = 'Running' } }
+            Mock Get-ChildItem { throw 'not needed' }
+            Test-AppleService | Should -BeTrue
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -eq "Apple's device service is installed (Running)." }
+        }
+        It 'Apple''s service is found as the Store app package' {
+            Mock Test-Path -ParameterFilter { $LiteralPath -like '*Apple Mobile Device Service' } { $false }
+            Mock Get-ChildItem -ParameterFilter { $LiteralPath -like '*AppModel\PackageRepository\Packages' } {
+                [pscustomobject]@{ PSChildName = 'Microsoft.WindowsCalculator_11.0_x64__8wekyb3d8bbwe' },
+                [pscustomobject]@{ PSChildName = 'AppleInc.AppleDevices_1.0.0.0_x64__nzyj5cx40ttqa' } }
+            Test-AppleService | Should -BeTrue
+        }
+        It 'no Apple service, or a look-alike package from another publisher, is missing' {
+            Mock Test-Path -ParameterFilter { $LiteralPath -like '*Apple Mobile Device Service' } { $false }
+            Mock Get-ChildItem -ParameterFilter { $LiteralPath -like '*AppModel\PackageRepository\Packages' } {
+                [pscustomobject]@{ PSChildName = 'AppleInc.AppleDevices_1.0.0.0_x64__0000000000000' } }
+            Test-AppleService | Should -BeFalse
+        }
+        It 'winget installs Apple Devices without accepting anything for the user' {
+            Mock Read-Host { 'y' }
+            Mock Get-Command -ParameterFilter { $Name -eq 'winget.exe' } { [pscustomobject]@{ Name = 'winget.exe' } }
+            $global:cgWingetArgs = $null
+            function global:winget.exe { $global:cgWingetArgs = @($args); $global:LASTEXITCODE = 0 }
+            try { Request-AppleDevices }
+            finally { Remove-Item Function:\global:winget.exe }
+            ($global:cgWingetArgs -join ' ') | Should -BeExactly 'install --id 9NP83LWLPZ9K --source msstore'
+            @($global:cgWingetArgs | Where-Object { $_ -like '--accept*' }).Count | Should -Be 0
+        }
+        It 'an elevated process starts the app through explorer.exe' {
+            Mock Test-Elevated { $true }
+            Mock Start-Process {}
+            Start-AppAsUser
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq "$env:SystemRoot\explorer.exe" -and "$ArgumentList" -eq '"C:\Program Files\CellGlide\app\CellGlide.exe"' }
+        }
+        It 'an ordinary process starts the app directly' {
+            Mock Test-Elevated { $false }
+            Mock Start-Process {}
+            Start-AppAsUser
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\Program Files\CellGlide\app\CellGlide.exe' -and -not $ArgumentList }
+        }
+        It 'the uninstall entry is written with string and DWord values' {
+            $key = 'HKCU:\Software\CellGlideTest-' + [guid]::NewGuid().ToString('N')
+            $dir = Join-Path $TestDrive 'installed'; $null = New-Item -ItemType Directory $dir; [IO.File]::WriteAllBytes((Join-Path $dir 'a.bin'), (New-Object byte[] 3000))
+            $savedKey = $UninstallKey; $savedDir = $InstallDir
+            $UninstallKey = $key; $InstallDir = $dir
+            try {
+                Set-UninstallEntry '1.0.0'
+                $item = Get-Item -LiteralPath $key
+                foreach ($n in 'NoModify', 'NoRepair', 'EstimatedSize') { $item.GetValueKind($n) | Should -Be 'DWord' -Because $n }
+                foreach ($n in 'DisplayName', 'DisplayVersion', 'Publisher', 'DisplayIcon', 'InstallLocation', 'UninstallString', 'URLInfoAbout') {
+                    $item.GetValueKind($n) | Should -Be 'String' -Because $n
+                }
+                $item.GetValue('EstimatedSize') | Should -Be 3
+                $item.GetValue('DisplayVersion') | Should -Be '1.0.0'
+                Set-UninstallEntry '1.0.1'
+                (Get-Item -LiteralPath $key).GetValue('DisplayVersion') | Should -Be '1.0.1'
+            } finally {
+                Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
+                $UninstallKey = $savedKey; $InstallDir = $savedDir
+            }
         }
     }
     It 'unattended never asks about Apple Devices' {
@@ -273,34 +434,111 @@ Describe 'install.ps1' {
     }
     It 'The elevated part''s log is printed by the parent' {
         Mock Write-Host {}
-        $start = { param($Path, $ArgList)
-            $log = $ArgList[[array]::IndexOf($ArgList, '-LogPath') + 1]
-            Set-Content $log "line from child`nsecond line"
-            $script:ranText = Get-Content $Path -Raw; $script:ranArgs = $ArgList
-            [pscustomobject]@{ ExitCode = 3 } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { } -PassThru }
-        Invoke-ElevatedChild "# the running script`n" @('-Arch', 'x64') $start | Should -Be 3
+        $start = { param($EncodedCommand, $Info)
+            Set-Content $Info.LogPath "line from child`nsecond line"
+            $script:ranText = [IO.File]::ReadAllText($Info.ScriptPath); $script:bootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($EncodedCommand))
+            [pscustomobject]@{ ExitCode = 2 } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { } -PassThru }
+        Invoke-ElevatedChild "# the running script`n" @{ Arch = 'x64' } $start | Should -Be 2
         $script:ranText | Should -Be "# the running script`n"          # the child runs the parent's own text, not a download
-        $script:ranArgs | Should -Contain '-ElevatedPart'
+        $script:bootstrap | Should -BeLike '*ElevatedPart = $true*'
+        $script:bootstrap | Should -BeLike "*Arch = 'x64'*"
         Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'line from child' }
         Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'second line' }
     }
     It 'the child''s script and log are removed afterwards' {
         Mock Write-Host {}
-        $start = { param($Path, $ArgList)
-            $script:paths = @($Path, $ArgList[[array]::IndexOf($ArgList, '-LogPath') + 1])
-            Set-Content $script:paths[1] 'x'
+        $start = { param($EncodedCommand, $Info)
+            $script:paths = @($Info.ScriptPath, $Info.LogPath)
+            Set-Content $Info.LogPath 'x'
             [pscustomobject]@{ ExitCode = 0 } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { } -PassThru }
-        Invoke-ElevatedChild "# x`n" @() $start | Should -Be 0
+        Invoke-ElevatedChild "# x`n" @{} $start | Should -Be 0
         foreach ($p in $script:paths) { Test-Path $p | Should -BeFalse }
         $script:paths[0] | Should -BeLike '*\cellglide-install-*.ps1'
+        $script:paths[1] | Should -Match '\\cellglide-install-[0-9a-f]{32}\.log$'
     }
     It 'a cancelled UAC prompt is a cancelled install' {
         Mock Write-Host {}
-        Invoke-ElevatedChild "# x`n" @() { param($Path, $ArgList) throw 'The operation was canceled by the user.' } | Should -Be 1
+        Invoke-ElevatedChild "# x`n" @{} { param($EncodedCommand, $Info) throw 'The operation was canceled by the user.' } | Should -Be 1
         Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'Installation cancelled.' }
     }
     It 'refuses to start the child without the script text' {
-        { Invoke-ElevatedChild '' @() { throw 'not reached' } } | Should -Throw "*Cannot find the running script's text*"
+        { Invoke-ElevatedChild '' @{} { throw 'not reached' } } | Should -Throw "*Cannot find the running script's text*"
+    }
+    Context 'the bootstrap run for real in a separate (unelevated) PowerShell' {
+        BeforeAll {
+            # A stand-in for install.ps1: the same parameters; it writes what it got to the log.
+            $script:childText = @'
+param([string]$BaseUrl = '', [string]$ZipPath = '', [switch]$Unattended, [switch]$ElevatedPart, [string]$Arch = '', [string]$LogPath = '', [switch]$AllowLoopback)
+[IO.File]::WriteAllText($LogPath, "got $ElevatedPart|$BaseUrl|$Arch|$ZipPath|$AllowLoopback")
+$code = 7
+'@
+            $script:runReal = { param($EncodedCommand, $Info)
+                if ($script:tamper) { Add-Content -LiteralPath $Info.ScriptPath "`n[IO.File]::WriteAllText(`$LogPath, 'tampered')" }
+                $p = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $EncodedCommand"
+                $null = $p.Handle
+                $p }
+        }
+        BeforeEach { Mock Write-Host {}; $script:tamper = $false }
+        It 'runs the checked text from memory with the parameters, and exits with its $code' {
+            $zip = "C:\it's here\a b.zip"
+            Invoke-ElevatedChild $script:childText @{ BaseUrl = 'http://127.0.0.1:8770'; Arch = 'x64'; ZipPath = $zip; AllowLoopback = $true } $script:runReal | Should -Be 7
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -eq "got True|http://127.0.0.1:8770|x64|$zip|True" }
+        }
+        It 'a script changed after the parent wrote it is not run' {
+            $script:tamper = $true
+            Invoke-ElevatedChild $script:childText @{ Arch = 'x64' } $script:runReal | Should -Be 1
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Installation failed: the copy of the installer in %TEMP% changed*' }
+            Should -Invoke Write-Host -Times 0 -Exactly -ParameterFilter { "$Object" -like 'got*' -or "$Object" -eq 'tampered' }
+        }
+        It 'install.ps1''s own guard and footer run in the bootstrap and give it the exit code' {
+            # install.ps1's param block, capture, iex guard and footer, with a stand-in main.
+            $stmts = $script:Ast.EndBlock.Statements
+            $guard = ($stmts | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] } | Select-Object -First 1).Extent.Text
+            $capture = ($stmts | Where-Object { $_.Extent.Text -like '$CellGlideInstallText =*' }).Extent.Text
+            $footer = ($stmts | Select-Object -Last 2 | ForEach-Object { $_.Extent.Text }) -join "`n"
+            $text = $script:Ast.ParamBlock.Extent.Text + "`n" + $capture + "`n" + $guard + "`n" +
+                'function Invoke-CellGlideInstall { param($BaseUrl, $ZipPath, [switch]$Unattended, [switch]$ElevatedPart, $Arch, $LogPath, [switch]$AllowLoopback) [IO.File]::WriteAllText($LogPath, "main $ElevatedPart $Arch"); 5 }' + "`n" + $footer
+            Invoke-ElevatedChild $text @{ Arch = 'arm64' } $script:runReal | Should -Be 5
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'main True arm64' }
+        }
+    }
+    It 'iex leaves no functions or variables behind' {
+        # install.ps1's param block, capture and guard, then a body that defines things.
+        $stmts = $script:Ast.EndBlock.Statements
+        $guard = ($stmts | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] } | Select-Object -First 1).Extent.Text
+        $capture = ($stmts | Where-Object { $_.Extent.Text -like '$CellGlideInstallText =*' }).Extent.Text
+        $text = $script:Ast.ParamBlock.Extent.Text + "`n" + $capture + "`n" + $guard + "`n" +
+            "function CgLeak { }`n`$cgLeak = 1`n[Console]::Out.WriteLine('body ran')"
+        $probe = "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))')))`n" +
+            "[Console]::Out.WriteLine('left: ' + (@('CgLeak', 'Invoke-CellGlideInstall') | Where-Object { Get-Command `$_ -ErrorAction SilentlyContinue }) + '|' + (@('cgLeak', 'CellGlideInstallText', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback') | Where-Object { Get-Variable `$_ -ErrorAction SilentlyContinue }))"
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))))
+        $out | Should -Contain 'body ran'
+        $out | Should -Contain 'left: |'
+    }
+    It 'bootstrap literals survive quotes' {
+        foreach ($v in "plain", "it's", "''", 'C:\a b\', '$(evil)', '`n') {
+            (& ([scriptblock]::Create((ConvertTo-PSLiteral $v)))) | Should -BeExactly $v
+        }
+        ConvertTo-PSLiteral $true | Should -Be '$true'; ConvertTo-PSLiteral $false | Should -Be '$false'
+    }
+    It 'the log copy for the parent is a new file only' {
+        $src = Join-Path $TestDrive 'install.log'
+        Set-Content $src @('**********************', 'Windows PowerShell transcript start', 'x', '**********************', 'Installing 1.0.0', '**********************', 'Windows PowerShell transcript end', 'y', '**********************')
+        $dest = Join-Path $TestDrive ('cellglide-install-' + [guid]::NewGuid().ToString('N') + '.log')
+        Copy-LogToParent $src $dest
+        @(Get-Content $dest) | Should -Be @('Installing 1.0.0')
+        { Copy-LogToParent $src $dest } | Should -Throw                     # exists: never overwritten
+        { Copy-LogToParent $src (Join-Path $TestDrive 'other.log') } | Should -Throw '*unexpected log path*'
+        $link = Join-Path $TestDrive 'linkdir'; $null = New-Item -ItemType Junction -Path $link -Target $TestDrive
+        try { { Copy-LogToParent $src (Join-Path $link ('cellglide-install-' + ('0' * 32) + '.log')) } | Should -Throw '*junction*' }
+        finally { [IO.Directory]::Delete($link) }
+    }
+    It 'a mapped network drive becomes its UNC path' {
+        ConvertTo-UncPath 'Z:\pkgs\a.zip' 'Network' '\\server\share' | Should -Be '\\server\share\pkgs\a.zip'
+        ConvertTo-UncPath 'Z:\a.zip' 'Network' '\\server\share\' | Should -Be '\\server\share\a.zip'
+        ConvertTo-UncPath 'C:\pkgs\a.zip' 'Fixed' '' | Should -Be 'C:\pkgs\a.zip'
+        ConvertTo-UncPath '\\server\share\a.zip' 'Network' '' | Should -Be '\\server\share\a.zip'
+        { ConvertTo-UncPath 'Z:\a.zip' 'Network' '' } | Should -Throw '*copy the zip to a local folder*'
     }
     It 'transcript banners are not printed' {
         $lines = @('**********************', 'Windows PowerShell transcript start', 'Start time: 1', 'Username: x', '**********************',
@@ -308,16 +546,6 @@ Describe 'install.ps1' {
             '**********************', 'Windows PowerShell transcript end', 'End time: 2', '**********************')
         Get-TranscriptBody $lines | Should -Be @('Installing 1.0.0', 'Service CellGlide is running.')
         Get-TranscriptBody @('only', 'lines') | Should -Be @('only', 'lines')
-    }
-    It 'arguments with spaces and quotes reach the child unchanged' {
-        $list = @('-File', 'C:\Users\a b\cellglide-install-1.ps1', '-ZipPath', 'C:\x y\', 'say "hi"', '')
-        $line = ConvertTo-CommandLine $list
-        # Split the line back the way the child's runtime does (CommandLineToArgvW rules).
-        Add-Type -Namespace CgTest -Name Argv -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CommandLineToArgvW(string cmd, out int n); [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);' -ErrorAction SilentlyContinue
-        $n = 0; $ptr = [CgTest.Argv]::CommandLineToArgvW("x.exe $line", [ref]$n)
-        $parsed = for ($i = 1; $i -lt $n; $i++) { [Runtime.InteropServices.Marshal]::PtrToStringUni([Runtime.InteropServices.Marshal]::ReadIntPtr($ptr, $i * [IntPtr]::Size)) }
-        $null = [CgTest.Argv]::LocalFree($ptr)
-        $parsed | Should -Be $list
     }
     It 'iex hands the script its own text' {
         # The same capture statement install.ps1 uses, run through iex in a fresh PowerShell.
