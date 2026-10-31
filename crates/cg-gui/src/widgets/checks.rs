@@ -4,7 +4,7 @@
 use super::kit::{Tone, ToneColor, secondary};
 use crate::effect::{DoctorFor, Effect, Reply};
 use cg_i18n::tr;
-use cg_ipc::describe::ui::check_rows;
+use cg_ipc::describe::ui::{CheckState, check_rows};
 use cg_ipc::{Check, Request};
 use iced::widget::{button, column, row, text};
 use iced::{Alignment, Element, Font, Length};
@@ -82,10 +82,11 @@ pub fn view<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let mut list = column![].spacing(8);
     for item in check_rows(checks, copied) {
-        let (mark, tone) = if item.ok {
-            ("✓", Tone::Green)
-        } else {
-            ("✗", Tone::Red)
+        let (mark, tone) = match item.state {
+            CheckState::Pass => ("✓", Tone::Green),
+            CheckState::Fail => ("✗", Tone::Red),
+            // Couldn't be checked: not a pass, and not known to fail either.
+            CheckState::Unknown => ("?", Tone::Orange),
         };
         let mut entry = column![
             row![

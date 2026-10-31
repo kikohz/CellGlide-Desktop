@@ -262,7 +262,7 @@ async fn a_restarted_service_is_reached_again() {
 async fn commands_of_later_tasks_say_not_yet() {
     let (sink, events) = collect();
     let rt = Runtime::start(offline_config(), sink);
-    let id = rt.send(Command::Subscribe);
+    let id = rt.send(Command::LeakStart);
     assert_eq!(
         reply_of(&events, id).await,
         ReplyResult::err("not yet".to_string())
@@ -402,4 +402,296 @@ async fn dropping_from_async_context_is_safe() {
     let rt = Runtime::start(offline_config(), Box::new(|_| {}));
     rt.send(Command::GetPrefs);
     drop(rt);
+}
+
+// The subscription, Toggle, and the replies that are views (Task 9).
+
+use cellglide::testing::{SERIAL, connected_snapshot, disconnected_snapshot, middle_day};
+use cg_ipc::{Check, CheckId, Contact, DiagRange, Response, Snapshot};
+
+/// A runtime on `svc` (files in a fresh directory), and what it says.
+fn runtime_on(svc: &FakeService) -> (Runtime, Collected, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, events) = collect();
+    let rt = Runtime::start(config(svc, dir.path()), sink);
+    (rt, events, dir)
+}
+
+fn count(events: &Collected, pred: impl Fn(&Event) -> bool) -> usize {
+    events.lock().unwrap().iter().filter(|e| pred(e)).count()
+}
+
+#[tokio::test]
+async fn subscribe_emits_state_then_service_gone() {
+    let mut svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(connected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    let id = rt.send(Command::Subscribe);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.connected),
+    )
+    .await;
+    svc.stop().await;
+    let gone = wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    assert!(matches!(gone, Event::ServiceGone { text, .. } if !text.is_empty()));
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn service_restart_resumes_state() {
+    // config.retry is 100 ms in real time: the subscription runs on the DLL's own runtime.
+    let mut svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(disconnected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    svc.stop().await;
+    wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    events.lock().unwrap().clear();
+    svc.restart().await;
+    svc.snapshots.send_replace(Snapshot {
+        devices: vec![SERIAL.into(), "B".into()],
+        ..disconnected_snapshot()
+    });
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    // Toggle acts on the new round's snapshot.
+    let id = rt.send(Command::Toggle);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::PhonePlugged { .. })),
+        0
+    );
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn service_gone_is_not_repeated_on_every_retry() {
+    let mut svc = FakeService::start(Replies::default()).await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    svc.stop().await;
+    wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    // Several 100 ms retries go by. The reason is said again only when it changes (the
+    // subscription ending, then the service not answering).
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let texts: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::ServiceGone { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!((1..=2).contains(&texts.len()), "{texts:#?}");
+    assert!(texts.windows(2).all(|w| w[0] != w[1]), "{texts:#?}");
+    // While the service is away Toggle has no snapshot to act on.
+    let id = rt.send(Command::Toggle);
+    assert!(matches!(
+        reply_of(&events, id).await,
+        ReplyResult::Err { .. }
+    ));
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn a_service_that_never_ran_is_gone_until_it_comes() {
+    let mut svc = FakeService::start(Replies::default()).await;
+    svc.stop().await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    svc.restart().await;
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn plugged_phone_emits_once() {
+    let svc = FakeService::start(Replies::default()).await;
+    let nothing_plugged = || Snapshot {
+        devices: Vec::new(),
+        selected: None,
+        ..disconnected_snapshot()
+    };
+    svc.snapshots.send_replace(nothing_plugged());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    svc.snapshots.send_replace(Snapshot {
+        devices: vec!["A".into()],
+        ..nothing_plugged()
+    });
+    wait_for(
+        &events,
+        |e| matches!(e, Event::PhonePlugged { serial } if serial == "A"),
+    )
+    .await;
+    // Several ticks go by.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::PhonePlugged { .. })),
+        1
+    );
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn subscribing_twice_keeps_one_subscription() {
+    let svc = FakeService::start(Replies::default()).await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    for _ in 0..3 {
+        let id = rt.send(Command::Subscribe);
+        assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    }
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let subscriptions = svc
+        .requests()
+        .iter()
+        .filter(|r| **r == Request::Subscribe)
+        .count();
+    assert_eq!(subscriptions, 1);
+    // Nothing changes, so the ticks send nothing more.
+    assert_eq!(count(&events, |e| matches!(e, Event::State { .. })), 1);
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn toggle_follows_the_wish() {
+    let svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(Snapshot {
+        wants_connection: true,
+        ..connected_snapshot()
+    });
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    let id = rt.send(Command::Toggle);
+    assert_eq!(
+        reply_of(&events, id).await,
+        ReplyResult::Ok {
+            value: ReplyValue::Done
+        }
+    );
+    assert!(svc.requests().contains(&Request::Disconnect));
+    // Nobody wants a connection: Toggle connects.
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if !view.wants_connection),
+    )
+    .await;
+    let id = rt.send(Command::Toggle);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    assert!(svc.requests().contains(&Request::Connect { serial: None }));
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn toggle_before_any_snapshot_is_text() {
+    let (sink, events) = collect();
+    let rt = Runtime::start(offline_config(), sink);
+    let id = rt.send(Command::Toggle);
+    let ReplyResult::Err { message } = reply_of(&events, id).await else {
+        panic!("expected Err");
+    };
+    // The language may be switched by another test meanwhile.
+    let texts = [cg_i18n::Lang::ZhCn, cg_i18n::Lang::En]
+        .map(|lang| cg_i18n::tr_in(lang, "gui.waiting_service", &[]));
+    assert!(texts.contains(&message), "{message}");
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn doctor_and_history_replies_are_views() {
+    let checks = vec![
+        Check::new(CheckId::Service, true),
+        Check::new(CheckId::Phone, false),
+    ];
+    let svc = FakeService::start(Replies {
+        doctor: Response::Doctor {
+            checks: checks.clone(),
+        },
+        history: Response::History { day: middle_day() },
+        ..Replies::default()
+    })
+    .await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    let id = rt.send(Command::Request {
+        request: Request::Doctor,
+    });
+    let ReplyResult::Ok {
+        value: ReplyValue::Checks { rows },
+    } = reply_of(&events, id).await
+    else {
+        panic!("expected Checks")
+    };
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].fix.is_some() && rows[0].fix.is_none());
+    let id = rt.send(Command::Request {
+        request: Request::History {
+            day: Some(middle_day().day),
+        },
+    });
+    let ReplyResult::Ok {
+        value: ReplyValue::History { view },
+    } = reply_of(&events, id).await
+    else {
+        panic!("expected History")
+    };
+    assert_eq!(view.day, middle_day().day);
+    assert_eq!(view.rows.len(), middle_day().events.len());
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn diagnostics_prepare_trims_the_contact() {
+    let svc = FakeService::start(Replies::default()).await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    let id = rt.send(Command::DiagnosticsPrepare {
+        range: DiagRange::Day,
+        email: "  a@b.co ".into(),
+        note: "".into(),
+    });
+    let ReplyResult::Ok {
+        value: ReplyValue::Diagnostics { file_name, json },
+    } = reply_of(&events, id).await
+    else {
+        panic!("expected Diagnostics")
+    };
+    assert!(file_name.starts_with("cellglide-diagnostics-"));
+    assert_eq!(json, "{}");
+    let contact = Contact {
+        email: Some("a@b.co".into()),
+        note: None,
+    };
+    assert!(svc.requests().contains(&Request::Diagnostics {
+        range: DiagRange::Day,
+        contact: Some(contact)
+    }));
+    // Nothing typed: no contact at all.
+    let id = rt.send(Command::DiagnosticsPrepare {
+        range: DiagRange::Week,
+        email: " ".into(),
+        note: "".into(),
+    });
+    reply_of(&events, id).await;
+    assert!(svc.requests().contains(&Request::Diagnostics {
+        range: DiagRange::Week,
+        contact: None
+    }));
+    rt.shutdown();
+}
+
+#[test]
+fn every_key_the_dll_names_is_listed() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        cg_i18n::testing::unlisted_keys(&[root.join("src")]),
+        Vec::<(std::path::PathBuf, String)>::new()
+    );
 }

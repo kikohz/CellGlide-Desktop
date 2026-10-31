@@ -784,6 +784,14 @@ fn check_name(id: CheckId) -> &'static str {
     }
 }
 
+/// The check couldn't be made, so it neither passed nor is known to fail: today only the DNS
+/// check when the service couldn't read its port tables (port 53 not known to be free).
+pub fn check_unchecked(check: &Check) -> bool {
+    !check.ok
+        && check.id == CheckId::Dns
+        && check.args.get("cause").map(String::as_str) == Some("unreadable")
+}
+
 /// The check's sentence and, when it failed, the fix to show.
 pub fn check_lines(check: &Check) -> (String, Option<String>) {
     let name = check_name(check.id);
@@ -798,12 +806,7 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         {
             "idle"
         }
-        // The service couldn't read its port tables: not known to be free.
-        (false, CheckId::Dns)
-            if check.args.get("cause").map(String::as_str) == Some("unreadable") =>
-        {
-            "unknown"
-        }
+        _ if check_unchecked(check) => "unknown",
         (true, _) => "ok",
         (false, _) => "fail",
     };

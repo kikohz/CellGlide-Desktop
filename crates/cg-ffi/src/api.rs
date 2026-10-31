@@ -74,8 +74,9 @@ pub enum Event {
         id: u64,
         result: ReplyResult,
     },
+    /// Boxed only to keep `Event` small; the JSON is the view itself.
     State {
-        view: OverviewView,
+        view: Box<OverviewView>,
     },
     /// No state for now, and why; the last state no longer holds.
     ServiceGone {

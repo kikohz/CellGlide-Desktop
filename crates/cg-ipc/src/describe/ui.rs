@@ -261,15 +261,25 @@ impl KnownDevices {
     /// Takes the next snapshot's iPhones; true when one was plugged in: one that wasn't in the
     /// last snapshot and was never seen or has been missing for at least [`REPLUG_AFTER`].
     pub fn update(&mut self, devices: &[String], now: Instant) -> bool {
+        self.plugged(devices, now).is_some()
+    }
+
+    /// [`KnownDevices::update`], naming the first iPhone (in `devices` order) that was plugged
+    /// in.
+    pub fn plugged(&mut self, devices: &[String], now: Instant) -> Option<String> {
         for gone in self.present.iter().filter(|s| !devices.contains(s)) {
             self.missing.entry(gone.clone()).or_insert(now);
         }
         self.missing
             .retain(|_, since| now.saturating_duration_since(*since) < REPLUG_AFTER);
-        let mut plugged = false;
+        let mut plugged = None;
         for serial in devices {
-            if !self.present.contains(serial) && self.missing.remove(serial).is_none() {
-                plugged = true;
+            // Every returning phone leaves `missing`, even after the first new one is found.
+            if !self.present.contains(serial)
+                && self.missing.remove(serial).is_none()
+                && plugged.is_none()
+            {
+                plugged = Some(serial.clone());
             }
         }
         self.present = devices.iter().cloned().collect();
@@ -280,11 +290,20 @@ impl KnownDevices {
 /// Whether the snapshot's `devices` has an iPhone that was plugged in, updating `known`.
 /// Without a previous list (first snapshot, service restarted) nothing was plugged in.
 pub fn plugged_in(known: &mut Option<KnownDevices>, devices: &[String], now: Instant) -> bool {
+    plugged_serial(known, devices, now).is_some()
+}
+
+/// [`plugged_in`], naming the iPhone that was plugged in.
+pub fn plugged_serial(
+    known: &mut Option<KnownDevices>,
+    devices: &[String],
+    now: Instant,
+) -> Option<String> {
     match known {
-        Some(known) => known.update(devices, now),
+        Some(known) => known.plugged(devices, now),
         None => {
             *known = Some(KnownDevices::new(devices));
-            false
+            None
         }
     }
 }
@@ -559,12 +578,32 @@ pub fn strip_cells(
 
 // The doctor's checks.
 
+/// How a check came out. `Unknown` is a check that couldn't be made (the service couldn't read
+/// what it needed): neither a pass nor a plain failure, so it is drawn as a state of its own.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Pass,
+    Fail,
+    Unknown,
+}
+
+pub fn check_state(check: &Check) -> CheckState {
+    if check.ok {
+        CheckState::Pass
+    } else if describe::check_unchecked(check) {
+        CheckState::Unknown
+    } else {
+        CheckState::Fail
+    }
+}
+
 /// One check, ready to draw.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CheckRow {
-    pub ok: bool,
+    pub state: CheckState,
     pub line: String,
-    /// The bare fix (for copying), when the check failed.
+    /// The bare fix (for copying), when the check didn't pass (failed or couldn't be made).
     pub fix: Option<String>,
     /// This fix is the one just copied: its button says so.
     pub copied: bool,
@@ -577,7 +616,7 @@ pub fn check_rows(checks: &[Check], copied: Option<&str>) -> Vec<CheckRow> {
             let (line, fix) = describe::check_lines(check);
             CheckRow {
                 copied: fix.as_deref().is_some() && fix.as_deref() == copied,
-                ok: check.ok,
+                state: check_state(check),
                 line,
                 fix,
             }
@@ -754,13 +793,16 @@ mod tests {
     #[test]
     fn view_types_round_trip_as_json() {
         let row = CheckRow {
-            ok: false,
+            state: CheckState::Unknown,
             line: "x".into(),
             fix: Some("y".into()),
             copied: false,
         };
         let text = serde_json::to_string(&row).unwrap();
-        assert_eq!(text, r#"{"ok":false,"line":"x","fix":"y","copied":false}"#);
+        assert_eq!(
+            text,
+            r#"{"state":"unknown","line":"x","fix":"y","copied":false}"#
+        );
         assert_eq!(serde_json::from_str::<CheckRow>(&text).unwrap(), row);
         assert_eq!(serde_json::to_string(&Tone::Orange).unwrap(), r#""orange""#);
         assert_eq!(
@@ -1019,6 +1061,20 @@ mod tests {
         // A service restart forgets the list: its first snapshot again doesn't count.
         let mut restarted = None;
         assert!(!plugged_in(&mut restarted, &a, back + REPLUG_AFTER));
+    }
+
+    #[test]
+    fn the_plugged_in_phone_is_named() {
+        let t0 = Instant::now();
+        let mut known = None;
+        assert_eq!(plugged_serial(&mut known, &["a".into()], t0), None);
+        let both = ["a".to_string(), "b".to_string()];
+        assert_eq!(plugged_serial(&mut known, &both, t0), Some("b".into()));
+        assert_eq!(plugged_serial(&mut known, &both, t0), None);
+        // "a" back within a moment does not count; "c" is new and named.
+        assert_eq!(plugged_serial(&mut known, &["b".into()], t0), None);
+        let back = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(plugged_serial(&mut known, &back, t0), Some("c".into()));
     }
 
     #[test]
@@ -1312,10 +1368,36 @@ mod tests {
             ],
             None,
         );
-        assert!(list[0].ok && list[0].fix.is_none());
-        assert!(!list[1].ok);
+        assert!(list[0].state == CheckState::Pass && list[0].fix.is_none());
+        assert_eq!(list[1].state, CheckState::Fail);
         assert!(list[1].fix.as_deref().is_some_and(|f| !f.is_empty()));
         assert_ne!(list[0].line, list[1].line);
+    }
+
+    #[test]
+    fn a_check_that_could_not_be_made_is_its_own_state() {
+        let _lock = en();
+        let unreadable = Check::new(CheckId::Dns, false)
+            .with("cause", "unreadable")
+            .with("error", "denied");
+        let rows = check_rows(
+            &[
+                unreadable,
+                Check::new(CheckId::Dns, false).with("owner", "x"),
+                Check::new(CheckId::Dns, true),
+            ],
+            None,
+        );
+        let states: Vec<CheckState> = rows.iter().map(|r| r.state).collect();
+        assert_eq!(
+            states,
+            [CheckState::Unknown, CheckState::Fail, CheckState::Pass]
+        );
+        assert!(rows[0].fix.is_some());
+        assert_eq!(
+            serde_json::to_string(&CheckState::Unknown).unwrap(),
+            r#""unknown""#
+        );
     }
 
     #[test]

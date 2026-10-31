@@ -1,6 +1,9 @@
-//! For this crate's tests only: events without a runtime, and the page tests' snapshots.
+//! For this crate's tests only: events without a runtime, and the page tests' snapshots and day.
 
 use crate::api::Event;
+use cg_ipc::health::{
+    DayStart, EventKind, EventPhase, HealthEvent, HealthSnapshot, HistoryDay, IssueCause,
+};
 use cg_ipc::phone::{PhoneCard, PhoneFrame, PhoneLabel};
 use cg_ipc::{ConnState, DnsMode, Snapshot};
 
@@ -54,5 +57,72 @@ pub fn disconnected_snapshot() -> Snapshot {
         )]
         .into(),
         ..Snapshot::default()
+    }
+}
+
+/// A week on record, looking at its fourth day (2026-10-27, UTC): the service starts, sharing
+/// runs from 09:00 to 12:00, and an issue starts, gets worse and ends in between.
+pub fn middle_day() -> HistoryDay {
+    let at = |h: i8, m: i8| {
+        jiff::civil::date(2026, 10, 27)
+            .at(h, m, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .expect("a UTC time")
+            .timestamp()
+    };
+    let issue = |t, cause, phase, duration, snapshot| HealthEvent {
+        cause: Some(cause),
+        phase: Some(phase),
+        duration,
+        snapshot,
+        ..HealthEvent::new(t, EventKind::Issue)
+    };
+    let first = HealthSnapshot {
+        channel_rtt: Some(4),
+        phone_latency: Some(41),
+        phone_loss: Some(0.02),
+        radio: Some("5G".into()),
+        connects_failed: Some([("timeout".to_string(), 3)].into()),
+        thermal: Some(1),
+        ..HealthSnapshot::default()
+    };
+    let worse = HealthSnapshot {
+        thermal: Some(2),
+        ..HealthSnapshot::default()
+    };
+    let days: Vec<String> = (24..=30).map(|d| format!("2026-10-{d}")).collect();
+    HistoryDay {
+        day: days[3].clone(),
+        start: DayStart::default(),
+        events: vec![
+            HealthEvent::new(at(8, 0), EventKind::ServiceStarted),
+            HealthEvent::new(at(8, 1), EventKind::UsbAttached),
+            HealthEvent::new(at(9, 0), EventKind::TunnelStarted),
+            issue(
+                at(10, 0),
+                IssueCause::PhoneUnstable,
+                EventPhase::Start,
+                None,
+                Some(first),
+            ),
+            issue(
+                at(10, 5),
+                IssueCause::Channel,
+                EventPhase::Escalate,
+                None,
+                Some(worse),
+            ),
+            issue(
+                at(10, 10),
+                IssueCause::Channel,
+                EventPhase::End,
+                Some(600),
+                None,
+            ),
+            HealthEvent::new(at(12, 0), EventKind::TunnelStopped),
+        ],
+        days,
+        begin: at(0, 0),
+        end: at(0, 0) + jiff::SignedDuration::from_hours(24),
     }
 }

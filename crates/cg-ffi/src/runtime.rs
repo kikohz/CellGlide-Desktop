@@ -3,6 +3,7 @@
 //! each command runs under [`guarded`].
 
 use crate::api::{Command, Event, ReplyResult, ReplyValue};
+use crate::subscription::Shared;
 use cg_i18n::{Lang, tr};
 use cg_ipc::Endpoint;
 use cg_tools::https::Target;
@@ -117,9 +118,13 @@ impl Events {
 
 /// What a command's handler needs.
 #[derive(Clone)]
-struct Context {
-    config: Arc<Config>,
-    events: Events,
+pub(crate) struct Context {
+    pub(crate) config: Arc<Config>,
+    pub(crate) events: Events,
+    /// What the subscription shares with `Toggle` (and later the speed test).
+    pub(crate) shared: Arc<Shared>,
+    /// Cancelled at shutdown; tasks that outlive their command stop with it.
+    pub(crate) cancel: CancellationToken,
 }
 
 type Finisher = Box<dyn FnOnce() + Send + 'static>;
@@ -193,12 +198,15 @@ impl Runtime {
             .enable_all()
             .build()
             .expect("the tokio runtime starts");
+        let cancel = CancellationToken::new();
         Runtime {
             tokio: Some(tokio),
-            cancel: CancellationToken::new(),
+            cancel: cancel.clone(),
             context: Context {
                 config: Arc::new(config),
                 events: Events(Delivery::Queue(queue.clone(), queued)),
+                shared: Arc::default(),
+                cancel,
             },
             queue,
             event_thread: Some(event_thread),
@@ -372,15 +380,17 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
         // `dispatch` takes it: the reply is followed by `Event::Prefs`, which only it sends.
         Command::SetPrefs { .. } => unreachable!("dispatch handles SetPrefs"),
         Command::Request { request } => crate::requests::request(&config.endpoint, request).await,
-        // Tasks 9 and 10.
-        Command::Subscribe
-        | Command::Toggle
-        | Command::SpeedStart { .. }
+        Command::Subscribe => crate::subscription::subscribe(context),
+        Command::Toggle => crate::subscription::toggle(&config.endpoint, &context.shared).await,
+        Command::DiagnosticsPrepare { range, email, note } => {
+            crate::requests::diagnostics(&config.endpoint, range, &email, &note).await
+        }
+        // Task 10.
+        Command::SpeedStart { .. }
         | Command::SpeedCancel
         | Command::SpeedHistoryClear
         | Command::LeakStart
         | Command::LeakCancel
-        | Command::DiagnosticsPrepare { .. }
         | Command::DiagnosticsSend { .. }
         | Command::DiagnosticsSave { .. } => ReplyResult::err("not yet"),
     }

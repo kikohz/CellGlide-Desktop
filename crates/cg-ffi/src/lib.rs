@@ -7,6 +7,7 @@ pub mod api;
 pub mod ffi;
 mod requests;
 pub mod runtime;
+mod subscription;
 #[doc(hidden)]
 pub mod testing;
 pub mod views;
