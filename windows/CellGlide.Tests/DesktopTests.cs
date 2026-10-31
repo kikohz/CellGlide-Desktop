@@ -256,6 +256,55 @@ public class DesktopTests
         Assert.Equal(2, seen);
     }
 
+    /// <summary>
+    /// W3 final review M3: the DLL does not start, the app shows its (modal) message, and the user starts the
+    /// app again meanwhile. The redirect arrives through the latch while the message is up and must open no
+    /// window (there is no shell); the exit code is 2, and nothing opens afterwards either.
+    /// </summary>
+    [Fact]
+    public void A_redirect_while_the_start_failure_message_is_up_opens_no_window()
+    {
+        var gate = new HostGate();
+        var latch = new ActivationLatch();
+        var windows = 0;
+        latch.Attach(() => gate.Open(() => windows++));
+        var shown = 0;
+        var core = gate.Start(
+            () => throw new DllNotFoundException(),
+            () =>
+            {
+                shown++;
+                Assert.True(gate.IsQuitting);
+                latch.Signal();
+            },
+            out var exitCode);
+        Assert.Null(core);
+        Assert.Equal(1, shown);
+        Assert.Equal(2, exitCode);
+        Assert.Equal(HostGate.StartFailureExitCode, exitCode);
+        Assert.Equal(0, windows);
+        latch.Signal();
+        Assert.Equal(0, windows);
+    }
+
+    [Fact]
+    public void A_started_dll_lets_windows_open_until_quit()
+    {
+        var gate = new HostGate();
+        var fake = new FakeCore();
+        var core = gate.Start(() => fake, () => Assert.Fail("no failure message"), out var exitCode);
+        Assert.Same(fake, core);
+        Assert.Equal(0, exitCode);
+        Assert.False(gate.IsQuitting);
+        var windows = 0;
+        Assert.True(gate.Open(() => windows++));
+        gate.Quit();
+        Assert.False(gate.Open(() => windows++));
+        Assert.Equal(1, windows);
+        // Anything other than a broken installation is still a bug and passed on.
+        Assert.Throws<ArgumentException>(() => new HostGate().Start(() => throw new ArgumentException(), () => { }, out _));
+    }
+
     [Fact]
     public void Without_an_early_activation_attach_delivers_nothing()
     {

@@ -24,6 +24,7 @@ public partial class App : Application
     static readonly TimeSpan CancelWait = TimeSpan.FromSeconds(2);
 
     readonly LaunchOptions _options;
+    readonly HostGate _gate = new();
     DispatcherQueue? _queue;
     AppLifetime? _lifetime;
     MainWindow? _window;
@@ -61,7 +62,7 @@ public partial class App : Application
     public Autostart Autostart { get; private set; } = null!;
 
     /// <summary>Set once quitting has begun: windows close for real, nothing opens any more.</summary>
-    public bool IsQuitting { get; private set; }
+    public bool IsQuitting => _gate.IsQuitting;
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -70,11 +71,12 @@ public partial class App : Application
         // this point was held by the latch and is delivered now. It runs once OnLaunched is done.
         Program.Activations.Attach(() => queue.TryEnqueue(() => ShowWindow(null)));
 
-        if (CoreStart.TryStart(() => NativeCore.Start("")) is not { } core)
+        // No DLL, so no texts and nothing to show: say the installation is broken, and leave. The gate is
+        // quitting before the (modal) message appears, so a start redirected here meanwhile opens nothing.
+        var core = _gate.Start(() => NativeCore.Start(""), StartupFailure.Show, out var exitCode);
+        if (core is null)
         {
-            // No DLL, so no texts and nothing to show: say the installation is broken, and leave.
-            StartupFailure.Show();
-            Program.ExitCode = StartupFailure.ExitCode;
+            Program.ExitCode = exitCode;
             Exit();
             return;
         }
@@ -118,15 +120,12 @@ public partial class App : Application
     }
 
     /// <summary>Opens (creating it the first time) or brings forward the main window; not while quitting.</summary>
-    internal void ShowWindow(Section? section)
-    {
-        if (IsQuitting)
+    internal void ShowWindow(Section? section) =>
+        _ = _gate.Open(() =>
         {
-            return;
-        }
-        _window ??= new MainWindow(Shell);
-        _window.ShowAt(section);
-    }
+            _window ??= new MainWindow(Shell);
+            _window.ShowAt(section);
+        });
 
     /// <summary>The tray click: opens or closes the panel (created the first time); not while quitting.</summary>
     void TogglePanel()
@@ -149,7 +148,7 @@ public partial class App : Application
         if (_quit is null)
         {
             // Before anything else, so Exit() closing the windows is not taken for a user's close.
-            IsQuitting = true;
+            _gate.Quit();
             _quit = QuitInOrderAsync();
         }
         return _quit;

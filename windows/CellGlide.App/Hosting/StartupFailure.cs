@@ -12,9 +12,6 @@ namespace CellGlide.App.Hosting;
 /// </remarks>
 static partial class StartupFailure
 {
-    /// <summary>The process exit code after showing it.</summary>
-    public const int ExitCode = 2;
-
     const string Caption = "CellGlide";
 
     const string Text =
