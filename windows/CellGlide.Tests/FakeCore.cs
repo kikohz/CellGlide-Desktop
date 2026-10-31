@@ -44,6 +44,9 @@ sealed class FakeCore(ReplyResult? autoReply = null) : ICore
     /// <summary>How many commands had been sent when Dispose was first called; -1 before that.</summary>
     public int SentCountAtDispose { get; private set; } = -1;
 
+    /// <summary>Whether anyone still listened to EventReceived when Dispose was first called (null before).</summary>
+    public bool? ListenedAtDispose { get; private set; }
+
     public void Dispose()
     {
         lock (_gate)
@@ -51,6 +54,7 @@ sealed class FakeCore(ReplyResult? autoReply = null) : ICore
             if (DisposeCount++ == 0)
             {
                 SentCountAtDispose = Sent.Count;
+                ListenedAtDispose = EventReceived is not null;
             }
         }
     }

@@ -240,6 +240,8 @@ Speed test finished
   6. 另加：第一次就以 `--tray` 启动：有进程、没有窗口；随后不带参数启动：窗口出现，进程数 1。
   - **「带到前面」没能确认**：会话 1 当时锁屏，`GetForegroundWindow` 一直是 0（连新开的 cmd 窗口也不是前台）。代码上，第二个实例先 `AllowSetForegroundWindow(第一个实例的 PID)`，第一个实例在 `Activated` 里 `AppWindow.Show()`、`Activate()`、`SetForegroundWindow`。要在屏幕解锁时再看一次（Task 10）。
 - **自启动，真实的 HKCU Run 值**（临时控制台程序用 `RegistryRunKey()`、`RegistryStartupApproved()` 的默认路径，exe 路径用 `C:\Program Files\CellGlide\app\CellGlide.exe`）：测前 Run 里没有 `CellGlide`，StartupApproved\Run 里也没有；`Read()` 为 Off；`Set(true)` 后值为 `"C:\Program Files\CellGlide\app\CellGlide.exe" --tray`（REG_SZ），`Read()` 为 On；`Set(false)` 后值消失，`Read()` 为 Off；最后按测前状态恢复（没有值），比对 Run 值和 StartupApproved 值与测前一致。StartupApproved 只读，没有写过。
+- **DLL 起不来（fix round 1）**：把 Debug 输出复制一份、删掉 `cellglide_native.dll` 后启动（会话 1）：弹出标题 `CellGlide` 的错误框，内容为「The CellGlide installation is incomplete. Please reinstall CellGlide.」加「CellGlide 安装不完整，请重新安装 CellGlide。」；点掉后进程以退出码 2 结束。
+- **早到的转发（fix round 1）**：以 `--tray` 启动后 300 ms 就不带参数再启动一次：第二个进程以 0 退出，进程数 1，窗口出现（标题 `CellGlide`）。`Activated` 在 `Application.Start` 之前就订阅，没等到 `OnLaunched` 的转发会被记住，之后补上。
 
 ## 已知问题（W1 实测发现，未修）
 

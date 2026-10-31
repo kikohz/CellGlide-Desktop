@@ -8,7 +8,6 @@ using CellGlide.Core.Native;
 using CellGlide.Core.ViewModels;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
-using Microsoft.Windows.AppLifecycle;
 
 namespace CellGlide.App;
 
@@ -49,9 +48,20 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        _queue = DispatcherQueue.GetForCurrentThread();
-        var core = NativeCore.Start("");
-        Hub = new EventHub(core, new DispatcherQueueDispatcher(_queue));
+        var queue = _queue = DispatcherQueue.GetForCurrentThread();
+        // A later start of the app (without --tray), on a background thread; one that came before
+        // this point was held by the latch and is delivered now. It runs once OnLaunched is done.
+        Program.Activations.Attach(() => queue.TryEnqueue(() => ShowWindow(null)));
+
+        if (CoreStart.TryStart(() => NativeCore.Start("")) is not { } core)
+        {
+            // No DLL, so no texts and nothing to show: say the installation is broken, and leave.
+            StartupFailure.Show();
+            Program.ExitCode = StartupFailure.ExitCode;
+            Exit();
+            return;
+        }
+        Hub = new EventHub(core, new DispatcherQueueDispatcher(queue));
         L.Hub = Hub;
         Shell = new ShellViewModel(Hub);
         Settings = new SettingsViewModel(Hub);
@@ -61,11 +71,9 @@ public partial class App : Application
 
         Hub.PhonePlugged += OnPhonePlugged;
         Hub.Fault += message => Debug.WriteLine("CellGlide: fault: " + message);
-        // A later start of the app (without --tray) lands here, on a background thread.
-        AppInstance.GetCurrent().Activated += (_, _) => _queue.TryEnqueue(() => ShowWindow(null));
 
-        _ = Shell.SubscribeAsync();
-        _ = Settings.LoadAsync();
+        Observe(Shell.SubscribeAsync(), "subscribe");
+        Observe(Settings.LoadAsync(), "loading preferences");
         if (!_options.Tray)
         {
             ShowWindow(null);
@@ -94,11 +102,34 @@ public partial class App : Application
     /// <summary>Quits: cancels a running test, stops the DLL, then exits (Task 5 also removes the tray icon).</summary>
     public async Task QuitAsync()
     {
-        if (_lifetime is not null)
+        // Task 5: remove the tray icon and hide the window first, and ignore Activated and
+        // PhonePlugged from here on, so nothing reopens during the cancel wait.
+        try
         {
-            await _lifetime.QuitAsync(CancelWait);
+            if (_lifetime is not null)
+            {
+                await _lifetime.QuitAsync(CancelWait);
+            }
         }
-        L.Hub = null;
-        Exit();
+        catch (Exception e)
+        {
+            Debug.WriteLine("CellGlide: quitting in order failed: " + e);
+        }
+        finally
+        {
+            L.Hub = null;
+            Exit();
+        }
     }
+
+    /// <summary>
+    /// Logs a fire-and-forget command that faulted (a failed reply already sets the view model's
+    /// Error); the exception is read, so it is never left unobserved.
+    /// </summary>
+    static void Observe(Task task, string what) =>
+        _ = task.ContinueWith(
+            t => Debug.WriteLine("CellGlide: " + what + " failed: " + t.Exception),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
 }

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using CellGlide.Core.Desktop;
 using CellGlide.Core.Dispatch;
@@ -176,6 +177,70 @@ public class DesktopTests
         await new AppLifetime(hub, core, speed, leak).QuitAsync(TimeSpan.FromSeconds(2));
         Assert.Collection(core.Sent, c => Assert.IsType<SpeedCancelCommand>(c), c => Assert.IsType<LeakCancelCommand>(c));
         Assert.Equal(2, core.SentCountAtDispose);
+    }
+
+    [Fact]
+    public async Task Quit_closes_the_hub_before_stopping_the_dll()
+    {
+        var core = new FakeCore(autoReply: new ReplyOk(new DoneValue()));
+        var hub = new EventHub(core, new InlineDispatcher());
+        var settings = new SettingsViewModel(hub);
+        var speed = new SpeedViewModel(hub, settings);
+        core.Raise(Samples.Event("speed_progress_download.json"));
+        await new AppLifetime(hub, core, speed, new LeakViewModel(hub)).QuitAsync(TimeSpan.FromSeconds(2));
+        // By cg_shutdown the hub has let go of the core's events, so no callback reaches C# code
+        // that could wait on the UI thread, and the hub is closed: later commands are cancelled.
+        Assert.False(core.ListenedAtDispose);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => hub.SendAsync(new SubscribeCommand()));
+    }
+
+    [Fact]
+    public void Core_start_failure_from_a_broken_install_is_null()
+    {
+        Assert.Null(CoreStart.TryStart(() => throw new DllNotFoundException()));
+        Assert.Null(CoreStart.TryStart(() => throw new EntryPointNotFoundException()));
+        Assert.Null(CoreStart.TryStart(() => throw new BadImageFormatException()));
+        Assert.Null(CoreStart.TryStart(() => throw new InvalidOperationException("cg_init returned -1")));
+        var core = new FakeCore();
+        Assert.Same(core, CoreStart.TryStart(() => core));
+        // Anything else is a bug, not an installation problem.
+        Assert.Throws<ArgumentException>(() => CoreStart.TryStart(() => throw new ArgumentException()));
+    }
+
+    [Fact]
+    public void Core_start_failure_when_the_dll_is_not_there()
+    {
+        // The real path: a P/Invoke into a library that is not there.
+        Assert.Null(CoreStart.TryStart(() =>
+        {
+            _ = MissingLibraryCall();
+            return new FakeCore();
+        }));
+    }
+
+    [DllImport("cellglide_missing_for_tests.dll")]
+    static extern int MissingLibraryCall();
+
+    [Fact]
+    public void An_activation_before_the_app_is_ready_is_delivered_once_on_attach()
+    {
+        var latch = new ActivationLatch();
+        latch.Signal();
+        latch.Signal();
+        var seen = 0;
+        latch.Attach(() => seen++);
+        Assert.Equal(1, seen);
+        latch.Signal();
+        Assert.Equal(2, seen);
+    }
+
+    [Fact]
+    public void Without_an_early_activation_attach_delivers_nothing()
+    {
+        var latch = new ActivationLatch();
+        var seen = 0;
+        latch.Attach(() => seen++);
+        Assert.Equal(0, seen);
     }
 
     [Fact]

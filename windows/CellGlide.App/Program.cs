@@ -16,8 +16,17 @@ public static partial class Program
     /// <summary>How long a second instance waits for the running one to take its activation.</summary>
     static readonly TimeSpan RedirectWait = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Later starts of the app handed to this one. Subscribed before the app starts, so a redirect
+    /// that arrives before OnLaunched is kept until the app attaches to it.
+    /// </summary>
+    internal static ActivationLatch Activations { get; } = new();
+
+    /// <summary>The process's exit code; set before <see cref="Application.Exit"/> to report a failure.</summary>
+    internal static int ExitCode { get; set; }
+
     [STAThread]
-    static void Main(string[] args)
+    static int Main(string[] args)
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
         var options = LaunchOptions.Parse(args, Environment.GetEnvironmentVariable("CELLGLIDE_SPEED_CAPS"));
@@ -25,21 +34,23 @@ public static partial class Program
         switch (LaunchDecision.Decide(main.IsCurrent, options.Tray))
         {
             case Launch.Exit:
-                return;
+                return 0;
             case Launch.Redirect:
                 if (Redirect(main))
                 {
-                    return;
+                    return 0;
                 }
                 // The running app did not take it: better a second app than nothing on screen (as on Linux).
                 break;
         }
+        AppInstance.GetCurrent().Activated += (_, _) => Activations.Signal();
         Application.Start(_ =>
         {
             var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
             SynchronizationContext.SetSynchronizationContext(context);
             new App(options);
         });
+        return ExitCode;
     }
 
     /// <summary>Hands this launch to the running app (on a background thread, at most <see cref="RedirectWait"/>); false if that failed.</summary>
