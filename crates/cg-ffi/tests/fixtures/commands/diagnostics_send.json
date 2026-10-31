@@ -1,0 +1,4 @@
+{
+  "type": "diagnostics_send",
+  "json": "{\"format\":1,\"platform\":\"windows\",\"log\":[]}"
+}

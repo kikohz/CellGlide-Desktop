@@ -1,0 +1,58 @@
+{
+  "type": "reply",
+  "id": 4,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "history",
+      "view": {
+        "day": "2026-10-30",
+        "label": "Today, Oct 30",
+        "prev_day": "2026-10-29",
+        "next_day": null,
+        "strip": [],
+        "ticks": [
+          {
+            "label": "00:00",
+            "at": 0.0
+          },
+          {
+            "label": "06:00",
+            "at": 0.25
+          },
+          {
+            "label": "12:00",
+            "at": 0.5
+          },
+          {
+            "label": "18:00",
+            "at": 0.75
+          },
+          {
+            "label": "24:00",
+            "at": 1.0
+          }
+        ],
+        "rows": [],
+        "legend": [
+          {
+            "label": "OK",
+            "tone": "green"
+          },
+          {
+            "label": "Unstable",
+            "tone": "orange"
+          },
+          {
+            "label": "Interrupted",
+            "tone": "red"
+          },
+          {
+            "label": "Not sharing",
+            "tone": "gray"
+          }
+        ]
+      }
+    }
+  }
+}

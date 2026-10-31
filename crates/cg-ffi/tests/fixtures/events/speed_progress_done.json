@@ -1,0 +1,92 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": false,
+    "dialog": null,
+    "start_enabled": true,
+    "start_note": null,
+    "uplink": "Wi-Fi",
+    "legs": [
+      {
+        "label": "iPhone",
+        "phone": true,
+        "stage": "done",
+        "stage_text": null,
+        "error": null,
+        "numbers": "Latency 42 ms · Download 195.4 Mbps · Upload 38.7 Mbps",
+        "latency": 41.5,
+        "download": 195.4,
+        "upload": 38.7,
+        "progress": 1.0,
+        "waiting": false,
+        "curve": [
+          {
+            "x": 0.0,
+            "y": 0.104913
+          },
+          {
+            "x": 0.33333334,
+            "y": 0.7689355
+          },
+          {
+            "x": 0.6666667,
+            "y": 1.0
+          },
+          {
+            "x": 1.0,
+            "y": 0.96596724
+          }
+        ],
+        "notes": [
+          "Upload reached the data cap after 6.5 s of sampling; treat the result as approximate."
+        ]
+      },
+      {
+        "label": "Wi-Fi",
+        "phone": false,
+        "stage": "done",
+        "stage_text": null,
+        "error": null,
+        "numbers": "Latency 12 ms · Download 310.6 Mbps",
+        "latency": 12.5,
+        "download": 310.6,
+        "upload": null,
+        "progress": 1.0,
+        "waiting": false,
+        "curve": [
+          {
+            "x": 0.0,
+            "y": 0.3879588
+          },
+          {
+            "x": 0.5,
+            "y": 0.9344816
+          },
+          {
+            "x": 1.0,
+            "y": 1.0
+          }
+        ],
+        "notes": [
+          "Upload was too slow to measure: the server confirmed no data in time."
+        ]
+      }
+    ],
+    "verdict": "Wi‑Fi download is 1.6x faster than the iPhone.",
+    "history": [
+      {
+        "date": "2026-10-30 08:09",
+        "phone": "↓ 195.4 ↑ 38.7 Mbps · 42 ms",
+        "wifi": "↓ 310.6 ↑ 95.2 Mbps · 12 ms",
+        "carrier": "AT&T · 5G"
+      },
+      {
+        "date": "2026-10-29 21:30",
+        "phone": "↓ 195.4 ↑ 38.7 Mbps · 42 ms",
+        "wifi": null,
+        "carrier": null
+      }
+    ],
+    "history_failed": false
+  }
+}

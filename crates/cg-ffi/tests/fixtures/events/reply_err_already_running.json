@@ -1,0 +1,8 @@
+{
+  "type": "reply",
+  "id": 9,
+  "result": {
+    "status": "err",
+    "message": "A speed test is already running."
+  }
+}

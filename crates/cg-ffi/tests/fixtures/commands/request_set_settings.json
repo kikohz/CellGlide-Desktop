@@ -1,0 +1,12 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "set_settings",
+    "auto_connect": false,
+    "phone": {
+      "mode": "serial",
+      "serial": "00008140-000000000000002C"
+    },
+    "strict_dns": true
+  }
+}

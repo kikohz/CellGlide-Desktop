@@ -1,0 +1,30 @@
+{
+  "type": "reply",
+  "id": 2,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "checks",
+      "rows": [
+        {
+          "state": "pass",
+          "line": "Apple's device service is installed (Apple Devices app)",
+          "fix": null,
+          "copied": false
+        },
+        {
+          "state": "fail",
+          "line": "wintun.dll is missing or its signature isn't valid",
+          "fix": "run the installation command again in PowerShell: irm https://pkg.cellglide.com/install.ps1 | iex",
+          "copied": false
+        },
+        {
+          "state": "unknown",
+          "line": "Couldn't check whether another program is using DNS port 53 (access denied)",
+          "fix": "run the check again; if it still can't check, restart the computer",
+          "copied": false
+        }
+      ]
+    }
+  }
+}

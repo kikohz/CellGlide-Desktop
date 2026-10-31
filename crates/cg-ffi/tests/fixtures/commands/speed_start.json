@@ -1,0 +1,6 @@
+{
+  "type": "speed_start",
+  "include_wifi": true,
+  "confirmed": false,
+  "caps": null
+}

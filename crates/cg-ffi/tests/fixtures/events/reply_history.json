@@ -1,0 +1,196 @@
+{
+  "type": "reply",
+  "id": 3,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "history",
+      "view": {
+        "day": "2026-10-27",
+        "label": "Tuesday, Oct 27",
+        "prev_day": "2026-10-26",
+        "next_day": "2026-10-28",
+        "strip": [
+          {
+            "x": 375.0,
+            "width": 125.0,
+            "tone": "green",
+            "alpha": 0.6
+          },
+          {
+            "x": 416.66666,
+            "width": 3.472229,
+            "tone": "orange",
+            "alpha": 1.0
+          },
+          {
+            "x": 420.1389,
+            "width": 3.472229,
+            "tone": "red",
+            "alpha": 1.0
+          }
+        ],
+        "ticks": [
+          {
+            "label": "00:00",
+            "at": 0.0
+          },
+          {
+            "label": "06:00",
+            "at": 0.25
+          },
+          {
+            "label": "12:00",
+            "at": 0.5
+          },
+          {
+            "label": "18:00",
+            "at": 0.75
+          },
+          {
+            "label": "24:00",
+            "at": 1.0
+          }
+        ],
+        "rows": [
+          {
+            "time": "13:30",
+            "title": "Other event",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:25",
+            "title": "Strict DNS couldn't be turned on; DNS queries may also go to other networks",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:20",
+            "title": "The system didn't let CellGlide set DNS",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:15",
+            "title": "Couldn't update the local network routes after a network change; retrying on the next change",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:10",
+            "title": "No original gateway found, so local network devices are reached through the phone for now",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:05",
+            "title": "Updated: 1.0.0 → 1.0.1",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "13:00",
+            "title": "USB disconnected",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "12:00",
+            "title": "Sharing stopped",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "10:10",
+            "title": "Recovered: Cable connection dropped · 10 min 0 sec",
+            "tone": "green",
+            "details": []
+          },
+          {
+            "time": "10:05",
+            "title": "Cable connection dropped (escalated)",
+            "tone": "red",
+            "details": [
+              {
+                "label": "iPhone temperature",
+                "value": "hot"
+              }
+            ]
+          },
+          {
+            "time": "10:00",
+            "title": "Phone network unstable",
+            "tone": "orange",
+            "details": [
+              {
+                "label": "Cable latency",
+                "value": "4 ms"
+              },
+              {
+                "label": "iPhone latency",
+                "value": "41 ms"
+              },
+              {
+                "label": "Packet loss",
+                "value": "2%"
+              },
+              {
+                "label": "Network",
+                "value": "5G"
+              },
+              {
+                "label": "Connection failed",
+                "value": "3"
+              },
+              {
+                "label": "Main cause",
+                "value": "timeout"
+              },
+              {
+                "label": "iPhone temperature",
+                "value": "warm"
+              }
+            ]
+          },
+          {
+            "time": "09:00",
+            "title": "Sharing started",
+            "tone": "green",
+            "details": []
+          },
+          {
+            "time": "08:01",
+            "title": "USB connected",
+            "tone": "gray",
+            "details": []
+          },
+          {
+            "time": "08:00",
+            "title": "Background service started",
+            "tone": "gray",
+            "details": []
+          }
+        ],
+        "legend": [
+          {
+            "label": "OK",
+            "tone": "green"
+          },
+          {
+            "label": "Unstable",
+            "tone": "orange"
+          },
+          {
+            "label": "Interrupted",
+            "tone": "red"
+          },
+          {
+            "label": "Not sharing",
+            "tone": "gray"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -8,7 +8,7 @@ use cg_ipc::phone::{PhoneCard, PhoneFrame, PhoneLabel};
 use cg_ipc::{ConnState, DnsMode, Snapshot};
 
 pub use crate::runtime::{Events, guarded};
-pub use shape::tuple_free;
+pub use shape::plain_shape;
 
 mod shape;
 

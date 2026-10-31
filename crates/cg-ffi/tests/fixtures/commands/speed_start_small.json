@@ -1,0 +1,10 @@
+{
+  "type": "speed_start",
+  "include_wifi": false,
+  "confirmed": true,
+  "caps": {
+    "download_bytes": 20000000,
+    "upload_bytes": 10000000,
+    "seconds": 10
+  }
+}

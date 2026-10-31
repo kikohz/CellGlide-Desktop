@@ -1,0 +1,10 @@
+{
+  "type": "reply",
+  "id": 1,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "done"
+    }
+  }
+}

@@ -186,6 +186,6 @@ mod tests {
         // Nothing heard yet: waiting for the service.
         let waiting = chrome(None, None);
         assert_eq!(waiting.tray.title, tr("gui.waiting_service", &[]));
-        assert_eq!(crate::testing::tuple_free(&c), Ok(()));
+        assert_eq!(crate::testing::plain_shape(&c), Ok(()));
     }
 }

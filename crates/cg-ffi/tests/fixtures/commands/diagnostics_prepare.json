@@ -1,0 +1,6 @@
+{
+  "type": "diagnostics_prepare",
+  "range": "day",
+  "email": "someone@example.com",
+  "note": "Slow since this morning."
+}

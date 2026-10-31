@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(result.groups[0].queries, Some(5));
         assert!(result.groups[0].ecs);
         assert!(result.subnet.unwrap().contains("Quad9"));
-        crate::testing::tuple_free(&view).unwrap();
+        crate::testing::plain_shape(&view).unwrap();
         // The same outcome, after a language change, reads in the new language.
         cg_i18n::set(Lang::ZhCn);
         let again = leak(false, Some(&outcome), Some(DnsMode::Unmanaged));

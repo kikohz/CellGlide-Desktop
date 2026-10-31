@@ -223,7 +223,7 @@ impl Follower {
 }
 
 /// `ServiceGone` for `down`, with what the tray and the sidebar show meanwhile.
-fn gone(down: &ServiceDown) -> Event {
+pub(crate) fn gone(down: &ServiceDown) -> Event {
     Event::ServiceGone {
         text: down.text.clone(),
         not_in_group: down.not_in_group,

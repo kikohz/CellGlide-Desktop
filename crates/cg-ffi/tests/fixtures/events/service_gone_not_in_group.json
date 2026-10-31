@@ -1,0 +1,100 @@
+{
+  "type": "service_gone",
+  "text": "✗ The current user isn't in the cellglide group and can't control the service\n  Fix: sudo usermod -aG cellglide $USER, then log out and back in",
+  "not_in_group": true,
+  "chrome": {
+    "tray": {
+      "active": false,
+      "alert": false,
+      "wants": false,
+      "title": "✗ The current user isn't in the cellglide group and can't control the service\n  Fix: sudo usermod -aG cellglide $USER, then log out and back in"
+    },
+    "menu": [
+      {
+        "kind": "version",
+        "label": "CellGlide 1.0.0",
+        "enabled": false
+      },
+      {
+        "kind": "separator",
+        "label": "",
+        "enabled": true
+      },
+      {
+        "kind": "toggle",
+        "label": "Connect",
+        "enabled": true
+      },
+      {
+        "kind": "open",
+        "label": "Open CellGlide",
+        "enabled": true
+      },
+      {
+        "kind": "separator",
+        "label": "",
+        "enabled": true
+      },
+      {
+        "kind": "quit",
+        "label": "Quit",
+        "enabled": true
+      }
+    ],
+    "badges": {
+      "overview": "none",
+      "history": "none",
+      "settings": "warning"
+    },
+    "sidebar": [
+      {
+        "heading": null,
+        "sections": [
+          {
+            "section": "overview",
+            "title": "Overview"
+          }
+        ]
+      },
+      {
+        "heading": "Tools",
+        "sections": [
+          {
+            "section": "speed_test",
+            "title": "Speed test"
+          },
+          {
+            "section": "dns_leak",
+            "title": "DNS Leak Test"
+          }
+        ]
+      },
+      {
+        "heading": "Activity",
+        "sections": [
+          {
+            "section": "history",
+            "title": "Connection History"
+          },
+          {
+            "section": "diagnostics",
+            "title": "Diagnostics"
+          }
+        ]
+      },
+      {
+        "heading": "App",
+        "sections": [
+          {
+            "section": "settings",
+            "title": "Settings"
+          },
+          {
+            "section": "about",
+            "title": "About"
+          }
+        ]
+      }
+    ]
+  }
+}

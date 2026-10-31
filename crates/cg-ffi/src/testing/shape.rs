@@ -4,10 +4,12 @@ use serde::ser::{self, Impossible, Serialize};
 use std::fmt;
 
 /// Whether `value` serializes without a tuple, a fixed-size array, a tuple struct or variant,
-/// or a newtype variant (`{"busy":true}`). The walk follows serde's own description of the
-/// type, so a `Vec<String>` passes and a pair of objects is caught; only the parts present in
-/// `value` are walked, so fill in every `Option`. `Err` names the path to the first offender.
-pub fn tuple_free<T: Serialize + ?Sized>(value: &T) -> Result<(), String> {
+/// a newtype variant (`{"busy":true}`), or a field left out (`skip_serializing_if`: an
+/// `Option` is `null`, never missing). The walk follows serde's own description of the type,
+/// so a `Vec<String>` passes and a pair of objects is caught; only the parts present in
+/// `value` are walked, so fill in every `Option` somewhere, and leave it empty somewhere for a
+/// skipped field to show. `Err` names the path to the first offender.
+pub fn plain_shape<T: Serialize + ?Sized>(value: &T) -> Result<(), String> {
     value
         .serialize(Shape("$".into()))
         .map_err(|Offender(message)| message)
@@ -215,6 +217,9 @@ impl ser::SerializeStruct for Parts {
     ) -> Result<(), Offender> {
         value.serialize(Shape(format!("{}.{name}", self.path)))
     }
+    fn skip_field(&mut self, name: &'static str) -> Result<(), Offender> {
+        Err(Offender(format!("{}.{name} is left out", self.path)))
+    }
     fn end(self) -> Result<(), Offender> {
         Ok(())
     }
@@ -230,6 +235,9 @@ impl ser::SerializeStructVariant for Parts {
     ) -> Result<(), Offender> {
         value.serialize(Shape(format!("{}.{name}", self.path)))
     }
+    fn skip_field(&mut self, name: &'static str) -> Result<(), Offender> {
+        Err(Offender(format!("{}.{name} is left out", self.path)))
+    }
     fn end(self) -> Result<(), Offender> {
         Ok(())
     }
@@ -237,7 +245,7 @@ impl ser::SerializeStructVariant for Parts {
 
 #[cfg(test)]
 mod tests {
-    use super::tuple_free;
+    use super::plain_shape;
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -267,25 +275,56 @@ mod tests {
 
     #[test]
     fn named_shapes_and_lists_of_values_pass() {
-        assert_eq!(tuple_free(&vec!["a".to_string(), "b".to_string()]), Ok(()));
-        assert_eq!(tuple_free(&vec![1.5_f64, 2.5]), Ok(()));
-        assert_eq!(tuple_free(&vec![vec![item()]]), Ok(()));
-        assert_eq!(tuple_free(&Some(Box::new(item()))), Ok(()));
-        assert_eq!(tuple_free(&Switch::Hidden), Ok(()));
-        assert_eq!(tuple_free(&Tagged::One { n: 1 }), Ok(()));
+        assert_eq!(plain_shape(&vec!["a".to_string(), "b".to_string()]), Ok(()));
+        assert_eq!(plain_shape(&vec![1.5_f64, 2.5]), Ok(()));
+        assert_eq!(plain_shape(&vec![vec![item()]]), Ok(()));
+        assert_eq!(plain_shape(&Some(Box::new(item()))), Ok(()));
+        assert_eq!(plain_shape(&Switch::Hidden), Ok(()));
+        assert_eq!(plain_shape(&Tagged::One { n: 1 }), Ok(()));
     }
 
     #[test]
     fn tuples_fixed_arrays_and_newtype_variants_are_caught() {
         assert_eq!(
-            tuple_free(&vec![(item(), item())]),
+            plain_shape(&vec![(item(), item())]),
             Err("$[0] is a tuple or a fixed-size array".into())
         );
-        assert!(tuple_free(&["a".to_string(), "b".to_string()]).is_err());
+        assert!(plain_shape(&["a".to_string(), "b".to_string()]).is_err());
         assert_eq!(
-            tuple_free(&Switch::Busy(true)),
+            plain_shape(&Switch::Busy(true)),
             Err("$ is a newtype variant (busy)".into())
         );
-        assert!(tuple_free(&Point(1.0, 2.0)).is_err());
+        assert!(plain_shape(&Point(1.0, 2.0)).is_err());
+    }
+
+    #[derive(Serialize)]
+    struct Sparse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum SparseVariant {
+        One {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+        },
+    }
+
+    #[test]
+    fn a_left_out_option_is_caught_and_a_null_one_passes() {
+        assert_eq!(
+            plain_shape(&Sparse { note: None }),
+            Err("$.note is left out".into())
+        );
+        assert_eq!(
+            plain_shape(&Sparse {
+                note: Some("x".into())
+            }),
+            Ok(())
+        );
+        assert!(plain_shape(&SparseVariant::One { note: None }).is_err());
+        assert_eq!(plain_shape(&Some(None::<String>)), Ok(()));
     }
 }

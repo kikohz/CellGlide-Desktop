@@ -1,0 +1,58 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": true,
+    "dialog": null,
+    "start_enabled": true,
+    "start_note": null,
+    "uplink": "Wi-Fi",
+    "legs": [
+      {
+        "label": "iPhone",
+        "phone": true,
+        "stage": "upload",
+        "stage_text": "Waiting for the server to confirm the upload…",
+        "error": null,
+        "numbers": "Latency 38 ms · Download 87.3 Mbps",
+        "latency": 38.5,
+        "download": 87.3,
+        "upload": null,
+        "progress": 1.0,
+        "waiting": true,
+        "curve": [
+          {
+            "x": 0.0,
+            "y": 0.14318442
+          },
+          {
+            "x": 0.5,
+            "y": 0.73596793
+          },
+          {
+            "x": 1.0,
+            "y": 1.0
+          }
+        ],
+        "notes": []
+      },
+      {
+        "label": "Wi-Fi",
+        "phone": false,
+        "stage": "idle",
+        "stage_text": null,
+        "error": null,
+        "numbers": "",
+        "latency": null,
+        "download": null,
+        "upload": null,
+        "progress": 0.0,
+        "waiting": false,
+        "curve": [],
+        "notes": []
+      }
+    ],
+    "verdict": null,
+    "history": [],
+    "history_failed": false
+  }
+}

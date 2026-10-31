@@ -1,0 +1,7 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "history",
+    "day": null
+  }
+}

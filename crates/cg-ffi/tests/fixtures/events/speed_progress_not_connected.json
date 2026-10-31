@@ -1,0 +1,14 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": false,
+    "dialog": null,
+    "start_enabled": false,
+    "start_note": "Connect the iPhone to test the phone connection",
+    "uplink": null,
+    "legs": [],
+    "verdict": null,
+    "history": [],
+    "history_failed": true
+  }
+}

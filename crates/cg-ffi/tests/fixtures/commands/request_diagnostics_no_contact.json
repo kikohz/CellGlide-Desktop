@@ -1,0 +1,8 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "diagnostics",
+    "range": "day",
+    "contact": null
+  }
+}

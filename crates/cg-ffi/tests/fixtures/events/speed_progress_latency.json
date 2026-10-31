@@ -1,0 +1,45 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": true,
+    "dialog": null,
+    "start_enabled": true,
+    "start_note": null,
+    "uplink": "Wi-Fi",
+    "legs": [
+      {
+        "label": "iPhone",
+        "phone": true,
+        "stage": "latency",
+        "stage_text": "Checking HTTPS latency…",
+        "error": null,
+        "numbers": "",
+        "latency": null,
+        "download": null,
+        "upload": null,
+        "progress": 0.0,
+        "waiting": false,
+        "curve": [],
+        "notes": []
+      },
+      {
+        "label": "Wi-Fi",
+        "phone": false,
+        "stage": "idle",
+        "stage_text": null,
+        "error": null,
+        "numbers": "",
+        "latency": null,
+        "download": null,
+        "upload": null,
+        "progress": 0.0,
+        "waiting": false,
+        "curve": [],
+        "notes": []
+      }
+    ],
+    "verdict": null,
+    "history": [],
+    "history_failed": false
+  }
+}

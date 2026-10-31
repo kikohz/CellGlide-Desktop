@@ -1,0 +1,7 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "connect",
+    "serial": "00008140-000000000000002C"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "reply",
+  "id": 6,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "sent",
+      "code": "CG-7K2Q9"
+    }
+  }
+}

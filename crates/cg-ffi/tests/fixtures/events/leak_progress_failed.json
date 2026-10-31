@@ -1,0 +1,10 @@
+{
+  "type": "leak_progress",
+  "view": {
+    "running": false,
+    "start_label": "Start test",
+    "offers_checks": false,
+    "result": null,
+    "error": "The test service is unavailable right now. Please try again later"
+  }
+}

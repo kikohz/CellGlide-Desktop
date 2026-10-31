@@ -1,0 +1,135 @@
+{
+  "type": "state",
+  "view": {
+    "connected": false,
+    "wants_connection": false,
+    "title": "Disconnected",
+    "detail": "Disconnected. Click Connect to use the phone's network again.",
+    "status_tone": "gray",
+    "button_label": "Connect",
+    "device_subtitle": "Test iPhone · iPhone 16e",
+    "health": null,
+    "strict_dns": null,
+    "phone": null,
+    "chrome": {
+      "tray": {
+        "active": false,
+        "alert": false,
+        "wants": false,
+        "title": "Disconnected"
+      },
+      "menu": [
+        {
+          "kind": "version",
+          "label": "CellGlide 1.0.0",
+          "enabled": false
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "toggle",
+          "label": "Connect",
+          "enabled": true
+        },
+        {
+          "kind": "open",
+          "label": "Open CellGlide",
+          "enabled": true
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "quit",
+          "label": "Quit",
+          "enabled": true
+        }
+      ],
+      "badges": {
+        "overview": "none",
+        "history": "none",
+        "settings": "none"
+      },
+      "sidebar": [
+        {
+          "heading": null,
+          "sections": [
+            {
+              "section": "overview",
+              "title": "Overview"
+            }
+          ]
+        },
+        {
+          "heading": "Tools",
+          "sections": [
+            {
+              "section": "speed_test",
+              "title": "Speed test"
+            },
+            {
+              "section": "dns_leak",
+              "title": "DNS Leak Test"
+            }
+          ]
+        },
+        {
+          "heading": "Activity",
+          "sections": [
+            {
+              "section": "history",
+              "title": "Connection History"
+            },
+            {
+              "section": "diagnostics",
+              "title": "Diagnostics"
+            }
+          ]
+        },
+        {
+          "heading": "App",
+          "sections": [
+            {
+              "section": "settings",
+              "title": "Settings"
+            },
+            {
+              "section": "about",
+              "title": "About"
+            }
+          ]
+        }
+      ]
+    },
+    "settings": {
+      "auto_connect": true,
+      "strict_dns": true,
+      "phones": [
+        {
+          "choice": {
+            "mode": "auto"
+          },
+          "label": "Auto discovery / waiting for selected device"
+        },
+        {
+          "choice": {
+            "mode": "serial",
+            "serial": "00008140-000000000000002C"
+          },
+          "label": "Test iPhone · iPhone 16e"
+        }
+      ],
+      "selected_phone": 0,
+      "dns": {
+        "text": "Not connected; using this computer's own DNS",
+        "tone": "gray"
+      },
+      "proxy": null
+    }
+  }
+}

@@ -385,7 +385,7 @@ mod tests {
                 .is_some_and(|p| p.battery.is_some() && p.heat.is_some())
         );
         assert!(v.health.is_some() && v.strict_dns.is_some());
-        assert_eq!(crate::testing::tuple_free(&v), Ok(()));
+        assert_eq!(crate::testing::plain_shape(&v), Ok(()));
         // Options are null, never left out.
         let json = serde_json::to_value(&v).unwrap();
         assert!(json["phone"]["model"].is_null());

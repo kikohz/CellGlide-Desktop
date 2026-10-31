@@ -1,0 +1,187 @@
+{
+  "type": "state",
+  "view": {
+    "connected": true,
+    "wants_connection": true,
+    "title": "Connected, this computer is using the phone's network",
+    "detail": "Web pages, apps and video calls all go through the phone's network.",
+    "status_tone": "green",
+    "button_label": "Disconnect and go back to your network",
+    "device_subtitle": "Test iPhone · iPhone 16e",
+    "health": {
+      "tone": "red",
+      "line": "Phone network down · for 3 min 0 sec"
+    },
+    "strict_dns": "Strict DNS: on (DNS queries can only go through the phone)",
+    "phone": {
+      "title": "中国移动",
+      "carrier": "中国移动",
+      "radio": "5G",
+      "model": "iPhone 16e",
+      "battery": {
+        "percent": 80,
+        "charging": true,
+        "low_power": true,
+        "label": "80% (charging)"
+      },
+      "speeds": "shared",
+      "download": "2.50 MB/s",
+      "upload": "400.0 KB/s",
+      "quality": "Network quality Excellent · 38 ms",
+      "battery_line": "Charging 18.5 W · 20 W supply · Battery 46°C · Battery health 93% · 212 cycles",
+      "heat": {
+        "text": "iPhone is overheating at 46°C and may slow down",
+        "severe": true
+      },
+      "dim": false,
+      "trail": [
+        [
+          {
+            "x": 0.9491525,
+            "down": 0.8400002,
+            "up": 0.1520001
+          },
+          {
+            "x": 0.9661017,
+            "down": 1.0,
+            "up": 0.16
+          }
+        ],
+        [
+          {
+            "x": 1.0,
+            "down": 0.5,
+            "up": 0.0480002
+          }
+        ]
+      ]
+    },
+    "chrome": {
+      "tray": {
+        "active": true,
+        "alert": true,
+        "wants": true,
+        "title": "Connected, this computer is using the phone's network"
+      },
+      "menu": [
+        {
+          "kind": "version",
+          "label": "CellGlide 1.0.0",
+          "enabled": false
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "toggle",
+          "label": "Disconnect",
+          "enabled": true
+        },
+        {
+          "kind": "open",
+          "label": "Open CellGlide",
+          "enabled": true
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "quit",
+          "label": "Quit",
+          "enabled": true
+        }
+      ],
+      "badges": {
+        "overview": "critical",
+        "history": "critical",
+        "settings": "none"
+      },
+      "sidebar": [
+        {
+          "heading": null,
+          "sections": [
+            {
+              "section": "overview",
+              "title": "Overview"
+            }
+          ]
+        },
+        {
+          "heading": "Tools",
+          "sections": [
+            {
+              "section": "speed_test",
+              "title": "Speed test"
+            },
+            {
+              "section": "dns_leak",
+              "title": "DNS Leak Test"
+            }
+          ]
+        },
+        {
+          "heading": "Activity",
+          "sections": [
+            {
+              "section": "history",
+              "title": "Connection History"
+            },
+            {
+              "section": "diagnostics",
+              "title": "Diagnostics"
+            }
+          ]
+        },
+        {
+          "heading": "App",
+          "sections": [
+            {
+              "section": "settings",
+              "title": "Settings"
+            },
+            {
+              "section": "about",
+              "title": "About"
+            }
+          ]
+        }
+      ]
+    },
+    "settings": {
+      "auto_connect": true,
+      "strict_dns": true,
+      "phones": [
+        {
+          "choice": {
+            "mode": "auto"
+          },
+          "label": "Auto discovery / waiting for selected device"
+        },
+        {
+          "choice": {
+            "mode": "serial",
+            "serial": "00008110-000000000000001A"
+          },
+          "label": "Remembered iPhone (offline)"
+        },
+        {
+          "choice": {
+            "mode": "serial",
+            "serial": "00008140-000000000000002C"
+          },
+          "label": "Test iPhone · iPhone 16e"
+        }
+      ],
+      "selected_phone": 1,
+      "dns": {
+        "text": "Resolved by CellGlide DNS on the phone",
+        "tone": "green"
+      },
+      "proxy": "socks5h://127.0.0.1:1080"
+    }
+  }
+}

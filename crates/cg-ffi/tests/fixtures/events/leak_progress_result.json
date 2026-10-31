@@ -1,0 +1,37 @@
+{
+  "type": "leak_progress",
+  "view": {
+    "running": false,
+    "start_label": "Test again",
+    "offers_checks": true,
+    "result": {
+      "tone": "orange",
+      "title": "DNS is not managed by CellGlide",
+      "detail": "The system did not let CellGlide set DNS, so lookups still use the original network: Quad9, 203.0.113.7. Run cellglide doctor to see why and how to fix it.",
+      "you": "AT&T Enterprises, LLC · California, US",
+      "groups": [
+        {
+          "name": "Quad9",
+          "location": "US",
+          "addresses": [
+            "9.9.9.9",
+            "9.9.9.10"
+          ],
+          "queries": 5,
+          "ecs": true
+        },
+        {
+          "name": "Unknown network",
+          "location": null,
+          "addresses": [
+            "203.0.113.7"
+          ],
+          "queries": null,
+          "ecs": false
+        }
+      ],
+      "subnet": "Quad9 tells websites’ DNS servers which network block you’re on, which reveals your rough location."
+    },
+    "error": null
+  }
+}

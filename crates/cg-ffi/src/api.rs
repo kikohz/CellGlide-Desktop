@@ -8,6 +8,11 @@ use cg_ipc::describe::ui::CheckRow;
 use cg_tools::prefs::Prefs;
 use serde::{Deserialize, Serialize};
 
+mod samples;
+
+#[doc(hidden)]
+pub use samples::{command_samples, event_samples};
+
 /// What the app asks for. `cg_send` answers each with a number; the result comes back as an
 /// [`Event::Reply`] with that number.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -15,8 +20,9 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     /// Keep sending [`Event::State`] (and [`Event::ServiceGone`] while the service is away).
     Subscribe,
-    /// One request to the service.
+    /// One request to the service, in the pipe's own JSON (see [`request_json`]).
     Request {
+        #[serde(with = "request_json")]
         request: cg_ipc::Request,
     },
     /// Connect or disconnect, whichever the last snapshot calls for.
@@ -152,6 +158,137 @@ impl ReplyResult {
     pub fn err(message: impl Into<String>) -> ReplyResult {
         ReplyResult::Err {
             message: message.into(),
+        }
+    }
+}
+
+/// `cg_ipc::Request` inside [`Command::Request`]: the pipe's JSON, except that a contact's
+/// missing email or note is `null` rather than left out, as every `Option` the app sees.
+///
+/// `cg_ipc::Contact` itself keeps leaving them out: it is also the `contact` of the
+/// diagnostics bundle, which mirrors the Mac's (Swift leaves out nil, and so does
+/// `cg_diag::DiagnosticsBundle`), so changing it would change what the support server
+/// receives from Linux and Windows. Reading needs nothing special: a `null` and a missing
+/// field both become `None`.
+mod request_json {
+    use cg_ipc::{Contact, DiagRange, Request};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(request: &Request, serializer: S) -> Result<S::Ok, S::Error> {
+        match request {
+            Request::Diagnostics { range, contact } => Diagnostics {
+                range: *range,
+                contact: contact.as_ref().map(ContactFields::from),
+            }
+            .serialize(serializer),
+            other => other.serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Request, D::Error> {
+        Request::deserialize(deserializer)
+    }
+
+    /// `Request::Diagnostics`, field for field.
+    #[derive(Serialize)]
+    #[serde(tag = "cmd", rename = "diagnostics")]
+    struct Diagnostics<'a> {
+        range: DiagRange,
+        contact: Option<ContactFields<'a>>,
+    }
+
+    /// `Contact` with both fields always there.
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ContactFields<'a> {
+        email: Option<&'a str>,
+        note: Option<&'a str>,
+    }
+
+    impl<'a> From<&'a Contact> for ContactFields<'a> {
+        fn from(contact: &'a Contact) -> Self {
+            // Every field named, so a new one fails to compile here until it is carried over.
+            let Contact { email, note } = contact;
+            ContactFields {
+                email: email.as_deref(),
+                note: note.as_deref(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cg_ipc::{Contact, Request};
+    use serde_json::{Value, json};
+
+    fn diagnostics(email: Option<&str>, note: Option<&str>) -> Command {
+        Command::Request {
+            request: Request::Diagnostics {
+                range: DiagRange::Week,
+                contact: Some(Contact {
+                    email: email.map(str::to_string),
+                    note: note.map(str::to_string),
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn a_contact_without_a_note_says_null_and_reads_back() {
+        let command = diagnostics(Some("a@b.co"), None);
+        let text = serde_json::to_string(&command).unwrap();
+        assert_eq!(
+            text,
+            r#"{"type":"request","request":{"cmd":"diagnostics","range":"week","contact":{"email":"a@b.co","note":null}}}"#
+        );
+        assert_eq!(serde_json::from_str::<Command>(&text).unwrap(), command);
+        // The pipe to the service is unchanged: there the missing note stays left out.
+        let Command::Request { request } = &command else {
+            unreachable!()
+        };
+        assert_eq!(
+            String::from_utf8(cg_ipc::to_line(request)).unwrap(),
+            "{\"cmd\":\"diagnostics\",\"range\":\"week\",\"contact\":{\"email\":\"a@b.co\"}}\n"
+        );
+        // And what the app sends with the field left out still reads.
+        let sparse = json!({"type":"request","request":{"cmd":"diagnostics","range":"week","contact":{"email":"a@b.co"}}});
+        assert_eq!(serde_json::from_value::<Command>(sparse).unwrap(), command);
+    }
+
+    #[test]
+    fn apart_from_nulls_the_request_is_the_pipes_json() {
+        let requests = [
+            diagnostics(Some("a@b.co"), Some("hi")),
+            diagnostics(None, Some("hi")),
+            Command::Request {
+                request: Request::Diagnostics {
+                    range: DiagRange::Day,
+                    contact: None,
+                },
+            },
+            Command::Request {
+                request: Request::SetSettings {
+                    auto_connect: None,
+                    phone: None,
+                    strict_dns: Some(true),
+                },
+            },
+            Command::Request {
+                request: Request::History { day: None },
+            },
+        ];
+        for command in requests {
+            let Command::Request { request } = &command else {
+                unreachable!()
+            };
+            let mut ours = serde_json::to_value(&command).unwrap()["request"].take();
+            let pipe: Value = serde_json::from_slice(&cg_ipc::to_line(request)).unwrap();
+            if let Some(contact) = ours.get_mut("contact").and_then(Value::as_object_mut) {
+                contact.retain(|_, v| !v.is_null());
+            }
+            assert_eq!(ours, pipe);
         }
     }
 }

@@ -1,0 +1,14 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": false,
+    "dialog": "data_warning",
+    "start_enabled": true,
+    "start_note": null,
+    "uplink": "Wi-Fi",
+    "legs": [],
+    "verdict": null,
+    "history": [],
+    "history_failed": false
+  }
+}

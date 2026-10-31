@@ -1,0 +1,11 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "diagnostics",
+    "range": "week",
+    "contact": {
+      "email": "someone@example.com",
+      "note": "The connection drops every few minutes."
+    }
+  }
+}

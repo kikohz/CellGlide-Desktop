@@ -1,0 +1,15 @@
+{
+  "type": "reply",
+  "id": 8,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "prefs",
+      "prefs": {
+        "speed_confirmed": true,
+        "include_wifi": false,
+        "open_on_plug": true
+      }
+    }
+  }
+}

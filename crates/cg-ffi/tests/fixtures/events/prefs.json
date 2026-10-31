@@ -1,0 +1,8 @@
+{
+  "type": "prefs",
+  "prefs": {
+    "speed_confirmed": true,
+    "include_wifi": false,
+    "open_on_plug": true
+  }
+}

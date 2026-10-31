@@ -1,0 +1,11 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "diagnostics",
+    "range": "day",
+    "contact": {
+      "email": "someone@example.com",
+      "note": null
+    }
+  }
+}

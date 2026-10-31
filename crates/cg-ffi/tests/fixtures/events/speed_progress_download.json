@@ -1,0 +1,77 @@
+{
+  "type": "speed_progress",
+  "view": {
+    "running": true,
+    "dialog": null,
+    "start_enabled": true,
+    "start_note": null,
+    "uplink": "Wi-Fi",
+    "legs": [
+      {
+        "label": "iPhone",
+        "phone": true,
+        "stage": "done",
+        "stage_text": null,
+        "error": null,
+        "numbers": "Latency 42 ms · Download 195.4 Mbps · Upload 38.7 Mbps",
+        "latency": 41.5,
+        "download": 195.4,
+        "upload": 38.7,
+        "progress": 1.0,
+        "waiting": false,
+        "curve": [
+          {
+            "x": 0.0,
+            "y": 0.104913
+          },
+          {
+            "x": 0.33333334,
+            "y": 0.7689355
+          },
+          {
+            "x": 0.6666667,
+            "y": 1.0
+          },
+          {
+            "x": 1.0,
+            "y": 0.96596724
+          }
+        ],
+        "notes": [
+          "Upload reached the data cap after 6.5 s of sampling; treat the result as approximate."
+        ]
+      },
+      {
+        "label": "Wi-Fi",
+        "phone": false,
+        "stage": "download",
+        "stage_text": "Testing Download… 4 / 10 s",
+        "error": null,
+        "numbers": "Latency 38 ms · Download 87.3 Mbps",
+        "latency": 38.5,
+        "download": 87.3,
+        "upload": null,
+        "progress": 0.45,
+        "waiting": false,
+        "curve": [
+          {
+            "x": 0.0,
+            "y": 0.14318442
+          },
+          {
+            "x": 0.5,
+            "y": 0.73596793
+          },
+          {
+            "x": 1.0,
+            "y": 1.0
+          }
+        ],
+        "notes": []
+      }
+    ],
+    "verdict": null,
+    "history": [],
+    "history_failed": false
+  }
+}

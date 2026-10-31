@@ -262,7 +262,7 @@ mod tests {
         let view = speed(&running, &TimeZone::UTC);
         assert_eq!(view.verdict, None);
         assert!(view.start_enabled && view.start_note.is_none());
-        crate::testing::tuple_free(&view).unwrap();
+        crate::testing::plain_shape(&view).unwrap();
     }
 
     #[test]

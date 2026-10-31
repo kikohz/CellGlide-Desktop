@@ -1,0 +1,11 @@
+{
+  "type": "reply",
+  "id": 7,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "saved",
+      "path": "C:\\Users\\someone\\Downloads\\cellglide-diagnostics-20261030-120000-2.json"
+    }
+  }
+}

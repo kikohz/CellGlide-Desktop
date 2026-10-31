@@ -1,0 +1,10 @@
+{
+  "type": "leak_progress",
+  "view": {
+    "running": true,
+    "start_label": "Start test",
+    "offers_checks": false,
+    "result": null,
+    "error": null
+  }
+}
