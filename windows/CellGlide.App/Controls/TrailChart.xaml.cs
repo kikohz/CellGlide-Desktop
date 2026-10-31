@@ -25,7 +25,12 @@ public sealed partial class TrailChart : UserControl
     {
         InitializeComponent();
         SizeChanged += (_, _) => Redraw();
-        Loaded += (_, _) => Show.Changed += Redraw;
+        Loaded += (_, _) =>
+        {
+            // Loaded can come twice without an Unloaded between: never two handlers.
+            Show.Changed -= Redraw;
+            Show.Changed += Redraw;
+        };
         Unloaded += (_, _) => Show.Changed -= Redraw;
     }
 

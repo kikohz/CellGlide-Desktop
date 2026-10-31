@@ -26,7 +26,12 @@ public sealed partial class PhoneCard : UserControl
         InitializeComponent();
         Apply();
         // The tone brushes follow a switch to or from high contrast while the card is shown.
-        Loaded += (_, _) => Show.Changed += Apply;
+        Loaded += (_, _) =>
+        {
+            // Loaded can come twice without an Unloaded between: never two handlers.
+            Show.Changed -= Apply;
+            Show.Changed += Apply;
+        };
         Unloaded += (_, _) => Show.Changed -= Apply;
     }
 

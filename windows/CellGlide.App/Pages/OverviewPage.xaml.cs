@@ -27,6 +27,8 @@ public sealed partial class OverviewPage : Page
         // are made again when it comes back (the switch may have happened while it was away).
         Loaded += (_, _) =>
         {
+            // Loaded can come twice without an Unloaded between: never two handlers.
+            Show.Changed -= Repaint;
             Show.Changed += Repaint;
             Repaint();
         };

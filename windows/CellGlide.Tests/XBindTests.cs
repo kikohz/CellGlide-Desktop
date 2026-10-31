@@ -39,6 +39,33 @@ public class XBindTests
     }
 
     /// <summary>
+    /// W3 final review M2: Loaded can come twice without an Unloaded between, so every page and control that
+    /// subscribes a method to Show.Changed takes it off first (Unloaded takes off only one). The windows'
+    /// lambdas live as long as the app and subscribe once, in their constructors.
+    /// </summary>
+    [Fact]
+    public void Show_changed_is_unsubscribed_before_it_is_subscribed()
+    {
+        var add = new System.Text.RegularExpressions.Regex(@"Show\.Changed\s*\+=\s*(\w+)\s*;");
+        var bad = new List<string>();
+        var count = 0;
+        foreach (var (file, text) in AppSources.CodeFiles())
+        {
+            foreach (System.Text.RegularExpressions.Match m in add.Matches(text))
+            {
+                count++;
+                var before = text[..m.Index].TrimEnd();
+                if (!before.EndsWith("Show.Changed -= " + m.Groups[1].Value + ";", StringComparison.Ordinal))
+                {
+                    bad.Add($"{file}: {m.Value}");
+                }
+            }
+        }
+        Assert.Empty(bad);
+        Assert.True(count >= 11, $"only {count} subscriptions found");
+    }
+
+    /// <summary>
     /// W3 final review I2: a brush taken from Application.Current.Resources in code is a fixed instance of the theme
     /// the app started in, so text painted with it stays dark-theme grey after a switch to light. Code gives theme
     /// colours through App.xaml's styles (Show.ThemeStyle), whose ThemeResource setters follow the switch. Only
