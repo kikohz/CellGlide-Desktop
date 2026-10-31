@@ -434,7 +434,7 @@ Speed test finished
   - 列表滚到 50% / 100% / 0% 都到位（每次在 500 ms 等待内完成）。
   - 按 `LicenseText` 的分段规则从两份文件算出 2012 段，用 `ItemContainerPattern.FindItemByProperty` 找到并 `ScrollIntoView`（每行约 0.44 s，滚过去后该行在屏幕上）：最终用户条款声明那段、`Microsoft.Windows.CsWinRT 2.2.0.48161` 一节、`Microsoft.Windows.SDK.NET.Ref 10.0.26100.57` 一节、`MICROSOFT SOFTWARE LICENSE TERMS / MICROSOFT WINDOWS APP SDK` 那段、`tokio 1.53.3` 那段、最后一个只出现一次的段落。滚动后 3 秒内 CPU 时间 0 ms，没有卡顿。
   - `Close` 关掉对话框，焦点回到 `View`；`Quit CellGlide` 后进程 77 ms 退出。
-- **没有放进 nuget-notices.txt 的**：Windows App SDK 各包和 WebView2 包里的 `NOTICE.txt`（Windows App SDK 的约 340 KB）；按 brief 只附 `THIRD-PARTY-NOTICES*`（另加同类的 `ThirdPartyNotices*`，CommunityToolkit.Mvvm 用这个名字）。
+- **附带的声明文件**：包根目录的 `NOTICE*`、`THIRD-PARTY-NOTICES*`、`ThirdPartyNotices*` 都附上（修复轮 1 按控制者裁定加入 `NOTICE*`：Windows App SDK 的 Base、Runtime、WinUI 和 WebView2 各有一份，相同的只放一次）；每节的许可和声明文件来源路径记在 `nuget.txt` 末尾，`-Check` 一并比较。nuget-notices.txt 因此约 558 KB。修复轮 1 之后用同样的方法重测发布版：3290 段；列表 264 ms 出现；滚到 50% / 100% / 0% 都到位；最终用户声明（新措辞）、CsWinRT、SDK.NET.Ref、`MICROSOFT SOFTWARE LICENSE TERMS / MICROSOFT WINDOWS APP SDK`、tokio 和最后一个只出现一次的段落都找到并滚到屏幕上（每段约 0.44 s）；打开后和滚动后 3 秒内 CPU 时间各 16 ms；Close 后焦点回到 View，Quit 后 77 ms 退出。
 
 ## 已知问题（W1 实测发现，未修）
 

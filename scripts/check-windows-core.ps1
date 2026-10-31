@@ -10,6 +10,9 @@
 #      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt and nuget-notices.txt
 #      are current, every license is allowed or reviewed, every shipped component has its text);
 #   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
+#   7. scripts/update-licenses.sh --check in Git's bash (the Rust license lists are current, and
+#      render-about.py still renders as cargo-about 0.9.2 does); skipped on CI until W4 Task 11 puts
+#      cargo-about on the runner.
 # Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's,
 # and that a Release build without the DLL says to run 'cargo build -p cg-ffi --release'.
 # -Release takes the DLL from target\release instead of target\debug.
@@ -136,6 +139,42 @@ try {
         $exe = $python[0]
         $pre = @($python | Select-Object -Skip 1)
         & $exe @pre -I (Join-Path $PSScriptRoot 'gen-windows-icons.py') --check
+    }
+
+    # The Rust license lists (the Windows one is embedded in cellglide_native.dll) are what
+    # scripts/update-licenses.sh generates; its --check also runs render-about.py --self-test. It needs
+    # Git's bash and cargo-about 0.9.2. The CI runner has no cargo-about yet (W4 Task 11 installs it
+    # and runs this there), so on CI alone a missing cargo-about is reported and skipped; anywhere else
+    # it fails.
+    $gitCmd = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $bash = $null
+    if ($gitCmd) {
+        foreach ($rel in '..\bin\bash.exe', '..\..\bin\bash.exe') {
+            $candidate = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $gitCmd.Source) $rel))
+            if (Test-Path $candidate) { $bash = $candidate; break }
+        }
+    }
+    $haveAbout = $null -ne (Get-Command cargo-about -CommandType Application -ErrorAction SilentlyContinue)
+    if ($env:CI -eq 'true' -and -not $haveAbout) {
+        Write-Host '==> Rust license lists: SKIPPED on CI (no cargo-about on the runner yet; W4 Task 11 adds it)'
+    } else {
+        if (-not $bash) {
+            Write-Host "FAILED: Git's bash.exe is needed for scripts/update-licenses.sh --check (not found next to git)."
+            exit 1
+        }
+        if (-not $haveAbout) {
+            Write-Host 'FAILED: cargo-about 0.9.2 is needed for scripts/update-licenses.sh --check (cargo install --locked --version 0.9.2 cargo-about --features cli).'
+            exit 1
+        }
+        Invoke-Step 'Rust license lists match scripts/update-licenses.sh (--check, with render-about.py --self-test)' {
+            # The Python found above, with forward slashes for bash; no spaces in the path is assumed.
+            $env:PYTHON = (@($python) -join ' ').Replace('\', '/')
+            try {
+                & $bash (Join-Path $PSScriptRoot 'update-licenses.sh').Replace('\', '/') --check
+            } finally {
+                Remove-Item Env:PYTHON -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     if ($Publish) {

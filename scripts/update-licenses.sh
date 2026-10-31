@@ -12,8 +12,10 @@
 # --check: generate both into temporary files and compare them with the committed ones; exit 1 if
 # either differs. Nothing is written.
 #
-# Needs cargo-about 0.9.2 (cargo install --locked cargo-about --features cli) and python3 (only its
-# standard library).
+# Needs cargo-about 0.9.2 exactly (cargo install --locked --version 0.9.2 cargo-about --features cli;
+# render-about.py copies its grouping rules, so another version fails here) and Python 3 (only its
+# standard library): python3 on PATH, or the command in $PYTHON (words split on spaces, e.g.
+# "py -3"; scripts/check-windows-core.ps1 passes the Python it found).
 #
 # Linux layout: line 1 is a header holding the FNV-1a 64 checksum of Cargo.lock; then the crates
 # cargo-about finds (packaging/licenses/about.toml, the whole workspace for the Linux targets); then
@@ -28,8 +30,9 @@
 # Windows targets (packaging/licenses/about-windows.toml), in the about.hbs layout. cargo-about can
 # only scan one crate or the whole workspace, and the whole workspace would bring cg-gui (the Linux
 # window: iced, ksni); so cargo-about runs once per shipped crate with --format json and
-# scripts/render-about.py merges the runs as cargo-about groups a single one. No hev, no lwIP, no C
-# notices: hev-socks5-tunnel is not built on Windows (cg-netstack forwards there).
+# scripts/render-about.py merges the runs as cargo-about groups a single one (checked on every run:
+# render-about.py --self-test against cargo-about's own about.hbs output for cg-ffi). No hev, no
+# lwIP, no C notices: hev-socks5-tunnel is not built on Windows (cg-netstack forwards there).
 #
 # Release checklist (M5): re-run this after any Cargo.lock change, which includes a version
 # bump of a workspace crate (the workspace version is recorded in Cargo.lock), and commit the
@@ -58,9 +61,13 @@ die() {
   exit 1
 }
 trap 'echo "update-licenses.sh: failed at line $LINENO; $linux_out and $windows_out left as they were" >&2' ERR
-command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
-cargo about --version >/dev/null 2>&1 ||
-  die "cargo-about is missing (cargo install --locked cargo-about --features cli)"
+read -r -a py <<<"${PYTHON:-python3}"
+"${py[@]}" -I -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1 ||
+  die "Python 3 not found (${py[*]}); put python3 on PATH or set PYTHON"
+about_version=$(cargo about --version 2>/dev/null) ||
+  die "cargo-about is missing (cargo install --locked --version 0.9.2 cargo-about --features cli)"
+[ "$about_version" = "cargo-about 0.9.2" ] ||
+  die "cargo-about 0.9.2 is needed, found '$about_version' (render-about.py follows 0.9.2's rules)"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -75,10 +82,15 @@ for crate in "${windows_crates[@]}"; do
   [ -s "$work/$crate.json" ] || die "cargo about produced nothing for $crate"
   json+=("$work/$crate.json")
 done
-python3 -I scripts/render-about.py "${json[@]}" >"$work/windows-crates.txt"
+# render-about.py must still render a single run exactly as cargo-about does with about.hbs.
+cargo about generate --locked -m crates/cg-ffi/Cargo.toml \
+  --config packaging/licenses/about-windows.toml packaging/licenses/about.hbs -o "$work/cg-ffi.hbs.txt"
+"${py[@]}" -I scripts/render-about.py --self-test "$work/cg-ffi.json" "$work/cg-ffi.hbs.txt" ||
+  die "render-about.py no longer matches cargo-about's about.hbs output; nothing replaced"
+"${py[@]}" -I scripts/render-about.py "${json[@]}" >"$work/windows-crates.txt"
 
 header=$(
-  python3 -I - <<'PY'
+  "${py[@]}" -I - <<'PY'
 import pathlib
 import sys
 
@@ -112,7 +124,7 @@ hev=crates/hev-sys/hev
   # The license comment of every bundled C source (lwIP carries PPP, polarssl, 6LoWPAN... code
   # with other holders' BSD terms), each distinct text once, with the files it came from.
   # hev-task-system and yaml are included so a notice that appears there later is not missed.
-  python3 -I scripts/extract-notices.py "$hev/third-part" lwip/src hev-task-system yaml
+  "${py[@]}" -I scripts/extract-notices.py "$hev/third-part" lwip/src hev-task-system yaml
 } | sed 's/\r$//' >"$work/linux.txt"
 
 {

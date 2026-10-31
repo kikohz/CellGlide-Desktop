@@ -13,14 +13,16 @@
 # (the end-user terms notice of the Windows App SDK terms, section 3.b.ii); then one section per
 # component that ships with the app, sorted by id: an 80 '=' line, "id version", the license name,
 # the project URL, a blank line and the full license text, followed by the package's own
-# third-party notices file if it has one (THIRD-PARTY-NOTICES* or ThirdPartyNotices*, any case).
+# third-party notices files if it has any ($NoticePatterns: NOTICE*, THIRD-PARTY-NOTICES* or
+# ThirdPartyNotices*, any case). nuget.txt records which files each section's texts came from.
 # The components are the lock file's packages that are not in $NotShipped, plus $Extra: what is
 # compiled into CellGlide.exe without being in the lock file. The license text is the license file
 # the .nuspec declares, otherwise the package root's LICENSE* / License* files, otherwise
 # packaging/licenses/nuget-texts/<id>.txt (taken from the package's upstream repository at the
 # commit its .nuspec names; line 1 says where from). If none exists the script fails. A text (or a
 # notices file) that an earlier section already carries is not repeated: the section says
-# "Same terms as <id> above." (the Windows App SDK packages share one license file).
+# "Same terms as <id> above." (the Windows App SDK packages share one license file). The same id at
+# two versions gets two sections.
 #
 # A license expression in $Allowed passes as is. Anything else (another expression, a license
 # file, or only a licenseUrl) must be listed in $Reviewed below, pinned to the reviewed version and
@@ -32,9 +34,9 @@
 # -Check: generate both in memory and compare them with the committed files; exit 1 if either
 # differs, a license is not allowed or reviewed, or a text is missing. Without -Check both files
 # are rewritten (only when everything succeeded).
-# -LockFile, -PackagesDir, -OutFile, -NoticesFile, -TextsDir, -NoExtra: for
-# scripts/tests/test-check-nuget-licenses.ps1 (fixtures have no project.assets.json, so they pass
-# -NoExtra).
+# -LockFile, -PackagesDir, -OutFile, -NoticesFile, -TextsDir, -AssetsFile, -NoExtra: for
+# scripts/tests/test-check-nuget-licenses.ps1 (most fixtures have no project.assets.json, so they
+# pass -NoExtra; the $Extra cases pass -AssetsFile).
 param(
     [switch]$Check,
     [string]$LockFile = '',
@@ -42,6 +44,7 @@ param(
     [string]$OutFile = '',
     [string]$NoticesFile = '',
     [string]$TextsDir = '',
+    [string]$AssetsFile = '',
     [switch]$NoExtra
 )
 
@@ -49,7 +52,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $licensesDir = Join-Path $root 'packaging\licenses'
 $lockPath = if ($LockFile) { $LockFile } else { Join-Path $root 'windows\CellGlide.App\packages.lock.json' }
-$assetsPath = Join-Path $root 'windows\CellGlide.App\obj\project.assets.json'
+$assetsPath = if ($AssetsFile) { $AssetsFile } else { Join-Path $root 'windows\CellGlide.App\obj\project.assets.json' }
 $outPath = if ($OutFile) { $OutFile } else { Join-Path $licensesDir 'nuget.txt' }
 $noticesPath = if ($NoticesFile) { $NoticesFile } elseif ($OutFile) { Join-Path (Split-Path -Parent $OutFile) 'nuget-notices.txt' } else { Join-Path $licensesDir 'nuget-notices.txt' }
 $textsPath = if ($TextsDir) { $TextsDir } else { Join-Path $licensesDir 'nuget-texts' }
@@ -97,7 +100,7 @@ $Reviewed = [ordered]@{
 $ExcludedAllAssets = 'referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published'
 $NotShipped = [ordered]@{
     'Microsoft.NET.ILLink.Tasks'            = 'the trimmer, run while publishing; nothing of it is in the publish folder'
-    'Microsoft.DotNet.ILCompiler'           = 'the Native AOT compiler driver (MSBuild targets), run while publishing; what is compiled into CellGlide.exe is runtime.win-*.Microsoft.DotNet.ILCompiler and the Native AOT runtime pack (see below)'
+    'Microsoft.DotNet.ILCompiler'           = 'the Native AOT compiler driver (MSBuild targets), run while publishing; what is compiled into CellGlide.exe is the Native AOT runtime pack, Microsoft.NETCore.App.Runtime.NativeAOT.<rid> (see below); runtime.win-*.Microsoft.DotNet.ILCompiler (the compiler itself) is listed as shipped only to be safe'
     'Microsoft.Windows.SDK.BuildTools'      = 'Windows SDK build tools, run while building'
     'Microsoft.Windows.SDK.BuildTools.MSIX' = 'MSIX build tools that make resources.pri, run while building'
     'Microsoft.WindowsAppSDK'               = 'metapackage: only MSBuild props and targets, no files of its own; its component packages have their own sections'
@@ -122,6 +125,9 @@ $Extra = [ordered]@{
 }
 
 $Rule = '=' * 80
+
+# The package root files appended to a section as its third-party notices.
+$NoticePatterns = @('NOTICE*', 'THIRD-PARTY-NOTICES*', 'ThirdPartyNotices*')
 
 function Get-Metadata([xml]$doc, [string]$name) {
     $node = $doc.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='$name']")
@@ -197,24 +203,35 @@ function Get-RootFiles([string]$dir, [string[]]$patterns) {
 
 $textsUsed = @{}
 
-# The license text of a component, or $null: the declared license file, else the package root's
-# LICENSE* / License* files (joined by a blank line), else nuget-texts/<id>.txt.
+# Where a text came from, as nuget.txt records it: a package file relative to the NuGet cache
+# ("<id>/<version>/<file>", lower-case id and version as the cache has them), or the repository's
+# nuget-texts file.
+function Get-SourceName([string]$path) {
+    $full = [IO.Path]::GetFullPath($path)
+    $base = [IO.Path]::GetFullPath($cache).TrimEnd('\') + '\'
+    if ($full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { return $full.Substring($base.Length).Replace('\', '/') }
+    return 'packaging/licenses/nuget-texts/' + (Split-Path -Leaf $full)
+}
+
+# The license text of a component and the files it came from ({ Text; Sources }), or $null: the
+# declared license file, else the package root's LICENSE* / License* files (joined by a blank
+# line), else nuget-texts/<id>.txt.
 function Get-LicenseText([string]$id, [xml]$doc, [string]$packageDir) {
     if ($doc) {
         $license = Get-Metadata $doc 'license'
         if ($license -and $license.GetAttribute('type') -eq 'file') {
             $file = Join-Path $packageDir $license.InnerText.Trim()
-            if (Test-Path -LiteralPath $file) { return Read-Text $file }
+            if (Test-Path -LiteralPath $file) { return @{ Text = (Read-Text $file); Sources = @(Get-SourceName $file) } }
         }
     }
     $files = @(Get-RootFiles $packageDir @('LICENSE*'))
     if ($files.Count -gt 0) {
-        return (@($files | ForEach-Object { Read-Text $_ }) -join "`n")
+        return @{ Text = (@($files | ForEach-Object { Read-Text $_ }) -join "`n"); Sources = @($files | ForEach-Object { Get-SourceName $_ }) }
     }
     $own = Join-Path $textsPath "$id.txt"
     if (Test-Path -LiteralPath $own) {
         $textsUsed["$id.txt"] = $true
-        return Read-Text $own
+        return @{ Text = (Read-Text $own); Sources = @(Get-SourceName $own) }
     }
     return $null
 }
@@ -347,21 +364,30 @@ if (-not $NoExtra) {
     }
 }
 
-# The sections of nuget-notices.txt, sorted by id like nuget.txt.
-$byId = @{}
-foreach ($c in $components) { $byId[$c.Id] = $c }
-$ids = [string[]]@($byId.Keys)
-[Array]::Sort($ids, [StringComparer]::OrdinalIgnoreCase)
+# The sections of nuget-notices.txt, sorted by id like nuget.txt. Keyed by "id version": the same id
+# at two versions (two RIDs resolving differently) gets a section for each.
+$byKey = @{}
+foreach ($c in $components) {
+    $k = "$($c.Id) $($c.Version)"
+    if ($byKey.ContainsKey($k)) { $problems.Add("${k}: listed twice (lock file and `$Extra?)"); continue }
+    $byKey[$k] = $c
+}
+$sectionKeys = [string[]]@($byKey.Keys)
+[Array]::Sort($sectionKeys, [StringComparer]::OrdinalIgnoreCase)
 $sections = New-Object System.Collections.Generic.List[string]
+$sourceNotes = New-Object System.Collections.Generic.List[string]
 $seenText = @{}
 $seenNotices = @{}
-foreach ($id in $ids) {
-    $c = $byId[$id]
-    $text = Get-LicenseText $c.Id $c.Doc $c.PackageDir
-    if (-not $text) {
+foreach ($k in $sectionKeys) {
+    $c = $byKey[$k]
+    $found = Get-LicenseText $c.Id $c.Doc $c.PackageDir
+    if (-not $found) {
         $problems.Add("$($c.Id) $($c.Version): no license text (no license file in the package and no packaging/licenses/nuget-texts/$($c.Id).txt; take it from the package's upstream repository at the commit its .nuspec names)")
         continue
     }
+    $text = $found.Text
+    $sources = New-Object System.Collections.Generic.List[string]
+    foreach ($src in $found.Sources) { $sources.Add("license $src") }
     $s = New-Object System.Text.StringBuilder
     [void]$s.Append("$Rule`n$($c.Id) $($c.Version)`n$($c.License)`n$($c.ProjectUrl)`n`n")
     $hash = Get-Sha256 $text
@@ -372,8 +398,9 @@ foreach ($id in $ids) {
         [void]$s.Append($text)
     }
     if ($c.PackageDir) {
-        foreach ($file in @(Get-RootFiles $c.PackageDir @('THIRD-PARTY-NOTICES*', 'ThirdPartyNotices*'))) {
+        foreach ($file in @(Get-RootFiles $c.PackageDir $NoticePatterns)) {
             $name = Split-Path -Leaf $file
+            $sources.Add("notices $(Get-SourceName $file)")
             $notice = Read-Text $file
             $nhash = Get-Sha256 $notice
             [void]$s.Append("`nThird-party notices ($name in the package):`n`n")
@@ -387,6 +414,7 @@ foreach ($id in $ids) {
     }
     [void]$s.Append("`n")
     $sections.Add($s.ToString())
+    $sourceNotes.Add("#   $($c.Id) $($c.Version): $($sources -join '; ')")
 }
 
 # A text in nuget-texts that no component needs (its package now has a license file, or is gone)
@@ -433,6 +461,8 @@ $out.Add('#')
 $out.Add('# The full license texts and third-party notices of everything that ships, with the end-user terms')
 $out.Add('# notice of the Windows App SDK terms (section 3.b.ii) first, are in nuget-notices.txt, which this')
 $out.Add('# script also writes; the About page and THIRD-PARTY-LICENSES.txt show that file, not this one.')
+$out.Add('# Where each section''s texts come from (package files relative to the NuGet cache):')
+foreach ($n in $sourceNotes) { $out.Add($n) }
 $text = ($out -join "`n") + "`n"
 
 $notices = "# Generated by scripts/check-nuget-licenses.ps1`n" + (Read-Text $endUserPath) + "`n" + ($sections -join '')
@@ -441,7 +471,8 @@ if ($Check) {
     $stale = $false
     foreach ($pair in @(@($outPath, $text), @($noticesPath, $notices))) {
         $committed = if (Test-Path $pair[0]) { [IO.File]::ReadAllText($pair[0]) } else { '' }
-        if ($committed -ne $pair[1]) {
+        # Ordinal: a change of case in a license text is a change (PowerShell's -ne ignores case).
+        if (-not [string]::Equals($committed, $pair[1], [StringComparison]::Ordinal)) {
             Write-Host "FAILED: $($pair[0]) is not what scripts/check-nuget-licenses.ps1 generates; rerun it without -Check and commit the result."
             $stale = $true
         }

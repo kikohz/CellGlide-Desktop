@@ -47,7 +47,7 @@ System.Numerics.Tensors 9.0.0 MIT https://dot.net/
 #
 # Not shipped (used while building, or none of their files built or published), so not in
 # nuget-notices.txt:
-#   Microsoft.DotNet.ILCompiler: the Native AOT compiler driver (MSBuild targets), run while publishing; what is compiled into CellGlide.exe is runtime.win-*.Microsoft.DotNet.ILCompiler and the Native AOT runtime pack (see below)
+#   Microsoft.DotNet.ILCompiler: the Native AOT compiler driver (MSBuild targets), run while publishing; what is compiled into CellGlide.exe is the Native AOT runtime pack, Microsoft.NETCore.App.Runtime.NativeAOT.<rid> (see below); runtime.win-*.Microsoft.DotNet.ILCompiler (the compiler itself) is listed as shipped only to be safe
 #   Microsoft.NET.ILLink.Tasks: the trimmer, run while publishing; nothing of it is in the publish folder
 #   Microsoft.Windows.AI.MachineLearning: referenced with ExcludeAssets="all" in CellGlide.App.csproj: none of its files are built or published
 #   Microsoft.Windows.SDK.BuildTools: Windows SDK build tools, run while building
@@ -67,3 +67,25 @@ System.Numerics.Tensors 9.0.0 MIT https://dot.net/
 # The full license texts and third-party notices of everything that ships, with the end-user terms
 # notice of the Windows App SDK terms (section 3.b.ii) first, are in nuget-notices.txt, which this
 # script also writes; the About page and THIRD-PARTY-LICENSES.txt show that file, not this one.
+# Where each section's texts come from (package files relative to the NuGet cache):
+#   CommunityToolkit.Mvvm 8.4.2: license communitytoolkit.mvvm/8.4.2/License.md; notices communitytoolkit.mvvm/8.4.2/ThirdPartyNotices.txt
+#   H.GeneratedIcons.System.Drawing 2.4.1: license packaging/licenses/nuget-texts/H.GeneratedIcons.System.Drawing.txt
+#   H.NotifyIcon 2.4.1: license packaging/licenses/nuget-texts/H.NotifyIcon.txt
+#   H.NotifyIcon.WinUI 2.4.1: license packaging/licenses/nuget-texts/H.NotifyIcon.WinUI.txt
+#   Microsoft.NETCore.App.Runtime.NativeAOT.win-arm64 10.0.14: license microsoft.netcore.app.runtime.nativeaot.win-arm64/10.0.14/LICENSE.TXT; notices microsoft.netcore.app.runtime.nativeaot.win-arm64/10.0.14/THIRD-PARTY-NOTICES.TXT
+#   Microsoft.NETCore.App.Runtime.NativeAOT.win-x64 10.0.14: license microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.14/LICENSE.TXT; notices microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.14/THIRD-PARTY-NOTICES.TXT
+#   Microsoft.Web.WebView2 1.0.3719.77: license microsoft.web.webview2/1.0.3719.77/LICENSE.txt; notices microsoft.web.webview2/1.0.3719.77/NOTICE.txt
+#   Microsoft.Win32.SystemEvents 10.0.0: license packaging/licenses/nuget-texts/Microsoft.Win32.SystemEvents.txt; notices microsoft.win32.systemevents/10.0.0/THIRD-PARTY-NOTICES.TXT
+#   Microsoft.Windows.CsWinRT 2.2.0.48161: license packaging/licenses/nuget-texts/Microsoft.Windows.CsWinRT.txt
+#   Microsoft.Windows.SDK.NET.Ref 10.0.26100.57: license packaging/licenses/nuget-texts/Microsoft.Windows.SDK.NET.Ref.txt
+#   Microsoft.WindowsAppSDK.Base 2.6.4: license microsoft.windowsappsdk.base/2.6.4/license.txt; notices microsoft.windowsappsdk.base/2.6.4/NOTICE.txt
+#   Microsoft.WindowsAppSDK.DWrite 2.6.4: license microsoft.windowsappsdk.dwrite/2.6.4/license.txt
+#   Microsoft.WindowsAppSDK.Foundation 2.6.4: license microsoft.windowsappsdk.foundation/2.6.4/license.txt
+#   Microsoft.WindowsAppSDK.InteractiveExperiences 2.6.4: license microsoft.windowsappsdk.interactiveexperiences/2.6.4/license.txt
+#   Microsoft.WindowsAppSDK.Runtime 2.6.4: license microsoft.windowsappsdk.runtime/2.6.4/license.txt; notices microsoft.windowsappsdk.runtime/2.6.4/NOTICE.txt
+#   Microsoft.WindowsAppSDK.Widgets 2.6.4: license microsoft.windowsappsdk.widgets/2.6.4/license.txt
+#   Microsoft.WindowsAppSDK.WinUI 2.6.4: license microsoft.windowsappsdk.winui/2.6.4/license.txt; notices microsoft.windowsappsdk.winui/2.6.4/NOTICE.txt
+#   runtime.win-arm64.Microsoft.DotNet.ILCompiler 10.0.14: license packaging/licenses/nuget-texts/runtime.win-arm64.Microsoft.DotNet.ILCompiler.txt; notices runtime.win-arm64.microsoft.dotnet.ilcompiler/10.0.14/THIRD-PARTY-NOTICES.TXT
+#   runtime.win-x64.Microsoft.DotNet.ILCompiler 10.0.14: license packaging/licenses/nuget-texts/runtime.win-x64.Microsoft.DotNet.ILCompiler.txt; notices runtime.win-x64.microsoft.dotnet.ilcompiler/10.0.14/THIRD-PARTY-NOTICES.TXT
+#   System.Drawing.Common 10.0.0: license system.drawing.common/10.0.0/LICENSE.TXT; notices system.drawing.common/10.0.0/THIRD-PARTY-NOTICES.TXT
+#   System.Numerics.Tensors 9.0.0: license system.numerics.tensors/9.0.0/LICENSE.TXT; notices system.numerics.tensors/9.0.0/THIRD-PARTY-NOTICES.TXT
