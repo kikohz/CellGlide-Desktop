@@ -185,7 +185,9 @@ pub enum Update {
 
 /// The service's snapshots for as long as the receiver is kept: handshake, subscribe, and each
 /// snapshot as it comes. When the subscription can't start or ends, a `Down` says why, and
-/// after `retry` it starts over. Dropping the receiver ends it.
+/// after `retry` it starts over; a service that takes the connection but doesn't start the
+/// subscription within [`TIMEOUT`] is down too ([`DownReason::Timeout`]). Dropping the
+/// receiver ends it.
 pub fn watch(endpoint: Endpoint, retry: Duration) -> mpsc::Receiver<Update> {
     let (tx, rx) = mpsc::channel(16);
     tokio::spawn(async move {
@@ -198,17 +200,38 @@ pub fn watch(endpoint: Endpoint, retry: Duration) -> mpsc::Receiver<Update> {
     rx
 }
 
+/// Handshake, subscribe and the first snapshot: the subscription has started. A service that
+/// took the connection but says nothing within [`TIMEOUT`] is `DownReason::Timeout`.
+async fn start_watching(
+    endpoint: &Endpoint,
+) -> Result<(Snapshot, mpsc::Receiver<Snapshot>), ServiceDown> {
+    let start = async {
+        handshake(endpoint).await?;
+        let mut updates = subscribe(endpoint)
+            .await
+            .map_err(|e| unreachable_down(&e))?;
+        match updates.recv().await {
+            Some(first) => Ok((first, updates)),
+            None => Err(ServiceDown::new(DownReason::Gone)),
+        }
+    };
+    tokio::time::timeout(TIMEOUT, start)
+        .await
+        .unwrap_or_else(|_elapsed| Err(ServiceDown::new(DownReason::Timeout)))
+}
+
 async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Update>) {
     loop {
-        let subscribed = match handshake(endpoint).await {
-            Ok(()) => subscribe(endpoint).await.map_err(|e| unreachable_down(&e)),
-            Err(problem) => Err(problem),
-        };
-        let down = match subscribed {
-            Ok(mut updates) => {
-                while let Some(snapshot) = updates.recv().await {
+        let down = match start_watching(endpoint).await {
+            Ok((first, mut updates)) => {
+                let mut snapshot = first;
+                loop {
                     if tx.send(Update::Snapshot(Box::new(snapshot))).await.is_err() {
                         return;
+                    }
+                    match updates.recv().await {
+                        Some(next) => snapshot = next,
+                        None => break,
                     }
                 }
                 ServiceDown::new(DownReason::Gone)
@@ -237,6 +260,9 @@ mod tests {
         Service,
         /// Accepts and never answers; keeps the connection open.
         Silent,
+        /// `Hello` with our protocol, then a subscription that never sends a snapshot (the
+        /// connection kept open).
+        Mute,
     }
 
     async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, behaviour: Behaviour) {
@@ -250,13 +276,17 @@ mod tests {
         while let Ok(Some(line)) = crate::read_line(&mut r).await {
             let request = crate::from_line::<Request>(&line).unwrap();
             let reply = match request {
+                Request::Subscribe if matches!(behaviour, Behaviour::Mute) => {
+                    std::future::pending::<()>().await;
+                    return;
+                }
                 Request::Subscribe => {
                     let status = crate::to_line(&Response::Status {
                         snapshot: Snapshot::default(),
                     });
                     [status.clone(), status].concat()
                 }
-                Request::Hello if matches!(behaviour, Behaviour::Service) => {
+                Request::Hello if matches!(behaviour, Behaviour::Service | Behaviour::Mute) => {
                     crate::to_line(&Response::Hello {
                         protocol: crate::PROTOCOL_VERSION,
                         version: "test".into(),
@@ -602,5 +632,32 @@ mod tests {
         let mut updates = watch(missing, Duration::from_millis(10));
         assert!(matches!(updates.recv().await, Some(Update::Down(_))));
         assert!(matches!(updates.recv().await, Some(Update::Down(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_gives_up_on_a_service_that_never_answers_hello() {
+        let (endpoint, _keep) = test_server_as(Behaviour::Silent);
+        let started = tokio::time::Instant::now();
+        let mut updates = watch(endpoint, Duration::from_millis(10));
+        let first = tokio::time::timeout(TIMEOUT * 2, updates.recv()).await;
+        let Ok(Some(Update::Down(down))) = first else {
+            panic!("{first:?}");
+        };
+        assert!(is_text_of(&down.text, "gui.service_timeout"), "{down:?}");
+        assert_eq!(started.elapsed(), TIMEOUT);
+        // And it keeps trying.
+        let again = tokio::time::timeout(TIMEOUT * 2, updates.recv()).await;
+        assert!(matches!(again, Ok(Some(Update::Down(_)))), "{again:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_gives_up_on_a_subscription_that_never_starts() {
+        let (endpoint, _keep) = test_server_as(Behaviour::Mute);
+        let mut updates = watch(endpoint, Duration::from_millis(10));
+        let first = tokio::time::timeout(TIMEOUT * 2, updates.recv()).await;
+        let Ok(Some(Update::Down(down))) = first else {
+            panic!("{first:?}");
+        };
+        assert!(is_text_of(&down.text, "gui.service_timeout"), "{down:?}");
     }
 }
