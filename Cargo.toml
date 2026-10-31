@@ -17,6 +17,7 @@ cg-platform = { path = "crates/cg-platform" }
 cg-i18n = { path = "crates/cg-i18n" }
 cg-diag = { path = "crates/cg-diag" }
 cg-tools = { path = "crates/cg-tools" }
+cg-ffi = { path = "crates/cg-ffi" }
 cg-netstack = { path = "crates/cg-netstack" }
 hev-sys = { path = "crates/hev-sys" }
 anyhow = "1.0"
@@ -24,6 +25,7 @@ bytes = "1.12"
 cc = "1.8"
 etherparse = "0.21"
 clap = { version = "4.6", features = ["derive"] }
+csbindgen = "1.9"
 fancy-regex = "0.19"
 futures = "0.3"
 http-body-util = "0.1"

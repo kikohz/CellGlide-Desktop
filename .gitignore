@@ -8,3 +8,5 @@
 /signed.noindex
 /build.noindex/
 /.superpowers/
+/windows/**/bin/
+/windows/**/obj/
