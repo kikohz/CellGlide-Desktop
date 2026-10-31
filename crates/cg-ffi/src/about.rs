@@ -28,7 +28,8 @@ pub fn about() -> ReplyValue {
 }
 
 /// Both lists in full, each without its header line, joined by a newline; built once. The Windows
-/// zip's THIRD-PARTY-LICENSES.txt is to follow the same rule.
+/// zip's THIRD-PARTY-LICENSES.txt (`scripts/build-windows.ps1`) is this text and a Wintun section;
+/// `the_zip_license_file_is_this_text_and_wintun` runs the script's function and compares.
 fn licenses() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
@@ -129,6 +130,63 @@ mod tests {
             expected,
             "Cargo.lock changed: run scripts/update-licenses.sh"
         );
+    }
+
+    /// `scripts/build-windows.ps1`'s own `Write-ThirdPartyLicenses` (the function its build uses),
+    /// run on the repository's lists, writes exactly the About text and then the Wintun section.
+    #[cfg(windows)]
+    #[test]
+    fn the_zip_license_file_is_this_text_and_wintun() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("cg-ffi-licenses-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("THIRD-PARTY-LICENSES.txt");
+        let quote = |p: &std::path::Path| {
+            let text = p.to_str().unwrap();
+            let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+            format!("'{}'", text.replace('\'', "''"))
+        };
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; . {}; . Import-ScriptFunctions {}; Write-ThirdPartyLicenses {} {}",
+            quote(
+                &root
+                    .join("scripts")
+                    .join("tests")
+                    .join("Import-ScriptFunctions.ps1")
+            ),
+            quote(&root.join("scripts").join("build-windows.ps1")),
+            quote(&root),
+            quote(&out),
+        );
+        let status = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+            ])
+            .arg(&script)
+            .status()
+            .expect("powershell runs");
+        let written = std::fs::read_to_string(&out);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(status.success(), "powershell: {status}");
+        let written = written.unwrap();
+        let wintun = format!(
+            "{}\nWintun\nwintun.dll is distributed under its own license; see wintun-LICENSE.txt next to it.\n",
+            "=".repeat(80)
+        );
+        assert_eq!(written.len(), licenses().len() + wintun.len());
+        assert!(
+            written.starts_with(licenses()),
+            "the About text comes first"
+        );
+        assert_eq!(&written[licenses().len()..], wintun);
     }
 
     #[test]

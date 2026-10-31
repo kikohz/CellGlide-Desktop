@@ -436,6 +436,26 @@ Speed test finished
   - `Close` 关掉对话框，焦点回到 `View`；`Quit CellGlide` 后进程 77 ms 退出。
 - **附带的声明文件**：包根目录的 `NOTICE*`、`THIRD-PARTY-NOTICES*`、`ThirdPartyNotices*` 都附上（修复轮 1 按控制者裁定加入 `NOTICE*`：Windows App SDK 的 Base、Runtime、WinUI 和 WebView2 各有一份，相同的只放一次）；每节的许可和声明文件来源路径记在 `nuget.txt` 末尾，`-Check` 一并比较。nuget-notices.txt 因此约 558 KB。修复轮 1 之后用同样的方法重测发布版：3290 段；列表 264 ms 出现；滚到 50% / 100% / 0% 都到位；最终用户声明（新措辞）、CsWinRT、SDK.NET.Ref、`MICROSOFT SOFTWARE LICENSE TERMS / MICROSOFT WINDOWS APP SDK`、tokio 和最后一个只出现一次的段落都找到并滚到屏幕上（每段约 0.44 s）；打开后和滚动后 3 秒内 CPU 时间各 16 ms；Close 后焦点回到 View，Quit 后 77 ms 退出。
 
+### Task 4：build-windows.ps1 与 Pester（2026-10-31）
+
+- **Pester**：本机 Windows PowerShell 只带 Pester 3.4.0（`C:\Program Files\WindowsPowerShell\Modules`，没动）。为当前用户装了 NuGet 提供程序 2.8.5.208（`Install-PackageProvider NuGet -Scope CurrentUser`，`%LOCALAPPDATA%\PackageManagement\ProviderAssemblies`；`Install-Module` 没有它就不能装）和 **Pester 5.9.1**（`Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck`，装在 `Documents\WindowsPowerShell\Modules\Pester\5.9.1`）。照 brief 的 `-MinimumVersion 5.5.0` 第一次装上的是 6.2.0，已用 `Uninstall-Module` 删掉，改装 5.x 的最新版。没有装任何机器范围的东西。`scripts/test-windows-scripts.ps1` 只认 5.5.0 及以上、低于 6 的 Pester，缺时打印带 `-MaximumVersion 5.99.99` 的安装命令。
+- **测试**：`scripts/test-windows-scripts.ps1` 18 个全过（BuildWindows 14、ImportScriptFunctions 4），`check-windows-core.ps1` 的第 8 步跑它；带与不带 `-Publish` 都 exit 0。
+- **许可文件与关于页同源**：`build-windows.ps1` 的 `Write-ThirdPartyLicenses` 读 `packaging/licenses/windows-rust.txt` 和 `nuget-notices.txt`（cg-ffi `include_str!` 的同两份），按 about.rs 的规则拼接再加 Wintun 一节。cg-ffi 的测试 `the_zip_license_file_is_this_text_and_wintun`（仅 Windows）调用 PowerShell 跑这个函数，与 `licenses()` 逐字比较；把分隔符故意改成两个换行时该测试失败。Pester 里另有一条对同两份文件做同样比较。
+- **出包**（`build-windows.ps1 -Arch x64`，再 `-Arch arm64`；ARM64 只编不跑）：
+
+  | | zip | 解压后 | 条目 | symbols zip | symbols 解压后 |
+  |---|---|---|---|---|---|
+  | x64 | 37,880,940 B | 101,181,284 B | 258 | 14,138,644 B | 71,634,456 B |
+  | arm64 | 37,059,087 B | 106,486,860 B | 258 | 13,733,022 B | 71,011,868 B |
+
+  - `dist\windows\1.0.0\` 下各有 zip、`SHA256SUMS.<arch>`（一行 `<小写 hex>  <文件名>`，LF）、symbols zip；`Get-FileHash` 与 SHA256SUMS 一致（x64 `48876194…e3c9`，arm64 `3ac14a0c…9481`）。
+  - zip 里没有 pdb，条目名都用 `/`（Windows PowerShell 的 `ZipFile.CreateFromDirectory` 写的是 `\`，第一次出包时脚本自己的检查发现了，改为逐个加条目）。
+  - 解开 x64 zip：`THIRD-PARTY-LICENSES.txt` 含 `MICROSOFT SOFTWARE LICENSE TERMS`、不含 `hev-socks5`；`version.txt` 为 `1.0.0`；`uninstall.ps1` 是占位注释。解开 arm64 zip：五个 PE 的 Machine 都是 0xAA64，`Test-PackageLayout` 无问题。
+  - symbols zip：`cellglide.pdb`、`cellglide_service.pdb`、`cellglide_native.pdb`，以及发布目录的 `app/CellGlide.pdb`、`app/CellGlide.Core.pdb`。
+  - 两次出包后 `git status` 只有本任务的文件，`Cargo.lock` 和 NuGet 锁文件都没变（发布时加了 `-p:RestoreLockedMode=true`）。
+- **与 brief 不同**：应用的资源索引是 `app\CellGlide.pri`（以程序集命名，W3 起发布版一直如此），没有 `resources.pri`，布局检查改为要求 `app\CellGlide.pri`。
+- 没有用手机流量，没有动网络，没有需要拍快照的步骤。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

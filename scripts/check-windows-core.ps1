@@ -13,6 +13,8 @@
 #   7. scripts/update-licenses.sh --check in Git's bash (the Rust license lists are current, and
 #      render-about.py still renders as cargo-about 0.9.2 does); skipped on CI until W4 Task 11 puts
 #      cargo-about on the runner.
+#   8. scripts/test-windows-scripts.ps1: the Pester 5 tests of the Windows scripts (scripts/tests and
+#      packaging/windows/tests *.Tests.ps1; 'Elevated' ones only from an administrator shell).
 # Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's,
 # and that a Release build without the DLL says to run 'cargo build -p cg-ffi --release'.
 # -Release takes the DLL from target\release instead of target\debug.
@@ -175,6 +177,10 @@ try {
                 Remove-Item Env:PYTHON -ErrorAction SilentlyContinue
             }
         }
+    }
+
+    Invoke-Step 'Pester tests of the Windows scripts (scripts/test-windows-scripts.ps1)' {
+        powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-windows-scripts.ps1')
     }
 
     if ($Publish) {
