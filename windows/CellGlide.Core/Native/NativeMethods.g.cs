@@ -14,58 +14,72 @@ namespace CellGlide.Core.Native
     {
         const string __DllName = "cellglide";
 
+        // Return codes (crates/cg-ffi/src/codes.rs).
+        internal const int CG_OK = 0;
+        internal const int CG_ALREADY = 1;
+        internal const int CG_BAD_ARGUMENT = 2;
+        internal const int CG_PANIC = -1;
+
 
 
 
 
         /// <summary>
-        ///  Starts the DLL: `lang` is a tag such as `zh-CN` (empty for the system's language) and
-        ///  `on_event` receives every event, on the DLL's own thread. `CG_ALREADY` if it is running,
-        ///  `CG_BAD_ARGUMENT` without a callback.
+        ///  Starts the DLL: lang is a tag such as zh-CN (empty for the system's language) and
+        ///  on_event receives every event, on the DLL's own thread (see the callback rules in the
+        ///  module documentation). CG_ALREADY if it is running, CG_BAD_ARGUMENT without a callback.
+        ///  While a cg_shutdown is still stopping, this waits for it to finish and then starts; called
+        ///  from that stopping runtime's own callback it returns CG_ALREADY instead of waiting.
         ///
         ///  # Safety
-        ///  `lang` must point to `len` readable bytes (or be null with `len` 0). `on_event` must be
-        ///  callable with `ctx` from another thread until `cg_shutdown` returns.
+        ///  lang must point to len readable bytes (or be null with len 0). on_event must be
+        ///  callable with ctx from another thread until cg_shutdown returns.
         /// </summary>
         [DllImport(__DllName, EntryPoint = "cg_init", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int cg_init(byte* lang, nuint len, delegate* unmanaged[Cdecl]<void*, byte*, nuint, void> on_event, void* ctx);
 
         /// <summary>
-        ///  Sends one command (JSON); returns its number, from 1 up, which its `reply` event carries.
-        ///  0 when not initialised (or on a panic).
+        ///  Sends one command (JSON); returns its number, from 1 up, which its reply event carries.
+        ///  0 when not running, while stopping, or on a panic. Any thread may call it, the callback
+        ///  included, and several threads at once.
         ///
         ///  # Safety
-        ///  `json` must point to `len` readable bytes (or be null with `len` 0).
+        ///  json must point to len readable bytes (or be null with len 0).
         /// </summary>
         [DllImport(__DllName, EntryPoint = "cg_send", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern ulong cg_send(byte* json, nuint len);
 
         /// <summary>
-        ///  One text in the current language: `key`, with `args_json` such as `{"version":"2.4.0"}`
-        ///  (empty or unreadable: no arguments). The text goes to `*out`/`*out_len` as UTF-8, to be
-        ///  handed back to `cg_free`; null and 0 if something went wrong.
+        ///  One text in the current language: key, with args_json such as {"version":"2.4.0"}
+        ///  (empty or unreadable: no arguments). The text goes to *out and *out_len as UTF-8 and must
+        ///  be handed back to cg_free. An empty text is a non-null pointer with length 0, and it too
+        ///  must go to cg_free. If something went wrong, *out is null and *out_len 0, and there is
+        ///  nothing to free.
         ///
         ///  # Safety
-        ///  `key` and `args_json` must each point to their length in readable bytes (or be null with
-        ///  length 0); `out` and `out_len` must be writable or null.
+        ///  key and args_json must each point to their length in readable bytes (or be null with
+        ///  length 0); out and out_len must be writable or null.
         /// </summary>
         [DllImport(__DllName, EntryPoint = "cg_tr", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void cg_tr(byte* key, nuint key_len, byte* args_json, nuint args_len, byte** @out, nuint* out_len);
 
         /// <summary>
-        ///  Frees a text from `cg_tr`.
+        ///  Frees a text from cg_tr, empty ones included.
         ///
         ///  # Safety
-        ///  `ptr` and `len` must be exactly what one `cg_tr` call gave, freed once; or `ptr` null.
+        ///  ptr and len must be exactly what one cg_tr call gave, freed once; or ptr null.
         /// </summary>
         [DllImport(__DllName, EntryPoint = "cg_free", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void cg_free(byte* ptr, nuint len);
 
         /// <summary>
-        ///  Stops the DLL: once this returns, no more events. `cg_init` may start it again.
+        ///  Stops the DLL: once this returns, no more events. cg_init may start it again. While
+        ///  another cg_shutdown is stopping, this waits until that stop has finished. Called from the
+        ///  callback, it returns at once: no events are delivered after that callback returns, and the
+        ///  stop finishes on another thread.
         ///
         ///  # Safety
-        ///  Always safe to call; `unsafe` only to match the other exports.
+        ///  Always safe to call; unsafe only to match the other exports.
         /// </summary>
         [DllImport(__DllName, EntryPoint = "cg_shutdown", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern void cg_shutdown();

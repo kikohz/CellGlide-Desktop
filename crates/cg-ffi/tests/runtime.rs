@@ -8,7 +8,7 @@ use cellglide::runtime::{Config, Runtime};
 use cg_ipc::Request;
 use cg_tools::prefs::Prefs;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 use support::*;
 
@@ -307,22 +307,37 @@ async fn guarded_passes_the_result_on() {
 fn no_events_after_shutdown() {
     let done = Arc::new(AtomicBool::new(false));
     let late = Arc::new(AtomicBool::new(false));
-    let (d, l) = (done.clone(), late.clone());
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let (d, l, n) = (done.clone(), late.clone(), delivered.clone());
+    // A slow sink, so events are still queued when shutdown starts.
     let rt = Runtime::start(
         offline_config(),
         Box::new(move |_| {
             if d.load(SeqCst) {
                 l.store(true, SeqCst)
             }
+            n.fetch_add(1, SeqCst);
+            std::thread::sleep(Duration::from_millis(20));
         }),
     );
     for _ in 0..10 {
         rt.send(Command::GetPrefs);
     }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while delivered.load(SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = delivered.load(SeqCst);
+    assert!(
+        (1..10).contains(&before),
+        "{before} delivered before shutdown"
+    );
     rt.shutdown();
     done.store(true, SeqCst);
+    let at_return = delivered.load(SeqCst);
     std::thread::sleep(Duration::from_millis(300));
     assert!(!late.load(SeqCst));
+    assert_eq!(delivered.load(SeqCst), at_return);
 }
 
 #[test]

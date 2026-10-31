@@ -1,6 +1,18 @@
 //! The C interface: five functions, UTF-8 JSON in and out. csbindgen reads this file
-//! (`build.rs`) to write `windows/CellGlide.Core/Native/NativeMethods.g.cs`; commit both
-//! together. No panic crosses it: every body runs inside [`guard_export`].
+//! (`build.rs`) to write `windows/CellGlide.Core/Native/NativeMethods.g.cs`, return codes
+//! included; commit both together. No panic crosses it: each body, its pointer reads
+//! included, runs inside [`guard_export`]. Doc comments here become C# XML comments, so they
+//! use no angle brackets or ampersands.
+//!
+//! Rules for the app's callback (`on_event`):
+//! - It runs on the DLL's own event thread, one event at a time, in order. It may call
+//!   `cg_send` and `cg_tr`, and even `cg_shutdown` (which then returns at once and leaves the
+//!   rest of the stop to another thread).
+//! - `cg_shutdown` waits for the event thread, so the callback must never wait synchronously
+//!   for the thread that calls `cg_shutdown` (for instance a blocking dispatch to the UI
+//!   thread): hand events on asynchronously instead.
+//! - Call `cg_shutdown` before the DLL is unloaded or the process exits; until then the DLL's
+//!   threads keep running and may call the callback.
 #![allow(non_camel_case_types)]
 
 use crate::api::Event;
@@ -8,21 +20,56 @@ use crate::runtime::{Config, Runtime, lang_from};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::panic::UnwindSafe;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::ThreadId;
 
-pub const CG_OK: i32 = 0;
-/// `cg_init` while already initialised.
-pub const CG_ALREADY: i32 = 1;
-pub const CG_BAD_ARGUMENT: i32 = 2;
-/// Something panicked inside the call; the DLL is still usable.
-pub const CG_PANIC: i32 = -1;
+include!("codes.rs");
 
 /// Called on the DLL's event thread with one event as UTF-8 JSON, valid only during the call.
 pub type cg_event_fn = Option<unsafe extern "C" fn(ctx: *mut c_void, json: *const u8, len: usize)>;
 
-static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
+/// Where the DLL is in its life. Only `cg_init` and `cg_shutdown` change it; `cg_send` only
+/// looks, so it never waits for a stop.
+enum Lifecycle {
+    Stopped,
+    Running(Runtime),
+    /// A `cg_shutdown` is stopping the runtime whose event thread this was.
+    Stopping {
+        event_thread: Option<ThreadId>,
+    },
+}
 
-/// Runs `f`; a panic gives `fallback` instead of unwinding into the caller.
+static STATE: Mutex<Lifecycle> = Mutex::new(Lifecycle::Stopped);
+/// Signalled when a stop has finished.
+static STOPPED: Condvar = Condvar::new();
+
+fn state() -> MutexGuard<'static, Lifecycle> {
+    STATE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn wait(guard: MutexGuard<'static, Lifecycle>) -> MutexGuard<'static, Lifecycle> {
+    STOPPED.wait(guard).unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Marks the stop finished when dropped, even if stopping panicked, so no one waits forever.
+struct StopFinished;
+
+impl Drop for StopFinished {
+    fn drop(&mut self) {
+        *state() = Lifecycle::Stopped;
+        STOPPED.notify_all();
+    }
+}
+
+/// A runtime on its way out; fields drop in order, so the stop is finished before it is
+/// announced.
+struct Stopping {
+    runtime: Runtime,
+    _finished: StopFinished,
+}
+
+/// Runs `f`; a panic gives `fallback` instead of unwinding into the caller. The panic's
+/// payload (a message) is dropped here, after the catch.
 pub(crate) fn guard_export<T>(fallback: T, f: impl FnOnce() -> T + UnwindSafe) -> T {
     std::panic::catch_unwind(f).unwrap_or(fallback)
 }
@@ -57,13 +104,15 @@ impl Callback {
     }
 }
 
-/// Starts the DLL: `lang` is a tag such as `zh-CN` (empty for the system's language) and
-/// `on_event` receives every event, on the DLL's own thread. `CG_ALREADY` if it is running,
-/// `CG_BAD_ARGUMENT` without a callback.
+/// Starts the DLL: lang is a tag such as zh-CN (empty for the system's language) and
+/// on_event receives every event, on the DLL's own thread (see the callback rules in the
+/// module documentation). CG_ALREADY if it is running, CG_BAD_ARGUMENT without a callback.
+/// While a cg_shutdown is still stopping, this waits for it to finish and then starts; called
+/// from that stopping runtime's own callback it returns CG_ALREADY instead of waiting.
 ///
 /// # Safety
-/// `lang` must point to `len` readable bytes (or be null with `len` 0). `on_event` must be
-/// callable with `ctx` from another thread until `cg_shutdown` returns.
+/// lang must point to len readable bytes (or be null with len 0). on_event must be
+/// callable with ctx from another thread until cg_shutdown returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cg_init(
     lang: *const u8,
@@ -71,19 +120,28 @@ pub unsafe extern "C" fn cg_init(
     on_event: cg_event_fn,
     ctx: *mut c_void,
 ) -> i32 {
-    // SAFETY: the caller's promise about `lang`.
-    let lang = String::from_utf8_lossy(unsafe { bytes(lang, len) }).into_owned();
     guard_export(CG_PANIC, move || {
         let Some(on_event) = on_event else {
             return CG_BAD_ARGUMENT;
         };
-        let mut runtime = RUNTIME.lock().unwrap_or_else(PoisonError::into_inner);
-        if runtime.is_some() {
-            return CG_ALREADY;
+        // SAFETY: the caller's promise about `lang`.
+        let lang = String::from_utf8_lossy(unsafe { bytes(lang, len) }).into_owned();
+        let me = std::thread::current().id();
+        let mut state = state();
+        loop {
+            match &*state {
+                Lifecycle::Stopped => break,
+                Lifecycle::Running(_) => return CG_ALREADY,
+                // Waiting here would wait for this very thread.
+                Lifecycle::Stopping { event_thread } if *event_thread == Some(me) => {
+                    return CG_ALREADY;
+                }
+                Lifecycle::Stopping { .. } => state = wait(state),
+            }
         }
         cg_i18n::set(lang_from(&lang));
         let callback = Callback { on_event, ctx };
-        *runtime = Some(Runtime::start(
+        *state = Lifecycle::Running(Runtime::start(
             Config::production(),
             Box::new(move |event| callback.call(&event)),
         ));
@@ -91,30 +149,33 @@ pub unsafe extern "C" fn cg_init(
     })
 }
 
-/// Sends one command (JSON); returns its number, from 1 up, which its `reply` event carries.
-/// 0 when not initialised (or on a panic).
+/// Sends one command (JSON); returns its number, from 1 up, which its reply event carries.
+/// 0 when not running, while stopping, or on a panic. Any thread may call it, the callback
+/// included, and several threads at once.
 ///
 /// # Safety
-/// `json` must point to `len` readable bytes (or be null with `len` 0).
+/// json must point to len readable bytes (or be null with len 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cg_send(json: *const u8, len: usize) -> u64 {
-    // SAFETY: the caller's promise about `json`.
-    let json = unsafe { bytes(json, len) }.to_vec();
     guard_export(0, move || {
-        let runtime = RUNTIME.lock().unwrap_or_else(PoisonError::into_inner);
-        runtime
-            .as_ref()
-            .map_or(0, |runtime| runtime.send_json(&json))
+        // SAFETY: the caller's promise about `json`.
+        let json = unsafe { bytes(json, len) };
+        match &*state() {
+            Lifecycle::Running(runtime) => runtime.send_json(json),
+            Lifecycle::Stopped | Lifecycle::Stopping { .. } => 0,
+        }
     })
 }
 
-/// One text in the current language: `key`, with `args_json` such as `{"version":"2.4.0"}`
-/// (empty or unreadable: no arguments). The text goes to `*out`/`*out_len` as UTF-8, to be
-/// handed back to `cg_free`; null and 0 if something went wrong.
+/// One text in the current language: key, with args_json such as {"version":"2.4.0"}
+/// (empty or unreadable: no arguments). The text goes to *out and *out_len as UTF-8 and must
+/// be handed back to cg_free. An empty text is a non-null pointer with length 0, and it too
+/// must go to cg_free. If something went wrong, *out is null and *out_len 0, and there is
+/// nothing to free.
 ///
 /// # Safety
-/// `key` and `args_json` must each point to their length in readable bytes (or be null with
-/// length 0); `out` and `out_len` must be writable or null.
+/// key and args_json must each point to their length in readable bytes (or be null with
+/// length 0); out and out_len must be writable or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cg_tr(
     key: *const u8,
@@ -124,68 +185,99 @@ pub unsafe extern "C" fn cg_tr(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) {
-    if out.is_null() || out_len.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises both are writable.
-    unsafe {
-        *out = std::ptr::null_mut();
-        *out_len = 0;
-    }
-    // SAFETY: the caller's promises about `key` and `args_json`.
-    let (key, args) = unsafe {
-        (
-            bytes(key, key_len).to_vec(),
-            bytes(args_json, args_len).to_vec(),
-        )
-    };
-    let text = guard_export(None, move || {
-        let key = String::from_utf8_lossy(&key);
-        let args: BTreeMap<String, String> = serde_json::from_slice(&args).unwrap_or_default();
+    guard_export((), move || {
+        if out.is_null() || out_len.is_null() {
+            return;
+        }
+        // SAFETY: the caller promises both are writable. Cleared first, so a panic below
+        // leaves null and 0.
+        unsafe {
+            *out = std::ptr::null_mut();
+            *out_len = 0;
+        }
+        // SAFETY: the caller's promises about `key` and `args_json`.
+        let (key, args) = unsafe { (bytes(key, key_len), bytes(args_json, args_len)) };
+        let key = String::from_utf8_lossy(key);
+        let args: BTreeMap<String, String> = serde_json::from_slice(args).unwrap_or_default();
         let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        Some(cg_i18n::tr_os(&key, &args).into_bytes().into_boxed_slice())
-    });
-    let Some(text) = text else { return };
-    let len = text.len();
-    // SAFETY: as above; `cg_free` takes the box back with the same length.
-    unsafe {
-        *out = Box::into_raw(text).cast::<u8>();
-        *out_len = len;
-    }
-}
-
-/// Frees a text from `cg_tr`.
-///
-/// # Safety
-/// `ptr` and `len` must be exactly what one `cg_tr` call gave, freed once; or `ptr` null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cg_free(ptr: *mut u8, len: usize) {
-    if ptr.is_null() {
-        return;
-    }
-    // SAFETY: the caller hands back a box `cg_tr` made, with its length.
-    let text = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) };
-    guard_export((), move || drop(text));
-}
-
-/// Stops the DLL: once this returns, no more events. `cg_init` may start it again.
-///
-/// # Safety
-/// Always safe to call; `unsafe` only to match the other exports.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cg_shutdown() {
-    guard_export((), || {
-        // Taken out under the lock and stopped outside it, so a callback calling `cg_send`
-        // meanwhile gets 0 instead of waiting on the lock.
-        let runtime = RUNTIME
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(runtime) = runtime {
-            runtime.shutdown();
+        let text = cg_i18n::tr_os(&key, &args).into_bytes().into_boxed_slice();
+        let len = text.len();
+        // SAFETY: as above; `cg_free` takes the box back with the same length.
+        unsafe {
+            *out = Box::into_raw(text).cast::<u8>();
+            *out_len = len;
         }
     })
 }
+
+/// Frees a text from cg_tr, empty ones included.
+///
+/// # Safety
+/// ptr and len must be exactly what one cg_tr call gave, freed once; or ptr null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cg_free(ptr: *mut u8, len: usize) {
+    guard_export((), move || {
+        if ptr.is_null() {
+            return;
+        }
+        // SAFETY: the caller hands back a box `cg_tr` made, with its length.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+    })
+}
+
+/// Stops the DLL: once this returns, no more events. cg_init may start it again. While
+/// another cg_shutdown is stopping, this waits until that stop has finished. Called from the
+/// callback, it returns at once: no events are delivered after that callback returns, and the
+/// stop finishes on another thread.
+///
+/// # Safety
+/// Always safe to call; unsafe only to match the other exports.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cg_shutdown() {
+    guard_export((), || {
+        let me = std::thread::current().id();
+        let mut state = state();
+        let runtime = loop {
+            match &*state {
+                Lifecycle::Stopped => return,
+                // The callback of the runtime being stopped: the stopper waits for it.
+                Lifecycle::Stopping { event_thread } if *event_thread == Some(me) => return,
+                Lifecycle::Stopping { .. } => state = wait(state),
+                Lifecycle::Running(runtime) => {
+                    let event_thread = runtime.event_thread();
+                    let old = std::mem::replace(&mut *state, Lifecycle::Stopping { event_thread });
+                    let Lifecycle::Running(runtime) = old else {
+                        unreachable!("matched Running above");
+                    };
+                    break runtime;
+                }
+            }
+        };
+        // Stopped outside the lock, so a callback calling `cg_send` meanwhile gets 0 instead of
+        // waiting on it.
+        drop(state);
+        let reentrant = runtime.event_thread() == Some(me);
+        let stopping = Stopping {
+            runtime,
+            _finished: StopFinished,
+        };
+        if reentrant {
+            // This thread can't wait for itself: nothing more is delivered once this callback
+            // returns, and another thread finishes the stop. Without one, dropping `stopping`
+            // here still stops everything but this thread, and announces the stop.
+            stopping.runtime.drop_pending_events();
+            let _ = std::thread::Builder::new()
+                .name("cellglide-stop".into())
+                .spawn(move || drop(stopping));
+        } else {
+            drop(stopping);
+        }
+    })
+}
+
+#[cfg(test)]
+#[path = "ffi_tests.rs"]
+mod callback_tests;
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +285,7 @@ mod tests {
     use cg_i18n::Lang;
     use std::ptr::null_mut;
 
-    /// These tests share one `RUNTIME` and the process-wide language.
+    /// These tests share the DLL's one lifecycle and the process-wide language.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         cg_i18n::lock_for_tests()
     }

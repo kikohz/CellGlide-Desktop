@@ -212,9 +212,23 @@ impl Runtime {
     }
 
     /// Cancels every command, stops the workers and the event thread, and returns once `sink`
-    /// will never be called again. Safe from any thread, an async context included.
+    /// will never be called again. Safe from any thread, an async context included. Called
+    /// from inside `sink` (the event thread), it can't wait for that thread: whatever is still
+    /// queued is dropped once `sink` returns.
     pub fn shutdown(self) {
         drop(self);
+    }
+
+    /// The event thread, while it runs.
+    pub(crate) fn event_thread(&self) -> Option<std::thread::ThreadId> {
+        self.event_thread
+            .as_ref()
+            .map(|thread| thread.thread().id())
+    }
+
+    /// From now on the event thread delivers nothing more, not even what is already queued.
+    pub(crate) fn drop_pending_events(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 
     fn stop(&mut self) {
@@ -222,25 +236,48 @@ impl Runtime {
             return;
         };
         self.cancel.cancel();
-        // Dropping or shutting down a runtime inside an async context panics; a fresh thread
-        // never is one.
-        let stopper = std::thread::Builder::new()
-            .name("cellglide-shutdown".into())
-            .spawn(move || tokio.shutdown_timeout(SHUTDOWN_GRACE));
-        // Without a thread to spare the runtime is dropped with the closure; nothing to wait for.
-        if let Ok(stopper) = stopper {
-            let _ = stopper.join();
-        }
+        stop_tokio(tokio);
         let Some(event_thread) = self.event_thread.take() else {
             return;
         };
         if event_thread.thread().id() == std::thread::current().id() {
             // Called from the app's callback: the thread can't wait for itself, so it drops
             // whatever is still queued once this callback returns.
-            self.closed.store(true, Ordering::SeqCst);
+            self.drop_pending_events();
         } else {
             let _ = self.queue.send(Message::Stop);
             let _ = event_thread.join();
+        }
+    }
+}
+
+/// Stops the workers, giving running tasks [`SHUTDOWN_GRACE`]. Never panics, an async
+/// context included: dropping or shutting down a runtime inside one panics, so the wait
+/// happens on a fresh thread, and without a thread to spare the runtime is let go at once
+/// (`shutdown_background` is allowed anywhere).
+fn stop_tokio(tokio: tokio::runtime::Runtime) {
+    let slot = Arc::new(Mutex::new(Some(tokio)));
+    let stopper_slot = slot.clone();
+    let stopper = std::thread::Builder::new()
+        .name("cellglide-shutdown".into())
+        .spawn(move || {
+            let tokio = stopper_slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(tokio) = tokio {
+                tokio.shutdown_timeout(SHUTDOWN_GRACE);
+            }
+        });
+    match stopper {
+        Ok(stopper) => {
+            let _ = stopper.join();
+        }
+        Err(_) => {
+            let tokio = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(tokio) = tokio {
+                tokio.shutdown_background();
+            }
         }
     }
 }
@@ -278,7 +315,8 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
                 prefs: cg_tools::prefs::load(&config.prefs_path),
             },
         },
-        Command::SetPrefs { prefs } => set_prefs(&config.prefs_path, &prefs),
+        // `dispatch` takes it: the reply is followed by `Event::Prefs`, which only it sends.
+        Command::SetPrefs { .. } => unreachable!("dispatch handles SetPrefs"),
         Command::Request { request } => crate::requests::request(&config.endpoint, request).await,
         // Tasks 9 and 10.
         Command::Subscribe
