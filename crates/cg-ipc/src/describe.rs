@@ -58,6 +58,7 @@ pub fn strict_dns_line(snapshot: &Snapshot) -> Option<String> {
         StrictDns::NotApplicable | StrictDns::Unknown => None,
         StrictDns::On => Some(tr("state.strict_dns_on", &[])),
         StrictDns::Off { .. } => Some(tr("state.strict_dns_off", &[])),
+        StrictDns::Disabled => Some(tr("state.strict_dns_disabled", &[])),
     }
 }
 
@@ -1031,6 +1032,22 @@ mod tests {
             strict_dns_line(&connected(off))
                 .unwrap()
                 .starts_with("Strict DNS: off")
+        );
+        assert_eq!(
+            strict_dns_line(&connected(StrictDns::Disabled)).unwrap(),
+            "Strict DNS: off in settings"
+        );
+        cg_i18n::set(Lang::ZhCn);
+        assert_eq!(
+            strict_dns_line(&connected(StrictDns::Disabled)).unwrap(),
+            "严格 DNS：已在设置中关闭"
+        );
+        assert_eq!(
+            strict_dns_line(&Snapshot {
+                strict_dns: StrictDns::Disabled,
+                ..snap(ConnState::Idle)
+            }),
+            None
         );
     }
 

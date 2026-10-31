@@ -154,6 +154,8 @@ pub enum Command {
     SetSettings {
         auto_connect: Option<bool>,
         phone: Option<PhoneChoice>,
+        /// Windows' strict DNS; applied at once while connected.
+        strict_dns: Option<bool>,
     },
     /// The computer is about to suspend (`true`) or has resumed (`false`): the health
     /// judgement starts over. The session is left to the exit checks. On resume, a
@@ -510,7 +512,12 @@ impl Actor {
             Command::SetSettings {
                 auto_connect,
                 phone,
+                strict_dns,
             } => {
+                if let Some(on) = strict_dns {
+                    self.settings.update(|s| s.strict_dns = on);
+                    self.apply_strict_dns(on).await;
+                }
                 let chosen = match phone {
                     None => self.settings.get().chosen_serial.clone(),
                     Some(PhoneChoice::Auto) => None,
@@ -1061,6 +1068,7 @@ impl Actor {
                 None => DnsPlan::Servers(FALLBACK_DNS.to_vec()),
             },
             bypass: self.config.bypass,
+            strict_dns: self.settings.get().strict_dns,
         };
         let planned_dns = plan.dns.clone();
         let backend = self.config.backend.clone();
@@ -1150,6 +1158,42 @@ impl Actor {
         })
     }
 
+    /// The strict DNS switch while connected: the running tunnel turns its rules on or off
+    /// (on a blocking thread) and the new state is published with the next snapshot. Turning
+    /// it on and failing is logged like a connection that couldn't turn it on; turning it
+    /// off logs nothing.
+    async fn apply_strict_dns(&mut self, on: bool) {
+        let Some(tunnel) = self.active.as_mut().and_then(|a| a.tunnel.take()) else {
+            return;
+        };
+        let applied = tokio::task::spawn_blocking(move || {
+            let state = tunnel.apply_strict_dns(on);
+            (tunnel, state)
+        })
+        .await;
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        match applied {
+            Ok((tunnel, state)) => {
+                active.tunnel = Some(tunnel);
+                if on && matches!(state, StrictDns::Off { .. }) {
+                    self.monitor
+                        .note(EventKind::StrictDnsUnavailable, None, Timestamp::now());
+                }
+                active.strict_dns = state;
+            }
+            // The tunnel went with the panicked thread (its `Drop` cleans up): the rest of
+            // the session goes too, and the connection is tried again like after hev exits.
+            Err(error) => {
+                tracing::error!("switching strict DNS: {error}; tearing the tunnel down");
+                self.teardown().await;
+                self.last_error = Some(Reason::ForwardingStopped);
+                self.retry_soon();
+            }
+        }
+    }
+
     /// Network first: the tunnel goes before the relays it depends on.
     async fn teardown(&mut self) {
         self.teardown_because(None).await;
@@ -1234,6 +1278,7 @@ impl Actor {
             settings: cg_ipc::Settings {
                 auto_connect: stored.auto_connect,
                 chosen_serial: stored.chosen_serial.clone(),
+                strict_dns: stored.strict_dns,
             },
         };
         self.snapshot.send_if_modified(|current| {
@@ -1769,6 +1814,7 @@ mod tests {
             .send(Command::SetSettings {
                 auto_connect: Some(false),
                 phone: None,
+                strict_dns: None,
             })
             .await
             .unwrap();
@@ -2178,6 +2224,7 @@ mod tests {
             .send(Command::SetSettings {
                 auto_connect: Some(false),
                 phone: None,
+                strict_dns: None,
             })
             .await
             .unwrap();
@@ -2197,6 +2244,7 @@ mod tests {
             .send(Command::SetSettings {
                 auto_connect: Some(false),
                 phone: None,
+                strict_dns: None,
             })
             .await
             .unwrap();
@@ -2277,6 +2325,7 @@ mod tests {
                 phone: Some(PhoneChoice::Serial {
                     serial: "bbbb".into(),
                 }),
+                strict_dns: None,
             })
             .await
             .unwrap();
@@ -2287,6 +2336,7 @@ mod tests {
             .send(Command::SetSettings {
                 auto_connect: Some(false),
                 phone: None,
+                strict_dns: None,
             })
             .await
             .unwrap();
@@ -3196,6 +3246,85 @@ mod tests {
         r.controller.send(Command::Disconnect).await.unwrap();
         wait_for(&r.controller, "idle", |s| s.state == ConnState::Idle).await;
         assert_eq!(r.controller.snapshot().strict_dns, StrictDns::NotApplicable);
+    }
+
+    fn set_strict_dns(on: bool) -> Command {
+        Command::SetSettings {
+            auto_connect: None,
+            phone: None,
+            strict_dns: Some(on),
+        }
+    }
+
+    /// The settings switch while connected: stored, applied to the running tunnel at once
+    /// and published; turning it off logs nothing.
+    #[tokio::test]
+    async fn strict_dns_switch_applies_while_connected() {
+        let (r, _dir) = rig_health().await;
+        connect_phone(&r).await;
+        r.controller.send(set_strict_dns(false)).await.unwrap();
+        let snapshot = r.controller.snapshot();
+        assert_eq!(snapshot.strict_dns, StrictDns::Disabled);
+        assert!(!snapshot.settings.strict_dns);
+        assert!(matches!(snapshot.state, ConnState::Connected { .. }));
+        assert_eq!(r.backend.strict_calls(), vec![false]);
+        assert!(
+            !kinds(&r.controller)
+                .iter()
+                .any(|(kind, _)| *kind == EventKind::StrictDnsUnavailable)
+        );
+        r.controller.send(set_strict_dns(true)).await.unwrap();
+        let snapshot = r.controller.snapshot();
+        assert_eq!(snapshot.strict_dns, StrictDns::On);
+        assert!(snapshot.settings.strict_dns);
+        assert_eq!(r.backend.strict_calls(), vec![false, true]);
+        assert_eq!(r.backend.started(), 1, "no reconnect");
+    }
+
+    /// Turning it on and failing is logged, like a connection that couldn't turn it on.
+    #[tokio::test]
+    async fn strict_dns_switched_on_but_unavailable_is_logged() {
+        let (r, _dir) = rig_health().await;
+        connect_phone(&r).await;
+        let off = StrictDns::Off {
+            reason: "BFE unavailable".into(),
+        };
+        r.backend.set_strict_dns(off.clone());
+        r.controller.send(set_strict_dns(true)).await.unwrap();
+        assert_eq!(r.controller.snapshot().strict_dns, off);
+        assert!(
+            kinds(&r.controller)
+                .iter()
+                .any(|(kind, _)| *kind == EventKind::StrictDnsUnavailable)
+        );
+    }
+
+    /// Not connected: the switch is only stored, and the next connection's plan carries it.
+    #[tokio::test]
+    async fn strict_dns_setting_reaches_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = rig_health_at(
+            dir.path().join("health"),
+            Stored {
+                strict_dns: false,
+                ..manual()
+            },
+        )
+        .await;
+        wait_for(&r.controller, "setting off", |s| !s.settings.strict_dns).await;
+        connect_phone(&r).await;
+        assert!(!r.backend.last_plan().unwrap().strict_dns);
+        r.controller.send(Command::Disconnect).await.unwrap();
+        wait_for(&r.controller, "idle", |s| s.state == ConnState::Idle).await;
+        r.controller.send(set_strict_dns(true)).await.unwrap();
+        assert!(r.backend.strict_calls().is_empty(), "nothing to apply to");
+        assert!(r.controller.snapshot().settings.strict_dns);
+        r.controller
+            .send(Command::Connect { serial: None })
+            .await
+            .unwrap();
+        wait_for(&r.controller, "connected", connected).await;
+        assert!(r.backend.last_plan().unwrap().strict_dns);
     }
 
     /// Where the platform has no strict DNS (Linux), a connection says so and logs nothing.

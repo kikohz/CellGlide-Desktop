@@ -11,6 +11,7 @@ state:
   connected_public_dns: "已连接，电脑正在使用手机网络（手机 CellGlide %{version}；手机上的 CellGlide DNS 已关闭，使用公共 DNS）"
   retrying: "连接未成功，稍后自动重试：%{reason}"
   strict_dns_on: "严格 DNS：已开启（DNS 查询只经手机发出）"
+  strict_dns_disabled: "严格 DNS：已在设置中关闭"
   strict_dns_off: "严格 DNS：未开启，Windows 可能同时把 DNS 查询发给其他网络的 DNS 服务器。原因见 cellglide diagnostics"
 phone:
   card_title: "iPhone"
@@ -130,6 +131,7 @@ cli:
   service_stopped: "服务已停止"
   unexpected_reply: "服务回复了意外的内容"
   settings_auto_connect: "自动连接：%{value}"
+  settings_strict_dns: "严格 DNS：%{value}"
   settings_phone: "使用的 iPhone：%{value}"
   on: "开"
   off: "关"

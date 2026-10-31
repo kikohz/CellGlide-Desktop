@@ -59,7 +59,8 @@ mod tests {
         assert!(needs_full(&Request::Disconnect));
         assert!(needs_full(&Request::SetSettings {
             auto_connect: None,
-            phone: None
+            phone: None,
+            strict_dns: None
         }));
         assert!(needs_full(&Request::Diagnostics {
             range: DiagRange::Day,

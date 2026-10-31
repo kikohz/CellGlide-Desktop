@@ -104,19 +104,32 @@ mod cli {
             /// "auto", or the serial of the iPhone to use
             #[arg(long)]
             phone: Option<String>,
+            /// Windows: on or off. Blocks DNS queries to other networks while connected
+            #[arg(long, value_parser = ["on", "off"], hide = cfg!(not(windows)))]
+            strict_dns: Option<String>,
         },
     }
 
+    fn on_off(on: bool) -> String {
+        tr(if on { "cli.on" } else { "cli.off" }, &[])
+    }
+
     fn print_settings(settings: &cg_ipc::Settings) {
-        let on_off = tr(
-            if settings.auto_connect {
-                "cli.on"
-            } else {
-                "cli.off"
-            },
-            &[],
+        outln!(
+            "{}",
+            tr(
+                "cli.settings_auto_connect",
+                &[("value", &on_off(settings.auto_connect))]
+            )
         );
-        outln!("{}", tr("cli.settings_auto_connect", &[("value", &on_off)]));
+        #[cfg(windows)]
+        outln!(
+            "{}",
+            tr(
+                "cli.settings_strict_dns",
+                &[("value", &on_off(settings.strict_dns))]
+            )
+        );
         let phone = settings
             .chosen_serial
             .clone()
@@ -455,8 +468,9 @@ mod cli {
             Cmd::Settings {
                 auto_connect,
                 phone,
+                strict_dns,
             } => {
-                if auto_connect.is_some() || phone.is_some() {
+                if auto_connect.is_some() || phone.is_some() || strict_dns.is_some() {
                     call(
                         &cli,
                         Request::SetSettings {
@@ -467,6 +481,7 @@ mod cli {
                                     serial: serial.into(),
                                 },
                             }),
+                            strict_dns: strict_dns.as_deref().map(|v| v == "on"),
                         },
                     )
                     .await?;

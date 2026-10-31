@@ -175,6 +175,24 @@ Speed test finished
   - 在 W1 那样 3.3 Mbps 的上行上，第一批确认约 14.5 秒才到，现在落在宽限期内，算出约 3.3 Mbps。
 - **修正后实机复测**（服务已重装；当天新拍快照，前后 `identical`）：同一命令跑两次，上行 **19.7 Mbps**、**26.4 Mbps**；curl 对照 **24.4 Mbps**（5 MB，1.64 秒）。两次都在 ±50% 内（−19%、+8%）。下行 26.5 Mbps 两次。测完后手机 `↑` 约 1 秒内回到 0。这一轮用了 **25.3 MB**（89.2 → 114.5 MB）。本任务两轮合计 **88.3 MB**。
 
+## 严格 DNS 开关（W2 Task 7，2026-10-30）
+
+设置里多了一个开关 `strict_dns`（默认开；旧的 settings.json 读出来也是开）。命令行：`cellglide settings --strict-dns on|off`，`cellglide settings` 在 Windows 上多打一行「严格 DNS：开/关」。连接中切换立即生效，不重连：关 = 关闭 WFP 动态会话（我们的子层和全部过滤器随之删除）；开 = 按连接时同样的条件（cellglide0 的 DNS 设置成功）重新建会话，虚拟网卡的 LUID 放行重新枚举。关闭时 `status` 显示「严格 DNS：已在设置中关闭」，诊断写 `StrictDns: disabled`，不记时间线事件；打开失败照旧记 `strictDnsUnavailable`。设置为关时连接，不建 WFP 会话。
+
+实机（release 服务重装，iPhone 16e / Cricket 5G NSA，Wi-Fi DNS `10.10.10.1`）：
+
+| 步骤 | `status` | 诊断 `StrictDns` | `netsh wfp show filters`/`show state`（只读） | pktmon，Wi-Fi 网卡，端口 53，20 秒 | `Resolve-DnsName example.com -Server 10.10.10.1` |
+| --- | --- | --- | --- | --- | --- |
+| 连接后（默认开） | 严格 DNS：已开启 | `on` | 子层在，18 个过滤器 | 0 包（3 轮查询，全部超时） | 超时 |
+| `--strict-dns off` | 严格 DNS：已在设置中关闭 | `disabled` | 子层不在，0 个过滤器 | **266 包**（Rx 130 / Tx 136；32 轮，32 次直接查询都有应答） | 有应答 |
+| `--strict-dns on` | 严格 DNS：已开启 | `on` | 子层在，18 个过滤器，与第一次逐条相同 | **0 包**（3 轮，全部超时） | 超时 |
+| 断开 | 已断开 | — | 子层不在，0 个过滤器 | — | — |
+
+- 18 个过滤器 = 两层（`ALE_AUTH_CONNECT_V4/V6`）各：1 个按接口类型 6/71/243/244 拦 53 端口、6 个虚拟网卡 LUID 放行、1 个回环放行、1 个 cellglide0 LUID 放行。重新打开后按层、动作、权重、条件比较，与连接时的那份完全一样（过滤器 ID 不同）。
+- 网络快照：重装服务前新拍基线，连接、两次切换、断开之后再拍，`-Compare` 结果 `identical`。特权测试（含新加的 `strict_dns_toggles_on_a_running_tunnel`、`strict_dns_off_in_the_plan_starts_without_rules`）前后也是 `identical`。
+- 结束时设置恢复默认（严格 DNS 开），隧道已断开；pktmon 过滤器列表清空（开始前也是空的）。
+- 不测速。手机流量约 0.3 MB（`This session` 242 KB，加上断开前的少量后台流量）。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

@@ -255,6 +255,8 @@ pub enum StrictDns {
     Off {
         reason: String,
     },
+    /// The user turned it off in settings.
+    Disabled,
     /// A state this build doesn't know, from a newer service: shown as nothing.
     #[serde(other)]
     Unknown,
@@ -286,6 +288,13 @@ pub enum ConnState {
 pub struct Settings {
     pub auto_connect: bool,
     pub chosen_serial: Option<String>,
+    /// Windows' strict DNS while connected; on by default (and from a service before it).
+    #[serde(default = "default_true")]
+    pub strict_dns: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -293,6 +302,7 @@ impl Default for Settings {
         Settings {
             auto_connect: true,
             chosen_serial: None,
+            strict_dns: true,
         }
     }
 }
@@ -349,6 +359,9 @@ pub enum Request {
     SetSettings {
         auto_connect: Option<bool>,
         phone: Option<PhoneChoice>,
+        /// Windows' strict DNS; takes effect at once while connected.
+        #[serde(default)]
+        strict_dns: Option<bool>,
     },
     Doctor,
     Subscribe,
@@ -527,9 +540,10 @@ mod tests {
                 auto_connect: Some(false),
                 phone: Some(PhoneChoice::Serial {
                     serial: "ab".into()
-                })
+                }),
+                strict_dns: Some(false),
             }),
-            b"{\"cmd\":\"set_settings\",\"auto_connect\":false,\"phone\":{\"mode\":\"serial\",\"serial\":\"ab\"}}\n"
+            b"{\"cmd\":\"set_settings\",\"auto_connect\":false,\"phone\":{\"mode\":\"serial\",\"serial\":\"ab\"},\"strict_dns\":false}\n"
         );
         let connected = Snapshot {
             state: ConnState::Connected {
@@ -636,13 +650,43 @@ mod tests {
         assert_eq!(s, StrictDns::Unknown);
         // A new state with fields of its own (the tagged shape: fields beside `state`).
         let s: StrictDns =
-            serde_json::from_str(r#"{"state":"disabled","reason":"x","n":3}"#).unwrap();
+            serde_json::from_str(r#"{"state":"paused","reason":"x","n":3}"#).unwrap();
         assert_eq!(s, StrictDns::Unknown);
         // Inside a whole snapshot, too.
-        let line = br#"{"state":{"state":"no_phone"},"devices":[],"selected":null,"wants_connection":false,"strict_dns":{"state":"disabled","reason":"x"}}"#;
+        let line = br#"{"state":{"state":"no_phone"},"devices":[],"selected":null,"wants_connection":false,"strict_dns":{"state":"paused","reason":"x"}}"#;
         assert_eq!(
             from_line::<Snapshot>(line).unwrap().strict_dns,
             StrictDns::Unknown
+        );
+    }
+
+    /// Settings and requests from before the strict DNS switch: it reads as on, and a
+    /// request without it leaves it alone.
+    #[test]
+    fn old_settings_and_requests_still_parse() {
+        let s: Settings =
+            serde_json::from_str(r#"{"auto_connect":true,"chosen_serial":null}"#).unwrap();
+        assert!(s.strict_dns);
+        let r: Request =
+            serde_json::from_str(r#"{"cmd":"set_settings","auto_connect":null,"phone":null}"#)
+                .unwrap();
+        assert_eq!(
+            r,
+            Request::SetSettings {
+                auto_connect: None,
+                phone: None,
+                strict_dns: None
+            }
+        );
+    }
+
+    #[test]
+    fn disabled_strict_dns_on_the_wire() {
+        let line = serde_json::to_string(&StrictDns::Disabled).unwrap();
+        assert_eq!(line, r#"{"state":"disabled"}"#);
+        assert_eq!(
+            serde_json::from_str::<StrictDns>(&line).unwrap(),
+            StrictDns::Disabled
         );
     }
 

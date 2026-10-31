@@ -11,6 +11,7 @@ state:
   connected_public_dns: "Connected. This computer is using the phone's network (CellGlide %{version} on the phone; CellGlide DNS is off on the phone, so public DNS is used)"
   retrying: "Couldn't connect, retrying shortly: %{reason}"
   strict_dns_on: "Strict DNS: on (DNS queries can only go through the phone)"
+  strict_dns_disabled: "Strict DNS: off in settings"
   strict_dns_off: "Strict DNS: off, so Windows may also send DNS queries to your other networks' DNS servers. Run cellglide diagnostics for the reason"
 phone:
   card_title: "iPhone"
@@ -130,6 +131,7 @@ cli:
   service_stopped: "The service stopped"
   unexpected_reply: "The service sent an unexpected reply"
   settings_auto_connect: "Auto connect: %{value}"
+  settings_strict_dns: "Strict DNS: %{value}"
   settings_phone: "iPhone to use: %{value}"
   on: "on"
   off: "off"

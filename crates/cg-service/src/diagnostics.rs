@@ -278,6 +278,9 @@ pub fn environment(snapshot: &Snapshot, checks: &[Check], root: &Path) -> BTreeM
         StrictDns::Off { reason } => {
             map.insert("StrictDns".into(), format!("off ({reason})"));
         }
+        StrictDns::Disabled => {
+            map.insert("StrictDns".into(), "disabled".into());
+        }
     }
     let chosen = snapshot.settings.chosen_serial.as_deref().unwrap_or("auto");
     map.insert(
@@ -1000,6 +1003,11 @@ mod tests {
             environment(&snapshot, &[], root.path())["StrictDns"],
             "off (BFE unavailable)"
         );
+        snapshot.strict_dns = StrictDns::Disabled;
+        assert_eq!(
+            environment(&snapshot, &[], root.path())["StrictDns"],
+            "disabled"
+        );
         snapshot.strict_dns = StrictDns::Unknown;
         let env = environment(&snapshot, &[], root.path());
         assert!(!env.contains_key("StrictDns"), "{env:?}");
@@ -1307,6 +1315,11 @@ mod windows_tests {
         assert_eq!(
             environment(&snapshot, &[], Path::new(""))["StrictDns"],
             "off (BFE unavailable)"
+        );
+        snapshot.strict_dns = StrictDns::Disabled;
+        assert_eq!(
+            environment(&snapshot, &[], Path::new(""))["StrictDns"],
+            "disabled"
         );
         snapshot.strict_dns = StrictDns::Unknown;
         assert!(!environment(&snapshot, &[], Path::new("")).contains_key("StrictDns"));

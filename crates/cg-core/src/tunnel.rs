@@ -78,6 +78,8 @@ pub struct TunnelPlan {
     pub dns: DnsPlan,
     /// Keep private, multicast and link-local ranges on the original network.
     pub bypass: bool,
+    /// Windows' strict DNS, as the user set it; ignored where there is none (Linux).
+    pub strict_dns: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +136,11 @@ pub trait RunningTunnel: Send + 'static {
     /// strict DNS), and why not if it isn't; `NotApplicable` where the platform has no
     /// such rules (Linux).
     fn strict_dns(&self) -> StrictDns {
+        StrictDns::NotApplicable
+    }
+    /// Turns strict DNS on or off while the tunnel runs (the settings switch) and returns
+    /// the new state. Called from a blocking thread, after `finish`.
+    fn apply_strict_dns(&self, _on: bool) -> StrictDns {
         StrictDns::NotApplicable
     }
     /// Notices since the last call, oldest first.

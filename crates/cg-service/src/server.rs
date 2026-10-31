@@ -203,11 +203,13 @@ async fn client<C: AsyncRead + AsyncWrite + Unpin>(
             Ok(Request::SetSettings {
                 auto_connect,
                 phone,
+                strict_dns,
             }) => outcome(
                 controller
                     .send(Command::SetSettings {
                         auto_connect,
                         phone,
+                        strict_dns,
                     })
                     .await,
             ),
@@ -427,6 +429,7 @@ mod access_tests {
             Request::SetSettings {
                 auto_connect: Some(false),
                 phone: None,
+                strict_dns: None,
             },
             Request::Diagnostics {
                 range: DiagRange::Day,
@@ -541,6 +544,7 @@ mod tests {
         let set = Request::SetSettings {
             auto_connect: Some(false),
             phone: None,
+            strict_dns: Some(false),
         };
         assert_eq!(
             client::request(&ep(&path), &set).await.unwrap(),
@@ -552,6 +556,7 @@ mod tests {
             panic!("expected a status");
         };
         assert!(!snapshot.settings.auto_connect);
+        assert!(!snapshot.settings.strict_dns);
     }
 
     #[tokio::test]

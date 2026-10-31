@@ -29,6 +29,7 @@ fn plan() -> TunnelPlan {
         socks_port: 1080,
         dns: DnsPlan::Resolver(RESOLVER),
         bypass: false,
+        strict_dns: true,
     }
 }
 

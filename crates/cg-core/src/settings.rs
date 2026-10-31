@@ -15,6 +15,8 @@ pub struct Stored {
     pub user_disconnected: bool,
     /// A phone the user picked explicitly.
     pub chosen_serial: Option<String>,
+    /// Windows' strict DNS while connected; on unless the user turned it off.
+    pub strict_dns: bool,
     pub last_versions: LastVersions,
 }
 
@@ -32,6 +34,7 @@ impl Default for Stored {
             auto_connect: true,
             user_disconnected: false,
             chosen_serial: None,
+            strict_dns: true,
             last_versions: LastVersions::default(),
         }
     }
@@ -172,6 +175,21 @@ mod tests {
                 .unwrap()
                 .contains("bogus")
         );
+    }
+
+    /// A file from before the strict DNS switch keeps strict DNS on.
+    #[test]
+    fn old_file_keeps_strict_dns_on() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(path(&dir).parent().unwrap()).unwrap();
+        std::fs::write(
+            path(&dir),
+            "{\"version\": 1, \"auto_connect\": false, \"user_disconnected\": false}",
+        )
+        .unwrap();
+        let store = SettingsStore::load(path(&dir));
+        assert!(store.get().strict_dns);
+        assert!(!store.get().auto_connect);
     }
 
     #[test]

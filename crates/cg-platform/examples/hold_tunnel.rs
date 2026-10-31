@@ -9,6 +9,7 @@ fn main() {
         socks_port: socks.local_addr().unwrap().port(),
         dns: DnsPlan::Resolver(RESOLVER),
         bypass: true,
+        strict_dns: true,
     };
     let tunnel = cg_platform::LinuxBackend.start(&plan).expect("tunnel up");
     println!("up");

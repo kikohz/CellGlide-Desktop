@@ -131,6 +131,7 @@ fn save(
         Request::SetSettings {
             auto_connect,
             phone,
+            strict_dns: None,
         },
         Reply::Settings(field),
     )
@@ -381,7 +382,8 @@ mod tests {
             Effect::Request(
                 Request::SetSettings {
                     auto_connect: Some(false),
-                    phone: None
+                    phone: None,
+                    strict_dns: None
                 },
                 Reply::Settings(SettingField::AutoConnect)
             )
@@ -395,7 +397,8 @@ mod tests {
             Effect::Request(
                 Request::SetSettings {
                     auto_connect: None,
-                    phone: Some(PhoneChoice::Auto)
+                    phone: Some(PhoneChoice::Auto),
+                    strict_dns: None
                 },
                 Reply::Settings(SettingField::Phone)
             )

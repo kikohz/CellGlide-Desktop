@@ -27,7 +27,10 @@ pub struct FakeBackend {
     finish_fails: AtomicBool,
     exited: Arc<AtomicBool>,
     dns_unmanaged: AtomicBool,
-    strict_dns: Mutex<cg_ipc::StrictDns>,
+    /// Set by `set_strict_dns`; `None` until then.
+    strict_dns: Mutex<Option<cg_ipc::StrictDns>>,
+    /// The arguments of every `apply_strict_dns`, in order.
+    strict_calls: Mutex<Vec<bool>>,
     notices: Arc<Mutex<Vec<TunnelNotice>>>,
 }
 
@@ -35,7 +38,7 @@ struct FakeRunning {
     backend: Arc<FakeBackend>,
     exited: Arc<AtomicBool>,
     dns_managed: bool,
-    strict_dns: cg_ipc::StrictDns,
+    strict_dns: Mutex<cg_ipc::StrictDns>,
     notices: Arc<Mutex<Vec<TunnelNotice>>>,
 }
 
@@ -92,9 +95,14 @@ impl FakeBackend {
     pub fn set_dns_unmanaged(&self, unmanaged: bool) {
         self.dns_unmanaged.store(unmanaged, Ordering::SeqCst);
     }
-    /// What tunnels started from now on report for strict DNS.
+    /// What tunnels started from now on report for strict DNS, and what `apply_strict_dns`
+    /// returns from now on.
     pub fn set_strict_dns(&self, strict: cg_ipc::StrictDns) {
-        *self.strict_dns.lock().unwrap() = strict;
+        *self.strict_dns.lock().unwrap() = Some(strict);
+    }
+    /// The arguments of every `apply_strict_dns` so far, in order.
+    pub fn strict_calls(&self) -> Vec<bool> {
+        self.strict_calls.lock().unwrap().clone()
     }
     /// The running tunnel reports this at its next `take_notices`.
     pub fn push_notice(&self, notice: TunnelNotice) {
@@ -124,7 +132,14 @@ impl TunnelBackend for SharedFake {
             backend: backend.clone(),
             exited: backend.exited.clone(),
             dns_managed: !backend.dns_unmanaged.load(Ordering::SeqCst),
-            strict_dns: backend.strict_dns.lock().unwrap().clone(),
+            strict_dns: Mutex::new(
+                backend
+                    .strict_dns
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+            ),
             notices: backend.notices.clone(),
         }))
     }
@@ -156,7 +171,23 @@ impl RunningTunnel for FakeRunning {
         self.dns_managed
     }
     fn strict_dns(&self) -> cg_ipc::StrictDns {
-        self.strict_dns.clone()
+        self.strict_dns.lock().unwrap().clone()
+    }
+    fn apply_strict_dns(&self, on: bool) -> cg_ipc::StrictDns {
+        self.backend.strict_calls.lock().unwrap().push(on);
+        let state = self
+            .backend
+            .strict_dns
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(if on {
+                cg_ipc::StrictDns::On
+            } else {
+                cg_ipc::StrictDns::Disabled
+            });
+        *self.strict_dns.lock().unwrap() = state.clone();
+        state
     }
     fn take_notices(&self) -> Vec<TunnelNotice> {
         std::mem::take(&mut *self.notices.lock().unwrap())

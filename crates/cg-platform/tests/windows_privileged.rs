@@ -6,7 +6,8 @@
 
 use cg_core::tunnel::{
     ADDRESS_V4, ADDRESS_V6, DnsPlan, FALLBACK_DNS, INTERFACE_NAME, IPV6_ROUTES, ResolverOrder,
-    TunnelBackend, TunnelPlan, WINDOWS_ADAPTER_GUID, WINDOWS_RESOLVER, WINDOWS_TUNNEL_TYPE,
+    RunningTunnel, TunnelBackend, TunnelPlan, WINDOWS_ADAPTER_GUID, WINDOWS_RESOLVER,
+    WINDOWS_TUNNEL_TYPE,
 };
 use cg_netstack::testkit::FakeSocks;
 use cg_platform::windows::ip::{self, Family};
@@ -277,6 +278,7 @@ fn tunnel_plan(socks_port: u16) -> TunnelPlan {
         socks_port,
         dns: DnsPlan::Resolver(WINDOWS_RESOLVER),
         bypass: false,
+        strict_dns: true,
     }
 }
 
@@ -381,6 +383,70 @@ fn start_finish_stop_leaves_nothing() {
     assert!(left.is_empty(), "routes left after stop: {left}");
     wait_for(|| !adapter_listed()).expect("adapter still listed after stop");
     assert!(Adapter::open(&dll, INTERFACE_NAME).unwrap().is_none());
+}
+
+/// cellglide0 started and finished on the given plan, with a FakeSocks behind it.
+/// The runtime keeps FakeSocks running; bound before it, so it drops after it.
+fn start_and_finish(
+    strict_dns: bool,
+) -> (Box<dyn RunningTunnel>, tokio::runtime::Runtime, FakeSocks) {
+    assert_absent(&dll());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socks = runtime.block_on(FakeSocks::start());
+    let plan = TunnelPlan {
+        strict_dns,
+        ..tunnel_plan(socks.addr().port())
+    };
+    let tunnel = WindowsBackend::new().start(&plan).unwrap();
+    tunnel.finish(&DnsPlan::Resolver(WINDOWS_RESOLVER)).unwrap();
+    assert!(tunnel.dns_managed());
+    (tunnel, runtime, socks)
+}
+
+/// The settings switch on a running tunnel: off removes the rules at once (the physical
+/// adapter's on-link DNS server answers again), on puts them back, repeating either
+/// changes nothing.
+#[test]
+#[ignore]
+fn strict_dns_toggles_on_a_running_tunnel() {
+    let (tunnel, _runtime, _socks) = start_and_finish(true);
+    let (wifi_dns, _) = physical_dns();
+    assert_eq!(tunnel.strict_dns(), cg_ipc::StrictDns::On);
+    assert!(
+        !answered(wifi_dns),
+        "{wifi_dns} answered with strict DNS on"
+    );
+    assert_eq!(tunnel.apply_strict_dns(false), cg_ipc::StrictDns::Disabled);
+    assert_eq!(tunnel.strict_dns(), cg_ipc::StrictDns::Disabled);
+    assert!(answered(wifi_dns), "{wifi_dns} blocked with strict DNS off");
+    assert_eq!(tunnel.apply_strict_dns(false), cg_ipc::StrictDns::Disabled);
+    assert_eq!(tunnel.apply_strict_dns(true), cg_ipc::StrictDns::On);
+    assert!(
+        !answered(wifi_dns),
+        "{wifi_dns} answered with strict DNS back on"
+    );
+    assert_eq!(tunnel.apply_strict_dns(true), cg_ipc::StrictDns::On);
+    assert!(!answered(wifi_dns), "{wifi_dns} answered after a repeat on");
+    assert!(!tunnel.has_exited());
+    tunnel.stop().unwrap();
+    wait_for(|| !adapter_listed()).expect("adapter still listed after stop");
+}
+
+/// A plan with strict DNS off never opens the WFP session; turning it on later does.
+#[test]
+#[ignore]
+fn strict_dns_off_in_the_plan_starts_without_rules() {
+    let (tunnel, _runtime, _socks) = start_and_finish(false);
+    let (wifi_dns, _) = physical_dns();
+    assert_eq!(tunnel.strict_dns(), cg_ipc::StrictDns::Disabled);
+    assert!(answered(wifi_dns), "{wifi_dns} blocked with strict DNS off");
+    assert_eq!(tunnel.apply_strict_dns(true), cg_ipc::StrictDns::On);
+    assert!(
+        !answered(wifi_dns),
+        "{wifi_dns} answered with strict DNS on"
+    );
+    tunnel.stop().unwrap();
+    wait_for(|| !adapter_listed()).expect("adapter still listed after stop");
 }
 
 /// The controller's `finish` thread panicking drops the tunnel without `stop`.

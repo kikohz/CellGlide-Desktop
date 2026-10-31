@@ -97,6 +97,7 @@ impl TunnelBackend for WindowsBackend {
             inner: Mutex::new(Inner {
                 strict_dns: None,
                 strict_dns_off: None,
+                strict_dns_enabled: plan.strict_dns,
                 engine: None,
                 session: None,
                 dns_managed: true,
@@ -139,6 +140,9 @@ struct Inner {
     strict_dns: Option<StrictDns>,
     /// Why strict DNS is off, once `finish` tried to turn it on.
     strict_dns_off: Option<String>,
+    /// The user's setting: the plan's, then the last `apply_strict_dns`. While false,
+    /// no WFP session is open at all.
+    strict_dns_enabled: bool,
     engine: Option<Engine>,
     /// Ends after the DNS, routes and addresses are gone, before the adapter closes.
     session: Option<Arc<Session>>,
@@ -252,6 +256,11 @@ impl Running {
     /// through cellglide0 (permitted), an on-link one, typically the router, would be
     /// blocked and resolution would stop.
     fn start_strict_dns(&self, inner: &mut Inner) {
+        if !inner.strict_dns_enabled {
+            tracing::info!("strict DNS off in settings");
+            inner.strict_dns_off = None;
+            return;
+        }
         if !inner.dns_managed {
             tracing::warn!("strict DNS off: {INTERFACE_NAME}'s DNS servers aren't managed");
             inner.strict_dns_off = Some(format!("{INTERFACE_NAME}'s DNS servers aren't managed"));
@@ -357,6 +366,36 @@ impl RunningTunnel for Running {
 
     fn strict_dns(&self) -> StrictDnsState {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::strict_dns_state(&inner)
+    }
+
+    /// Off: the WFP session closes, which deletes our sublayer and every filter in it.
+    /// On: the rules are added again exactly as `finish` adds them, under the same
+    /// condition (our DNS servers applied), with the virtual adapters' LUID permits
+    /// enumerated afresh. Repeating the current setting changes nothing.
+    fn apply_strict_dns(&self, on: bool) -> StrictDnsState {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.strict_dns_enabled = on;
+        let finished = inner.adapter.is_some() && inner.session.is_some();
+        if !on {
+            if inner.strict_dns.take().is_some() {
+                tracing::info!("strict DNS turned off in settings; rules removed");
+            }
+            inner.strict_dns_off = None;
+        } else if finished && inner.strict_dns.is_none() {
+            // Before `finish` (or after `stop`) there is nothing to protect yet: `finish`
+            // reads the setting itself.
+            self.start_strict_dns(&mut inner);
+        }
+        Self::strict_dns_state(&inner)
+    }
+}
+
+impl Running {
+    fn strict_dns_state(inner: &Inner) -> StrictDnsState {
+        if !inner.strict_dns_enabled {
+            return StrictDnsState::Disabled;
+        }
         match (&inner.strict_dns, &inner.strict_dns_off) {
             (Some(_), _) => StrictDnsState::On,
             (None, Some(reason)) => StrictDnsState::Off {
