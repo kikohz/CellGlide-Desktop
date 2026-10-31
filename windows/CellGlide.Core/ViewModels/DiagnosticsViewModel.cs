@@ -24,6 +24,8 @@ public sealed class DiagnosticsViewModel : CoreViewModel
     string? _code;
     string? _savedPath;
     bool _previewed;
+    /// <summary>The form <see cref="Json"/> was built from: a bundle is only used for that same form.</summary>
+    DiagnosticsInput? _builtFrom;
 
     public DiagnosticsViewModel(EventHub hub)
         : base(hub)
@@ -100,6 +102,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         Json = null;
         FileName = null;
         Previewed = false;
+        _builtFrom = null;
     }
 
     /// <summary>"Send Another" (the page keeps the form) and "Done" (the page clears it): forgets the last report.</summary>
@@ -113,6 +116,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
 
     async Task PrepareAsync(DiagnosticsInput? input)
     {
+        DiscardIfNotFor(input);
         if (Json is not null || await BuildAsync(input))
         {
             Previewed = true;
@@ -121,9 +125,22 @@ public sealed class DiagnosticsViewModel : CoreViewModel
 
     async Task PrepareToSaveAsync(DiagnosticsInput? input)
     {
+        DiscardIfNotFor(input);
         if (Json is null)
         {
             await BuildAsync(input);
+        }
+    }
+
+    /// <summary>
+    /// A bundle on hand that was built from another form is thrown away, so it is built again for this one. The
+    /// page also discards on every change, but a change's event may come after the click that uses the form.
+    /// </summary>
+    void DiscardIfNotFor(DiagnosticsInput? input)
+    {
+        if (Json is not null && input != _builtFrom)
+        {
+            Discard();
         }
     }
 
@@ -137,6 +154,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         Previewed = false;
         Json = bundle.Json;
         FileName = bundle.FileName;
+        _builtFrom = input;
         Code = null;
         SavedPath = null;
         return true;

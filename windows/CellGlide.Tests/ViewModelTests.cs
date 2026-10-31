@@ -446,6 +446,45 @@ public class ViewModelTests
     }
 
     [Fact]
+    public async Task A_bundle_built_from_another_form_is_built_again()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var diagnostics = new DiagnosticsViewModel(hub);
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"old\":1}", "old.json"));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        Assert.True(diagnostics.Previewed);
+
+        // The user typed, but the change's event has not come yet (no Discard): View asks for the new form.
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"new\":1}", "new.json"));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "a@b.co", ""));
+        Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Day, "a@b.co", ""), core.Sent[1]);
+        Assert.Equal("{\"new\":1}", diagnostics.Json);
+        Assert.True(diagnostics.Previewed);
+
+        // The same for Save: another range builds again, and the rebuilt bundle is not previewed.
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"week\":1}", "week.json"));
+        await diagnostics.PrepareToSaveCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Week, "a@b.co", ""));
+        Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Week, "a@b.co", ""), core.Sent[2]);
+        Assert.Equal("{\"week\":1}", diagnostics.Json);
+        Assert.False(diagnostics.Previewed);
+        Assert.False(diagnostics.SendCommand.CanExecute(null));
+
+        // A failed rebuild leaves no bundle of the old form behind.
+        core.Next = new ReplyErr("service is down");
+        await diagnostics.PrepareToSaveCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Week, "a@b.co", "note"));
+        Assert.Null(diagnostics.Json);
+        Assert.False(diagnostics.SaveCommand.CanExecute(null));
+
+        // The same form again uses the bundle on hand.
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "x.json"));
+        await diagnostics.PrepareToSaveCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        Assert.Equal(5, core.Sent.Count);
+        Assert.True(diagnostics.Previewed);
+    }
+
+    [Fact]
     public async Task Send_another_and_done_forget_the_last_report()
     {
         var core = new ScriptedCore();
