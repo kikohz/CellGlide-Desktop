@@ -454,6 +454,14 @@ Speed test finished
   - symbols zip：`cellglide.pdb`、`cellglide_service.pdb`、`cellglide_native.pdb`，以及发布目录的 `app/CellGlide.pdb`、`app/CellGlide.Core.pdb`。
   - 两次出包后 `git status` 只有本任务的文件，`Cargo.lock` 和 NuGet 锁文件都没变（发布时加了 `-p:RestoreLockedMode=true`）。
 - **与 brief 不同**：应用的资源索引是 `app\CellGlide.pri`（以程序集命名，W3 起发布版一直如此），没有 `resources.pri`，布局检查改为要求 `app\CellGlide.pri`。
+- **修复轮 1**：
+  - `Test-PackageLayout` 现在检查包里**每一个** `.exe` / `.dll` 的 PE Machine，不再只查五个文件。
+  - 顶层只允许 spec 10.1 的文件加 `LICENSE.txt`、`version.txt` 和 `app\`，多出来的报 `unexpected: <名字>`。
+  - 架构不认识时抛出。
+  - 绑定检查改为 `git diff --exit-code HEAD`。
+  - 三个输出文件在构建开始前就删掉，zip 先写成 `.partial`，检查通过后再改名。实测：`RUSTFLAGS=--bogus-flag` 让 cargo 失败，事先放进 `-OutDir` 的旧 x64 zip、SHA256SUMS.x64、symbols zip 都已删除，`SHA256SUMS.arm64` 没动。
+  - 重新出包：x64 zip 37,881,012 B，arm64 zip 37,058,972 B，各 258 个条目，布局检查（全部 PE 的 Machine）通过，`SHA256SUMS.<arch>` 与 `Get-FileHash` 一致。
+  - Pester 21/21。
 - 没有用手机流量，没有动网络，没有需要拍快照的步骤。
 
 ## 已知问题（W1 实测发现，未修）

@@ -35,8 +35,13 @@ $RequiredFiles = @(
     'THIRD-PARTY-LICENSES.txt', 'LICENSE.txt', 'uninstall.ps1', 'version.txt',
     'app\CellGlide.exe', 'app\cellglide_native.dll', 'app\CellGlide.pri'
 )
-# The programs whose PE machine must match the package architecture.
-$PeFiles = @('cellglide-service.exe', 'cellglide.exe', 'wintun.dll', 'app\CellGlide.exe', 'app\cellglide_native.dll')
+# What may be at the top level (spec 10.1, plus LICENSE.txt and version.txt): the files above that
+# are not under app\, and the app directory. app\ has the rules below, not a list. (A literal list:
+# Import-ScriptFunctions loads only constants whose value calls no command.)
+$TopLevel = @(
+    'cellglide-service.exe', 'cellglide.exe', 'wintun.dll', 'wintun-LICENSE.txt',
+    'THIRD-PARTY-LICENSES.txt', 'LICENSE.txt', 'uninstall.ps1', 'version.txt', 'app'
+)
 # The Windows App SDK's AI/ML files, excluded in CellGlide.App.csproj.
 $UnwantedPatterns = @('onnxruntime*.dll', 'DirectML*.dll')
 # The debug-only diagnostics override (crates/cg-ffi/src/runtime.rs) must not be in a release DLL.
@@ -115,32 +120,44 @@ function Get-RelativePath([string]$Base, [string]$FullName) {
 }
 
 function Test-PackageLayout([string]$Dir, [string]$Arch) {
+    if (-not $PeMachines.ContainsKey($Arch)) { throw "unknown architecture '$Arch' (x64 or arm64)" }
     $problems = New-Object System.Collections.Generic.List[string]
     $base = (Get-Item -LiteralPath $Dir).FullName.TrimEnd('\')
     foreach ($rel in $RequiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $base $rel) -PathType Leaf)) { $problems.Add("missing: $rel") }
     }
-    $files = @(Get-ChildItem -LiteralPath $base -Recurse -File -Force)
+    # One problem per file: a pdb or an excluded DLL is reported as such and not checked further.
+    $reported = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $expected = [uint16]$PeMachines[$Arch]
+    $files = @(Get-ChildItem -LiteralPath $base -Recurse -File -Force | Sort-Object FullName)
     foreach ($file in $files) {
         $rel = Get-RelativePath $base $file.FullName
-        if ($file.Name -like '*.pdb') { $problems.Add("pdb: $rel") }
+        if ($file.Name -like '*.pdb') { $problems.Add("pdb: $rel"); $null = $reported.Add($rel); continue }
+        $unwanted = $false
         foreach ($pattern in $UnwantedPatterns) {
-            if ($file.Name -like $pattern) { $problems.Add("unwanted: $rel"); break }
+            if ($file.Name -like $pattern) { $unwanted = $true; break }
+        }
+        if ($unwanted) { $problems.Add("unwanted: $rel"); $null = $reported.Add($rel); continue }
+        # Every program in the package, ours and the runtimes', is for the package architecture.
+        if ($file.Extension -eq '.exe' -or $file.Extension -eq '.dll') {
+            try {
+                $machine = Get-PeMachine $file.FullName
+            } catch {
+                $problems.Add("not a PE: $rel")
+                continue
+            }
+            if ($machine -ne $expected) {
+                $problems.Add(('machine: {0} is 0x{1:X4}, expected 0x{2:X4}' -f $rel, $machine, $expected))
+            }
         }
     }
-    $expected = [uint16]$PeMachines[$Arch]
-    foreach ($rel in $PeFiles) {
-        $path = Join-Path $base $rel
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        try {
-            $machine = Get-PeMachine $path
-        } catch {
-            $problems.Add("not a PE: $rel")
+    # Nothing at the top level beyond $TopLevel ('app' a directory, the rest files).
+    foreach ($entry in @(Get-ChildItem -LiteralPath $base -Force | Sort-Object Name)) {
+        if ($TopLevel -contains $entry.Name) {
+            if ([bool]$entry.PSIsContainer -ne ($entry.Name -eq 'app')) { $problems.Add("unexpected: $($entry.Name)") }
             continue
         }
-        if ($machine -ne $expected) {
-            $problems.Add(('machine: {0} is 0x{1:X4}, expected 0x{2:X4}' -f $rel, $machine, $expected))
-        }
+        if (-not $reported.Contains($entry.Name)) { $problems.Add("unexpected: $($entry.Name)") }
     }
     # As check-windows-core.ps1 -Publish: ASCII, and UTF-16 read from both byte alignments.
     $native = Join-Path $base 'app\cellglide_native.dll'
@@ -218,6 +235,13 @@ function Invoke-WindowsBuild {
         if (-not (Test-Path -LiteralPath $needed -PathType Leaf)) { throw "missing: $needed (the package needs it)" }
     }
 
+    # A failed build must not leave a new zip beside an old SHA256SUMS (or the reverse): the three
+    # outputs go first; the zip is written under a temporary name and moved into place once checked.
+    foreach ($name in $ZipName, $SumsName, $SymbolsName, "$ZipName.partial", "$SymbolsName.partial") {
+        $old = Join-Path $OutDir $name
+        if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
+    }
+
     Push-Location $Root
     try {
         # cargo reruns build.rs (which rewrites NativeMethods.g.cs) only when its inputs change; a new
@@ -227,7 +251,7 @@ function Invoke-WindowsBuild {
             cargo build --release --locked --target $Triple -p cg-service -p cg-cli -p cg-ffi
         }
         Invoke-Native 'NativeMethods.g.cs matches the committed copy' {
-            git diff --exit-code -- windows/CellGlide.Core/Native/NativeMethods.g.cs
+            git diff --exit-code HEAD -- windows/CellGlide.Core/Native/NativeMethods.g.cs
         }
 
         Push-Location (Join-Path $Root 'windows')
@@ -274,11 +298,13 @@ function Invoke-WindowsBuild {
 
         $null = New-Item -ItemType Directory -Force -Path $OutDir
         $zip = Join-Path $OutDir $ZipName
-        New-Zip $Staging $zip
-        $entries = Get-ZipEntryNames $zip
+        $partial = "$zip.partial"
+        New-Zip $Staging $partial
+        $entries = Get-ZipEntryNames $partial
         $bad = @($entries | Where-Object { $_ -like '*.pdb' -or $_.Contains('\') })
         if ($bad.Count -gt 0) { throw "$ZipName has entries it must not have: $($bad -join ', ')" }
-        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant()
+        Move-Item -LiteralPath $partial -Destination $zip
         Write-Utf8Text (Join-Path $OutDir $SumsName) "$hash  $ZipName`n"
         Write-Host "==> $zip ($((Get-Item -LiteralPath $zip).Length) bytes, $($entries.Count) entries)"
 
@@ -294,7 +320,8 @@ function Invoke-WindowsBuild {
             Copy-Item -LiteralPath $pdb -Destination $SymbolsStaging
         }
         $symbols = Join-Path $OutDir $SymbolsName
-        New-Zip $SymbolsStaging $symbols
+        New-Zip $SymbolsStaging "$symbols.partial"
+        Move-Item -LiteralPath "$symbols.partial" -Destination $symbols
         Write-Host "==> $symbols ($((Get-Item -LiteralPath $symbols).Length) bytes)"
         Write-Host "==> $(Join-Path $OutDir $SumsName): $hash  $ZipName"
     } finally {

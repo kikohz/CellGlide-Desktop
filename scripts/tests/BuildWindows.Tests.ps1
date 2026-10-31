@@ -89,7 +89,7 @@ Describe 'build-windows' {
         Set-Content (Join-Path $layout 'app\onnxruntime.dll') 'x'
         New-FakePe (Join-Path $layout 'wintun.dll') 0xAA64
         [IO.File]::WriteAllBytes((Join-Path $layout 'app\cellglide_native.dll'),
-            [byte[]](Get-Content (Join-Path $layout 'cellglide.exe') -Encoding Byte) + [Text.Encoding]::ASCII.GetBytes('CELLGLIDE_DIAG_TARGET'))
+            [byte[]]([IO.File]::ReadAllBytes((Join-Path $layout 'cellglide.exe')) + [Text.Encoding]::ASCII.GetBytes('CELLGLIDE_DIAG_TARGET')))
         $problems = Test-PackageLayout $layout 'x64'
         $problems | Should -Contain 'missing: version.txt'
         $problems | Should -Contain 'pdb: app\CellGlide.pdb'
@@ -97,6 +97,47 @@ Describe 'build-windows' {
         $problems | Should -Contain 'machine: wintun.dll is 0xAA64, expected 0x8664'
         $problems | Should -Contain 'diag override: app\cellglide_native.dll'
         @($problems).Count | Should -Be 5
+    }
+    It 'checks the machine of every exe and dll in the package, not only ours' {
+        $layout = Join-Path $TestDrive 'runtime-dll'; New-FakeLayout $layout 0x8664
+        New-FakePe (Join-Path $layout 'app\Microsoft.UI.Xaml.dll') 0x8664
+        New-FakePe (Join-Path $layout 'app\RestartAgent.exe') 0x8664
+        Test-PackageLayout $layout 'x64' | Should -BeNullOrEmpty
+        New-FakePe (Join-Path $layout 'app\Microsoft.UI.Xaml.dll') 0xAA64
+        $null = New-Item -ItemType Directory -Force (Join-Path $layout 'app\sub')
+        New-FakePe (Join-Path $layout 'app\sub\Deep.DLL') 0x014C
+        Set-Content (Join-Path $layout 'app\RestartAgent.exe') 'not a program'
+        $problems = Test-PackageLayout $layout 'x64'
+        $problems | Should -Contain 'machine: app\Microsoft.UI.Xaml.dll is 0xAA64, expected 0x8664'
+        $problems | Should -Contain 'machine: app\sub\Deep.DLL is 0x014C, expected 0x8664'
+        $problems | Should -Contain 'not a PE: app\RestartAgent.exe'
+        @($problems).Count | Should -Be 3
+    }
+    It 'allows only the spec 10.1 files, LICENSE.txt, version.txt and app at the top level' {
+        ($TopLevel | Sort-Object) | Should -Be ((@($RequiredFiles | Where-Object { -not $_.StartsWith('app\') }) + 'app') | Sort-Object)
+        $layout = Join-Path $TestDrive 'extra'; New-FakeLayout $layout 0x8664
+        Set-Content (Join-Path $layout 'notes.txt') 'x'
+        $null = New-Item -ItemType Directory -Force (Join-Path $layout 'logs')
+        Set-Content (Join-Path $layout 'logs\a.log') 'x'
+        $problems = Test-PackageLayout $layout 'x64'
+        $problems | Should -Contain 'unexpected: notes.txt'
+        $problems | Should -Contain 'unexpected: logs'
+        @($problems).Count | Should -Be 2
+        # app\ keeps its own rules: an extra runtime file there is fine.
+        $ok = Join-Path $TestDrive 'extra-app'; New-FakeLayout $ok 0x8664
+        Set-Content (Join-Path $ok 'app\Microsoft.UI.Xaml.Controls.pri') 'x'
+        Test-PackageLayout $ok 'x64' | Should -BeNullOrEmpty
+        # A directory where a file belongs is not allowed either.
+        $dirFile = Join-Path $TestDrive 'dir-file'; New-FakeLayout $dirFile 0x8664
+        Remove-Item (Join-Path $dirFile 'version.txt')
+        $null = New-Item -ItemType Directory -Force (Join-Path $dirFile 'version.txt')
+        $problems = Test-PackageLayout $dirFile 'x64'
+        $problems | Should -Contain 'missing: version.txt'
+        $problems | Should -Contain 'unexpected: version.txt'
+    }
+    It 'refuses an unknown architecture' {
+        $layout = Join-Path $TestDrive 'arch'; New-FakeLayout $layout 0x8664
+        { Test-PackageLayout $layout 'x86' } | Should -Throw '*unknown architecture*'
     }
     It 'finds the diag override in UTF-16 at either alignment, and a file that is not a PE' {
         foreach ($pad in 0, 1) {
