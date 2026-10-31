@@ -102,10 +102,16 @@ pub fn physical_uplink() -> Option<String> {
 }
 
 /// USB tethering adapters on Windows, matched case-insensitively anywhere in the adapter's
-/// description: the iPhone personal hotspot ("Apple Mobile Device Ethernet") and Android RNDIS
-/// ("Remote NDIS based Internet Sharing Device"). They are hardware Ethernet, but a comparison
-/// through them measures a phone's cellular network again.
-pub const WINDOWS_TETHERING: [&str; 2] = ["Apple Mobile Device Ethernet", "Remote NDIS"];
+/// description: the iPhone personal hotspot ("Apple Mobile Device Ethernet"), Android RNDIS
+/// ("Remote NDIS based Internet Sharing Device", or "RNDIS" in another name) and Android NCM
+/// (Windows 11's inbox driver, "UsbNcm Host Device"). They are hardware Ethernet, but a
+/// comparison through them measures a phone's cellular network again.
+pub const WINDOWS_TETHERING: [&str; 4] = [
+    "Apple Mobile Device Ethernet",
+    "Remote NDIS",
+    "RNDIS",
+    "UsbNcm",
+];
 
 /// `IF_TYPE_ETHERNET_CSMACD`
 const IF_TYPE_ETHERNET: u32 = 6;
@@ -392,8 +398,18 @@ wlp2s0\t0000A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n";
             description: "Remote NDIS based Internet Sharing Device".into(),
             ..row("以太网 4", 6)
         };
+        // Windows 11's own driver for Android USB tethering (NCM), and an RNDIS gadget
+        // named another way.
+        let ncm = IfRoute {
+            description: "UsbNcm Host Device".into(),
+            ..row("以太网 5", 7)
+        };
+        let gadget = IfRoute {
+            description: "USB Ethernet/RNDIS Gadget".into(),
+            ..row("以太网 6", 8)
+        };
         assert_eq!(
-            physical_from_rows(&[iphone, rndis, row("WLAN", 50)], OURS).as_deref(),
+            physical_from_rows(&[iphone, rndis, ncm, gadget, row("WLAN", 50)], OURS).as_deref(),
             Some("WLAN")
         );
     }
