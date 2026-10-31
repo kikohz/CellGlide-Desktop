@@ -178,7 +178,16 @@ public sealed partial class MainWindow : Window
         {
             if (group.Heading is { } heading)
             {
-                Nav.MenuItems.Add(new NavigationViewItemHeader { Content = heading });
+                // A bare string here looks like the items under it (checklist e): the heading gets its own style.
+                var header = new NavigationViewItemHeader
+                {
+                    Content = heading,
+                    Style = (Style)Nav.Resources["SidebarHeader"],
+                    IsTabStop = false,
+                };
+                AutomationProperties.SetName(header, heading);
+                AutomationProperties.SetHeadingLevel(header, AutomationHeadingLevel.Level2);
+                Nav.MenuItems.Add(header);
             }
             foreach (var entry in group.Sections)
             {

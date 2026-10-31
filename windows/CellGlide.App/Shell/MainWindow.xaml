@@ -28,6 +28,29 @@
                         IsSettingsVisible="False" IsBackButtonVisible="Collapsed" IsPaneToggleButtonVisible="False"
                         IsTitleBarAutoPaddingEnabled="False"
                         SelectionChanged="OnSelectionChanged">
+            <NavigationView.Resources>
+                <!-- A group's heading (the DLL's text): caption size, semibold, secondary colour, so it reads
+                     as a heading over its items rather than as another item. -->
+                <Style x:Key="SidebarHeading" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                    <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Style>
+                <!-- The header itself: the stock template draws its text in the items' own size and colour.
+                     The pane never collapses here (no toggle button), so the template needs no pane states. -->
+                <Style x:Key="SidebarHeader" TargetType="NavigationViewItemHeader">
+                    <Setter Property="IsEnabled" Value="False" />
+                    <Setter Property="IsTabStop" Value="False" />
+                    <Setter Property="AutomationProperties.AccessibilityView" Value="Content" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="NavigationViewItemHeader">
+                                <TextBlock Margin="16,16,12,4" Text="{TemplateBinding Content}" TextWrapping="Wrap"
+                                           Style="{StaticResource SidebarHeading}" AutomationProperties.AccessibilityView="Raw" />
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </NavigationView.Resources>
             <NavigationView.PaneFooter>
                 <!-- The version, as the tray menu's first entry says it. -->
                 <TextBlock x:Name="VersionText" Margin="16,8,16,12" FontSize="11" TextWrapping="Wrap"

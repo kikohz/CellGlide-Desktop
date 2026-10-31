@@ -38,6 +38,30 @@ public class XBindTests
         Assert.Empty(bad);
     }
 
+    /// <summary>
+    /// Checklist e (W3 Task 10, user-reported): the sidebar's group headings must read as headings, not as
+    /// items. The stock NavigationViewItemHeader draws its text like the items under it; the header gets the
+    /// SidebarHeader style, whose template shows the DLL's heading with SidebarHeading (caption size, semibold,
+    /// secondary colour); the header is no tab stop and is announced as a heading.
+    /// </summary>
+    [Fact]
+    public void Sidebar_headings_use_the_heading_style()
+    {
+        var xaml = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml"));
+        var style = System.Text.RegularExpressions.Regex.Match(xaml, """<Style x:Key="SidebarHeading"[\s\S]*?</Style>""").Value;
+        Assert.Contains("BasedOn=\"{StaticResource CaptionTextBlockStyle}\"", style);
+        Assert.Contains("SemiBold", style);
+        Assert.Contains("{ThemeResource TextFillColorSecondaryBrush}", style);
+
+        var code = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml.cs"));
+        var header = System.Text.RegularExpressions.Regex.Match(xaml, """<Style x:Key="SidebarHeader"[\s\S]*?</Style>""").Value;
+        Assert.Contains("{StaticResource SidebarHeading}", header);
+        Assert.Contains("{TemplateBinding Content}", header);
+        Assert.Contains("Style = (Style)Nav.Resources[\"SidebarHeader\"]", code);
+        Assert.Contains("IsTabStop = false", code);
+        Assert.Contains("AutomationHeadingLevel.Level2", code);
+    }
+
     [Fact]
     public void A_nullable_shell_path_is_caught()
     {
