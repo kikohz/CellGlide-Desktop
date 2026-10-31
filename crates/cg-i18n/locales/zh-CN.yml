@@ -218,10 +218,12 @@ speed:
   stage:
     latency: "正在检测 HTTPS 延迟…"
     transfer: "正在测试%{direction}… %{seconds} / 10 秒"
+    confirming: "正在等待服务器确认上传的数据…"
   done: "测速完成"
   cancelled: "测速已取消"
   cap_note: "%{direction}达到流量上限，采样 %{seconds} 秒；结果仅供参考。"
   upload_too_slow: "上传太慢，没能测出：服务器在限定时间内没有确认任何数据。"
+  already_running: "测速正在进行中。"
   wifi_faster: "Wi‑Fi 下载比 iPhone 快 %{ratio} 倍。"
   phone_faster: "iPhone 下载比 Wi‑Fi 快 %{ratio} 倍。"
   similar: "两条线路速度相近。"

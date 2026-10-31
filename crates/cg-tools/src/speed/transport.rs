@@ -511,10 +511,35 @@ pub(crate) async fn ping(stream: &mut Stream, server: &Server) -> Result<Duratio
     Ok(started.elapsed())
 }
 
+/// Test support shared with other crates' tests (`testkit` feature); not part of the API.
+#[cfg(any(test, feature = "testkit"))]
+#[doc(hidden)]
+pub mod testkit {
+    use tokio::io::{AsyncRead, AsyncReadExt};
+
+    /// Reads one request head off a server-side stream; returns it and any body bytes read.
+    pub async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> (String, Vec<u8>) {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..end]).to_string();
+                return (head, raw[end + 4..].to_vec());
+            }
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                return (String::new(), Vec::new());
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::testkit::read_request;
     use super::*;
-    use crate::speed::engine::tests::{FakeServer, Mode};
+    use crate::speed::engine::testkit::{FakeServer, Mode};
 
     /// What the far end reads after the client connected and closed, `reset` choosing
     /// `reset_on_close` first.
@@ -710,22 +735,5 @@ pub(crate) mod tests {
             .unwrap();
         assert!(matches!(stream, Stream::Tls(_)));
         ping(&mut stream, &server).await.unwrap();
-    }
-
-    /// Reads one request head off a server-side stream; returns it and any body bytes read.
-    pub(crate) async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> (String, Vec<u8>) {
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&raw[..end]).to_string();
-                return (head, raw[end + 4..].to_vec());
-            }
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            if n == 0 {
-                return (String::new(), Vec::new());
-            }
-            raw.extend_from_slice(&buf[..n]);
-        }
     }
 }

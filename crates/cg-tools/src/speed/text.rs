@@ -76,6 +76,9 @@ pub fn verdict_line(phone: Option<f64>, wifi: Option<f64>) -> Option<String> {
 pub fn progress_line(label: &str, progress: &Progress) -> Option<String> {
     let (uploading, rate) = match progress.stage {
         Stage::Latency => return Some(format!("{label}  {}", tr("speed.stage.latency", &[]))),
+        Stage::Upload if progress.waiting => {
+            return Some(format!("{label}  {}", tr("speed.stage.confirming", &[])));
+        }
         Stage::Download => (false, progress.result.download),
         Stage::Upload => (true, progress.result.upload),
         _ => return None,
@@ -110,6 +113,8 @@ pub fn stage_text(progress: &Progress) -> Option<String> {
     match progress.stage {
         Stage::Latency => Some(tr("speed.stage.latency", &[])),
         Stage::Download => Some(transfer(false)),
+        // The grace period: time is up, the server has yet to confirm what was sent.
+        Stage::Upload if progress.waiting => Some(tr("speed.stage.confirming", &[])),
         Stage::Upload => Some(transfer(true)),
         Stage::Cancelled => Some(tr("speed.cancelled", &[])),
         Stage::Idle | Stage::Done | Stage::Failed(_) => None,
@@ -189,6 +194,15 @@ mod tests {
             stage_text(&p).as_deref(),
             Some("Testing Download… 4 / 10 s")
         );
+        p.stage = Stage::Upload;
+        p.elapsed = 10.0;
+        p.progress = 1.0;
+        p.waiting = true;
+        let waiting = tr("speed.stage.confirming", &[]);
+        assert_eq!(stage_text(&p).as_deref(), Some(waiting.as_str()));
+        let line = progress_line("iPhone", &p).unwrap();
+        assert!(line.ends_with(&waiting) && !line.contains('%'), "{line}");
+        p.waiting = false;
         for stage in [Stage::Idle, Stage::Done, Stage::Failed(SpeedError::Timeout)] {
             p.stage = stage;
             assert_eq!(stage_text(&p), None);

@@ -115,6 +115,9 @@ pub struct Progress {
     pub result: SpeedResult,
     /// Payload bytes moved by this measurement so far, both directions.
     pub payload_bytes: u64,
+    /// Upload's time is up and it waits for the server to confirm the requests in flight (the
+    /// grace period): `elapsed` and `progress` stand still meanwhile.
+    pub waiting: bool,
 }
 
 /// Measures `route`. Progress, partial numbers included, goes to `progress`; on return its
@@ -146,6 +149,7 @@ pub async fn measure(
 
 /// Sets the final stage: `None` means cancelled before the end.
 fn finish(p: &mut Progress, outcome: Option<Result<(), SpeedError>>, cancelled: bool) {
+    p.waiting = false;
     match outcome {
         Some(Ok(())) => {
             p.stage = Stage::Done;
@@ -286,6 +290,12 @@ pub(crate) fn decide(
 type Streams = Arc<Mutex<(usize, Option<SpeedError>)>>;
 
 /// What the streams of one direction report to the sampling loop.
+///
+/// An upload stream records an answered request as `last`, then `requests`, then `bytes` (a
+/// Release add), and the loop reads `bytes` first (Acquire), then the other two. So whatever
+/// the loop counts in `moved` has its time in `last` already: `last` is never 0 while `moved`
+/// is not, and it may be later than the newest request counted (which only makes the rate a
+/// little low), never earlier (which would make it high).
 #[derive(Default)]
 struct Counters {
     /// Bytes moved: received for download, confirmed by the server for upload.
@@ -293,7 +303,25 @@ struct Counters {
     /// Upload requests the server answered.
     requests: AtomicU64,
     /// When the last upload request was answered, in µs since the direction began; 0 for none.
+    /// The latest of all streams (`fetch_max`), so a slower stream never moves it back.
     last: AtomicU64,
+}
+
+impl Counters {
+    /// An upload request of `length` bytes was answered `at` µs into the direction.
+    fn confirmed(&self, length: u64, at: u64) {
+        self.last.fetch_max(at.max(1), Ordering::Relaxed);
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(length, Ordering::Release);
+    }
+
+    /// `(moved, requests, last)`, consistent as described above.
+    fn read(&self) -> (u64, u64, u64) {
+        let moved = self.bytes.load(Ordering::Acquire);
+        let requests = self.requests.load(Ordering::Relaxed);
+        let last = self.last.load(Ordering::Relaxed);
+        (moved, requests, last)
+    }
 }
 
 async fn measure_direction(
@@ -341,9 +369,7 @@ async fn measure_direction(
     let mut direction = Direction::new(params, uploading, progress.borrow().payload_bytes);
     loop {
         tokio::time::sleep(params.tick).await;
-        let last = counters.last.load(Ordering::Relaxed);
-        let requests = counters.requests.load(Ordering::Relaxed);
-        let moved = counters.bytes.load(Ordering::Relaxed);
+        let (moved, requests, last) = counters.read();
         let (active, error) = streams.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let sample = Sample {
             moved,
@@ -498,6 +524,7 @@ impl Direction {
             }
             Next::Finish if s.active > 0 && s.elapsed < 2.0 * self.duration => {
                 self.grace = true;
+                p.waiting = true;
                 p.result.upload = if s.moved == 0 { None } else { to_last };
                 None
             }
@@ -600,9 +627,7 @@ async fn upload_stream(
         }
         sent += length;
         let at = u64::try_from(begin.elapsed().as_micros()).unwrap_or(u64::MAX);
-        counters.last.store(at.max(1), Ordering::Relaxed);
-        counters.requests.fetch_add(1, Ordering::Relaxed);
-        counters.bytes.fetch_add(length, Ordering::Relaxed);
+        counters.confirmed(length, at);
     }
     Ok(())
 }
@@ -655,15 +680,22 @@ pub fn verdict(phone: Option<f64>, wifi: Option<f64>) -> Option<Verdict> {
     })
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::speed::transport::tests::read_request;
-    use std::sync::atomic::AtomicUsize;
+/// A local stand-in for the speed server, for this crate's tests and (with the `testkit`
+/// feature) other crates' tests; not part of the API.
+#[cfg(any(test, feature = "testkit"))]
+#[doc(hidden)]
+pub mod testkit {
+    use super::CHUNK;
+    use crate::speed::Server;
+    use crate::speed::transport::testkit::read_request;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[derive(Clone, Copy, Debug, PartialEq)]
-    pub(crate) enum Mode {
+    pub enum Mode {
         Normal,
         /// Every request gets 429 with `Retry-After: 120`.
         RateLimited,
@@ -682,7 +714,7 @@ pub(crate) mod tests {
 
     /// A local stand-in for speed.cloudflare.com, paced to about 13 MB/s per connection so a
     /// one-second test never reaches its caps by accident.
-    pub(crate) struct FakeServer {
+    pub struct FakeServer {
         port: u16,
         accepted: Arc<AtomicUsize>,
         open: Arc<AtomicUsize>,
@@ -700,7 +732,7 @@ pub(crate) mod tests {
     }
 
     impl FakeServer {
-        pub(crate) async fn start(mode: Mode) -> FakeServer {
+        pub async fn start(mode: Mode) -> FakeServer {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let accepted = Arc::new(AtomicUsize::new(0));
@@ -730,7 +762,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn server(&self) -> Server {
+        pub fn server(&self) -> Server {
             Server {
                 host: "127.0.0.1".into(),
                 port: self.port,
@@ -738,15 +770,15 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn accepted(&self) -> usize {
+        pub fn accepted(&self) -> usize {
             self.accepted.load(Ordering::SeqCst)
         }
 
-        pub(crate) fn open(&self) -> usize {
+        pub fn open(&self) -> usize {
             self.open.load(Ordering::SeqCst)
         }
 
-        pub(crate) fn uploads(&self) -> usize {
+        pub fn uploads(&self) -> usize {
             self.uploads.load(Ordering::SeqCst)
         }
     }
@@ -839,6 +871,12 @@ pub(crate) mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::testkit::{FakeServer, Mode};
+    use super::*;
 
     fn small() -> Params {
         Params {
@@ -947,6 +985,7 @@ pub(crate) mod tests {
         // The first reply comes 0.5 s after the 1 s: within the grace period.
         let (result, last) = slow_upload(Duration::from_millis(1500)).await;
         assert_eq!(last.stage, Stage::Done);
+        assert!(!last.waiting, "a finished test waits for nothing");
         let upload = result.upload.unwrap();
         // 1 MB over about 1.5 s.
         assert!(upload > 4.0 && upload < 6.0, "{upload}");
@@ -1243,6 +1282,38 @@ pub(crate) mod tests {
         assert_eq!(shown.len(), 29);
         assert!(shown.iter().all(|e| *e <= 10.0));
         assert_eq!(p.progress, 1.0);
+    }
+
+    #[test]
+    fn the_grace_period_says_it_is_waiting() {
+        let mut p = Progress::default();
+        let mut direction = Direction::new(&Params::default(), true, 0);
+        let at = |elapsed| Sample {
+            elapsed,
+            ..confirmed(0, 0.0, 6)
+        };
+        assert!(direction.tick(&mut p, at(9.5)).is_none());
+        assert!(!p.waiting, "still within the 10 s");
+        assert!(direction.tick(&mut p, at(10.0)).is_none());
+        assert!(p.waiting, "time is up, requests in flight");
+        assert_eq!((p.elapsed, p.progress), (10.0, 1.0));
+        // Once over, the measurement's end clears it.
+        finish(&mut p, Some(Ok(())), false);
+        assert!(!p.waiting);
+    }
+
+    #[test]
+    fn counters_never_count_bytes_without_their_time() {
+        let counters = Counters::default();
+        assert_eq!(counters.read(), (0, 0, 0));
+        counters.confirmed(UPLOAD_REQUEST, 2_000_000);
+        // A slower stream's earlier confirmation never moves `last` back.
+        counters.confirmed(UPLOAD_REQUEST, 1_500_000);
+        assert_eq!(counters.read(), (2 * UPLOAD_REQUEST, 2, 2_000_000));
+        // 0 µs still reads as a confirmation.
+        let counters = Counters::default();
+        counters.confirmed(1, 0);
+        assert_eq!(counters.read(), (1, 1, 1));
     }
 
     #[test]

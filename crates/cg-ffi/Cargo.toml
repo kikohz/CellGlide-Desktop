@@ -31,4 +31,5 @@ csbindgen.workspace = true
 
 [dev-dependencies]
 cg-i18n = { workspace = true, features = ["testing"] }
+cg-tools = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true

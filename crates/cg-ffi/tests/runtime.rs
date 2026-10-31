@@ -260,18 +260,6 @@ async fn a_restarted_service_is_reached_again() {
 }
 
 #[tokio::test]
-async fn commands_of_later_tasks_say_not_yet() {
-    let (sink, events) = collect();
-    let rt = Runtime::start(offline_config(), sink);
-    let id = rt.send(Command::LeakStart);
-    assert_eq!(
-        reply_of(&events, id).await,
-        ReplyResult::err("not yet".to_string())
-    );
-    rt.shutdown();
-}
-
-#[tokio::test]
 async fn panic_becomes_fault_and_err_reply() {
     let (sink, events) = collect();
     let ev = cellglide_native::testing::events_into(sink);
@@ -733,5 +721,543 @@ async fn a_new_language_is_said_at_once() {
         cg_i18n::tr_in(cg_i18n::Lang::En, "tray.connect", &[])
     );
     assert_ne!(english, chinese);
+    rt.shutdown();
+}
+
+// The speed test, the leak test, diagnostics upload and save (Task 10).
+
+use cellglide_native::api::SpeedCaps;
+use cellglide_native::views::{SpeedDialog, StageView};
+use cg_tools::speed::engine::testkit::{FakeServer, Mode};
+use cg_tools::speed::{HistoryStore, Route};
+use std::path::Path;
+
+fn speed_setup(svc: &FakeService, dir: &Path, fake: &FakeServer) -> Config {
+    Config {
+        speed_server: fake.server(),
+        route_override: Some(Route::Unbound),
+        ..config(svc, dir)
+    }
+}
+
+/// A runtime with the phone connected, subscribed and past its first `State`.
+async fn connected_runtime(svc: &FakeService, config: Config) -> (Runtime, Collected) {
+    svc.snapshots.send_replace(connected_snapshot());
+    let (sink, events) = collect();
+    let rt = Runtime::start(config, sink);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    (rt, events)
+}
+
+fn small() -> Option<SpeedCaps> {
+    Some(SpeedCaps {
+        download_bytes: 200_000,
+        upload_bytes: 100_000,
+        seconds: 2,
+    })
+}
+
+/// More than a second's worth at the fake's pace.
+fn large() -> Option<SpeedCaps> {
+    Some(SpeedCaps {
+        download_bytes: 50_000_000,
+        upload_bytes: 50_000_000,
+        seconds: 10,
+    })
+}
+
+fn history_in(dir: &Path) -> usize {
+    HistoryStore::open(dir.join("speedtests.json"))
+        .records()
+        .len()
+}
+
+fn measuring(e: &Event) -> bool {
+    matches!(e, Event::SpeedProgress { view }
+        if view.running && view.legs[0].stage == StageView::Download)
+}
+
+#[tokio::test]
+async fn speed_needs_confirmation_first() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+    let id = rt.send(Command::SpeedStart {
+        include_wifi: false,
+        confirmed: false,
+        caps: None,
+    });
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    wait_for(&events, |e| {
+        matches!(e, Event::SpeedProgress { view } if view.dialog == Some(SpeedDialog::DataWarning))
+    })
+    .await;
+    assert_eq!(fake.accepted(), 0);
+    // Cancel puts the warning away.
+    events.lock().unwrap().clear();
+    let id = rt.send(Command::SpeedCancel);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.dialog.is_none() && !view.running),
+    )
+    .await;
+    assert_eq!(fake.accepted(), 0);
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn small_speed_test_runs_and_records() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+    let id = rt.send(Command::SpeedStart {
+        include_wifi: false,
+        confirmed: true,
+        caps: small(),
+    });
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    let last = wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if !view.running && !view.legs.is_empty()),
+    )
+    .await;
+    let Event::SpeedProgress { view } = last else {
+        unreachable!()
+    };
+    assert_eq!(view.legs[0].stage, StageView::Done, "{view:#?}");
+    assert!(view.legs[0].phone);
+    assert!(view.legs[0].download.unwrap() > 0.0 && view.legs[0].upload.unwrap() > 0.0);
+    assert!(!view.legs[0].numbers.is_empty());
+    assert_eq!(view.history.len(), 1);
+    // The phone's carrier and radio as reported go into the history.
+    assert_eq!(view.history[0].carrier.as_deref(), Some("中国移动 · 5G"));
+    assert_eq!(history_in(dir.path()), 1);
+    // The page said a run was going on in between.
+    assert!(
+        count(
+            &events,
+            |e| matches!(e, Event::SpeedProgress { view } if view.running)
+        ) > 0
+    );
+    // Clearing the history empties the page and the file.
+    events.lock().unwrap().clear();
+    let id = rt.send(Command::SpeedHistoryClear);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.history.is_empty()),
+    )
+    .await;
+    assert_eq!(history_in(dir.path()), 0);
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn a_second_start_while_running_is_refused() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+    let start = || Command::SpeedStart {
+        include_wifi: false,
+        confirmed: true,
+        caps: large(),
+    };
+    let first = rt.send(start());
+    assert_eq!(reply_of(&events, first).await, ReplyResult::done());
+    let second = rt.send(start());
+    let ReplyResult::Err { message } = reply_of(&events, second).await else {
+        panic!("a second run started");
+    };
+    assert!(in_either_language("speed.already_running").contains(&message));
+    rt.send(Command::SpeedCancel);
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn not_connected_speed_is_text() {
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    // Not subscribed (no snapshot, so no phone), and no uplink.
+    let (sink, events) = collect();
+    let rt = Runtime::start(config(&svc, dir.path()), sink);
+    let id = rt.send(Command::SpeedStart {
+        include_wifi: true,
+        confirmed: true,
+        caps: small(),
+    });
+    let ReplyResult::Err { message } = reply_of(&events, id).await else {
+        panic!("expected an error");
+    };
+    assert!(
+        in_either_language("speed.error.not_connected").contains(&message),
+        "{message}"
+    );
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn cancel_stops_within_a_second_and_records_nothing() {
+    // About 13 MB/s per connection: 50 MB doesn't finish within a second.
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+    rt.send(Command::SpeedStart {
+        include_wifi: false,
+        confirmed: true,
+        caps: large(),
+    });
+    wait_for(&events, measuring).await;
+    let asked = std::time::Instant::now();
+    rt.send(Command::SpeedCancel);
+    let ended = wait_for(&events, |e| {
+        matches!(e, Event::SpeedProgress { view }
+            if !view.running && view.legs.first().is_some_and(|l| l.stage == StageView::Cancelled))
+    })
+    .await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        asked.elapsed()
+    );
+    let Event::SpeedProgress { view } = ended else {
+        unreachable!()
+    };
+    assert!(view.history.is_empty());
+    assert_eq!(history_in(dir.path()), 0);
+    rt.shutdown();
+}
+
+#[test]
+fn shutdown_during_speed_test_is_clean() {
+    // The servers live on a runtime of the test's own; the DLL's `Runtime` is outside it.
+    let servers = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (fake, svc) = servers.block_on(async {
+        (
+            FakeServer::start(Mode::Normal).await,
+            FakeService::start(Replies::default()).await,
+        )
+    });
+    let (rt, events) = servers.block_on(async {
+        let (rt, events) = connected_runtime(&svc, speed_setup(&svc, dir.path(), &fake)).await;
+        rt.send(Command::SpeedStart {
+            include_wifi: false,
+            confirmed: true,
+            caps: large(),
+        });
+        wait_for(&events, measuring).await;
+        (rt, events)
+    });
+    let t = std::time::Instant::now();
+    rt.shutdown();
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
+    let after = events.lock().unwrap().len();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        events.lock().unwrap().len(),
+        after,
+        "nothing after shutdown"
+    );
+    assert_eq!(history_in(dir.path()), 0);
+    drop((fake, svc));
+}
+
+#[tokio::test]
+async fn leak_reports_a_verdict() {
+    static LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+    let target = fake_http(200, ONE_RESOLVER).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        leak_target: target,
+        // No real DNS: the names are only counted.
+        resolve: |_| {
+            LOOKUPS.fetch_add(1, SeqCst);
+            Box::pin(async {})
+        },
+        ..config(&svc, dir.path())
+    };
+    let (rt, events) = connected_runtime(&svc, config).await;
+    let id = rt.send(Command::LeakStart);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if view.running),
+    )
+    .await;
+    let done = wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if !view.running && view.result.is_some()),
+    )
+    .await;
+    let Event::LeakProgress { view } = done else {
+        unreachable!()
+    };
+    let result = view.result.unwrap();
+    assert!(!result.title.is_empty());
+    assert_eq!(result.groups.len(), 1);
+    assert!(in_either_language("leak.again").contains(&view.start_label));
+    assert_eq!(LOOKUPS.load(SeqCst), cg_tools::dns_leak::NAMES);
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn leak_server_error_is_the_unavailable_sentence() {
+    let target = fake_http(503, "").await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, events) = collect();
+    let rt = Runtime::start(
+        Config {
+            leak_target: target,
+            ..config(&svc, dir.path())
+        },
+        sink,
+    );
+    rt.send(Command::LeakStart);
+    let done = wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if view.error.is_some()),
+    )
+    .await;
+    let Event::LeakProgress { view } = done else {
+        unreachable!()
+    };
+    assert!(!view.running);
+    assert!(in_either_language("leak.unavailable").contains(view.error.as_ref().unwrap()));
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn leak_cancel_stops_the_test() {
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, events) = collect();
+    let rt = Runtime::start(
+        Config {
+            // Lookups that never finish.
+            resolve: |_| Box::pin(std::future::pending()),
+            ..config(&svc, dir.path())
+        },
+        sink,
+    );
+    rt.send(Command::LeakStart);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if view.running),
+    )
+    .await;
+    let id = rt.send(Command::LeakCancel);
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    let stopped = wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if !view.running),
+    )
+    .await;
+    let Event::LeakProgress { view } = stopped else {
+        unreachable!()
+    };
+    assert!(view.result.is_none() && view.error.is_none());
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn diagnostics_save_and_send() {
+    let upload = fake_http(200, r#"{"code":"CG-ABCDE"}"#).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = dir.path().join("dl");
+    std::fs::create_dir(&downloads).unwrap();
+    let (sink, events) = collect();
+    let rt = Runtime::start(
+        Config {
+            download_dir: Some(downloads.clone()),
+            diag_target: diag_target(&upload),
+            ..config(&svc, dir.path())
+        },
+        sink,
+    );
+    let save = |rt: &Runtime| {
+        rt.send(Command::DiagnosticsSave {
+            json: "{}".into(),
+            path: None,
+        })
+    };
+    let id = save(&rt);
+    let ReplyResult::Ok {
+        value: ReplyValue::Saved { path: first },
+    } = reply_of(&events, id).await
+    else {
+        panic!()
+    };
+    assert!(Path::new(&first).starts_with(&downloads), "{first}");
+    let id = save(&rt);
+    let ReplyResult::Ok {
+        value: ReplyValue::Saved { path: second },
+    } = reply_of(&events, id).await
+    else {
+        panic!()
+    };
+    // The same second again (`-2`) or the next second: never over the first.
+    assert_ne!(first, second);
+    assert!(Path::new(&first).exists() && Path::new(&second).exists());
+    // To a path of the user's choosing, never over an existing file.
+    let chosen = dir.path().join("mine.json").to_string_lossy().into_owned();
+    let id = rt.send(Command::DiagnosticsSave {
+        json: "{}".into(),
+        path: Some(chosen.clone()),
+    });
+    assert_eq!(
+        reply_of(&events, id).await,
+        ReplyResult::Ok {
+            value: ReplyValue::Saved {
+                path: chosen.clone()
+            }
+        }
+    );
+    let id = rt.send(Command::DiagnosticsSave {
+        json: "{}".into(),
+        path: Some(chosen),
+    });
+    assert!(matches!(
+        reply_of(&events, id).await,
+        ReplyResult::Err { .. }
+    ));
+    let id = rt.send(Command::DiagnosticsSend { json: "{}".into() });
+    assert_eq!(
+        reply_of(&events, id).await,
+        ReplyResult::Ok {
+            value: ReplyValue::Sent {
+                code: "CG-ABCDE".into()
+            }
+        }
+    );
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn diagnostics_send_failures_are_the_window_sentences() {
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    for (status, key) in [(429, "diag.too_frequent"), (500, "diag.failed_gui")] {
+        let upload = fake_http(status, "").await;
+        let (sink, events) = collect();
+        let rt = Runtime::start(
+            Config {
+                diag_target: diag_target(&upload),
+                ..config(&svc, dir.path())
+            },
+            sink,
+        );
+        let id = rt.send(Command::DiagnosticsSend { json: "{}".into() });
+        let ReplyResult::Err { message } = reply_of(&events, id).await else {
+            panic!("{status} was not an error");
+        };
+        assert!(
+            in_either_language(key).contains(&message),
+            "{status}: {message}"
+        );
+        rt.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn uplink_change_refreshes_the_speed_view() {
+    static UPLINK_ON: AtomicBool = AtomicBool::new(false);
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        uplink: || UPLINK_ON.load(SeqCst).then(|| "Wi-Fi".to_string()),
+        tick: Duration::from_millis(100),
+        ..config(&svc, dir.path())
+    };
+    let (rt, events) = connected_runtime(&svc, config).await;
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.uplink.is_none()),
+    )
+    .await;
+    UPLINK_ON.store(true, SeqCst);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.uplink.as_deref() == Some("Wi-Fi")),
+    )
+    .await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn the_speed_page_follows_the_phone() {
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, events) = connected_runtime(&svc, config(&svc, dir.path())).await;
+    // Connected: Start is on.
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
+    )
+    .await;
+    // The phone goes, and there's no Wi‑Fi either: Start goes off and says why.
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(&events, |e| {
+        matches!(e, Event::SpeedProgress { view } if !view.start_enabled && view.start_note.is_some())
+    })
+    .await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn each_leg_shows_its_end_as_soon_as_it_ends() {
+    let fake = FakeServer::start(Mode::Normal).await;
+    let svc = FakeService::start(Replies::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        uplink: || Some("Wi-Fi".to_string()),
+        ..speed_setup(&svc, dir.path(), &fake)
+    };
+    let (rt, events) = connected_runtime(&svc, config).await;
+    rt.send(Command::SpeedStart {
+        include_wifi: true,
+        confirmed: true,
+        caps: small(),
+    });
+    // The phone is done while Wi‑Fi has yet to finish.
+    wait_for(&events, |e| {
+        matches!(e, Event::SpeedProgress { view }
+            if view.running && view.legs.len() == 2
+                && view.legs[0].stage == StageView::Done
+                && view.legs[0].progress == 1.0
+                && !view.legs[0].waiting
+                && view.legs[1].stage != StageView::Done)
+    })
+    .await;
+    let last = wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if !view.running && view.legs.len() == 2),
+    )
+    .await;
+    let Event::SpeedProgress { view } = last else {
+        unreachable!()
+    };
+    assert!(
+        view.legs
+            .iter()
+            .all(|l| l.stage == StageView::Done && l.progress == 1.0)
+    );
+    assert!(!view.legs[1].phone);
+    assert!(view.verdict.is_some(), "{view:#?}");
     rt.shutdown();
 }

@@ -121,8 +121,10 @@ impl Events {
 pub(crate) struct Context {
     pub(crate) config: Arc<Config>,
     pub(crate) events: Events,
-    /// What the subscription shares with `Toggle` (and later the speed test).
+    /// What the subscription shares with `Toggle`, the speed test and the leak test.
     pub(crate) shared: Arc<Shared>,
+    pub(crate) speed: Arc<crate::speed::Speed>,
+    pub(crate) leak: Arc<crate::leak::Leak>,
     /// Cancelled at shutdown; tasks that outlive their command stop with it.
     pub(crate) cancel: CancellationToken,
 }
@@ -206,6 +208,8 @@ impl Runtime {
                 config: Arc::new(config),
                 events: Events(Delivery::Queue(queue.clone(), queued)),
                 shared: Arc::default(),
+                speed: Arc::default(),
+                leak: Arc::default(),
                 cancel,
             },
             queue,
@@ -365,6 +369,8 @@ async fn dispatch(id: u64, command: Command, context: Context) {
             let result = run_guarded(id, events, async move { set_prefs(&path, &saved) }).await;
             if matches!(result, Some(ReplyResult::Ok { .. })) {
                 events.emit(Event::Prefs { prefs });
+                // "Also test Wi‑Fi or Ethernet" changes what the speed page says.
+                context.shared.pages_changed();
             }
         }
         command => guarded(id, events, handle(command, &context)).await,
@@ -393,14 +399,19 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
         Command::DiagnosticsPrepare { range, email, note } => {
             crate::requests::diagnostics(&config.endpoint, range, &email, &note).await
         }
-        // Task 10.
-        Command::SpeedStart { .. }
-        | Command::SpeedCancel
-        | Command::SpeedHistoryClear
-        | Command::LeakStart
-        | Command::LeakCancel
-        | Command::DiagnosticsSend { .. }
-        | Command::DiagnosticsSave { .. } => ReplyResult::err("not yet"),
+        Command::SpeedStart {
+            include_wifi,
+            confirmed,
+            caps,
+        } => crate::speed::start(context, include_wifi, confirmed, caps).await,
+        Command::SpeedCancel => crate::speed::cancel(context),
+        Command::SpeedHistoryClear => crate::speed::clear_history(context).await,
+        Command::LeakStart => crate::leak::start(context),
+        Command::LeakCancel => crate::leak::cancel(context),
+        Command::DiagnosticsSend { json } => crate::diagnostics::send(context, &json).await,
+        Command::DiagnosticsSave { json, path } => {
+            crate::diagnostics::save(context, json, path).await
+        }
     }
 }
 

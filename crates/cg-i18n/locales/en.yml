@@ -218,10 +218,12 @@ speed:
   stage:
     latency: "Checking HTTPS latency…"
     transfer: "Testing %{direction}… %{seconds} / 10 s"
+    confirming: "Waiting for the server to confirm the upload…"
   done: "Speed test finished"
   cancelled: "Speed test cancelled"
   cap_note: "%{direction} reached the data cap after %{seconds} s of sampling; treat the result as approximate."
   upload_too_slow: "Upload was too slow to measure: the server confirmed no data in time."
+  already_running: "A speed test is already running."
   wifi_faster: "Wi‑Fi download is %{ratio}x faster than the iPhone."
   phone_faster: "iPhone download is %{ratio}x faster than Wi‑Fi."
   similar: "The two connections run at similar speeds."

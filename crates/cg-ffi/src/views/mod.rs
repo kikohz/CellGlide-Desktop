@@ -9,22 +9,18 @@
 
 mod chrome;
 mod history;
+mod leak;
 mod overview;
+mod speed;
 
 pub use chrome::{
     BadgesView, ChromeView, MenuItemView, MenuKind, SidebarGroupView, SidebarItemView, chrome,
 };
 pub use history::{DetailItem, HistoryRowView, HistoryView, TickView, checks, history};
+pub(crate) use leak::{LeakOutcome, leak};
+pub use leak::{LeakResultView, LeakView, ResolverGroupView};
 pub use overview::{
     BatteryView, HealthRowView, HeatView, OverviewView, PhoneCardView, SettingsView, overview,
 };
-
-use serde::{Deserialize, Serialize};
-
-/// The speed test page while a test runs and after it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct SpeedView {}
-
-/// The DNS leak test page.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct LeakView {}
+pub use speed::{SpeedDialog, SpeedLegView, SpeedRecordView, SpeedView, StageView};
+pub(crate) use speed::{SpeedLeg, SpeedPage, speed};

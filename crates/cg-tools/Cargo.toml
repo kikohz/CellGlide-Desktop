@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# FakeServer for other crates' tests.
+testkit = []
+
 [dependencies]
 bytes.workspace = true
 cg-i18n.workspace = true

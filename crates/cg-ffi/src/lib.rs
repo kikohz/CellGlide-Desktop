@@ -4,9 +4,12 @@
 //! crate's integration tests.
 
 pub mod api;
+mod diagnostics;
 pub mod ffi;
+mod leak;
 mod requests;
 pub mod runtime;
+mod speed;
 mod subscription;
 #[doc(hidden)]
 pub mod testing;

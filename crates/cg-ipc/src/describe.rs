@@ -878,16 +878,43 @@ pub fn service_check(error: &crate::client::ClientError) -> Check {
         }
         // Windows: the pipe lets in administrators and interactive users only.
         #[cfg(windows)]
-        ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => service
-            .with("error", tr("reason.not_allowed", &[]))
-            .with("cause", "not_allowed"),
+        ClientError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            with_cause(service, "not_allowed")
+        }
         // Only the OS-level cause: the sentence around it comes from the locale file.
         ClientError::Io(e) => service.with("error", e.to_string()),
         ClientError::Json(e) => service.with("error", e.to_string()),
         ClientError::Closed => service.with("error", "closed"),
-        ClientError::NotService => service
-            .with("error", tr("check.service.impostor", &[]))
-            .with("cause", "impostor"),
+        ClientError::NotService => with_cause(service, "impostor"),
+    }
+}
+
+/// `check` with `cause`, and its `error` fragment in the current language when the cause has
+/// one of our own (rather than the OS's words).
+fn with_cause(check: Check, cause: &str) -> Check {
+    let check = check.with("cause", cause);
+    match cause_fragment(cause) {
+        Some(fragment) => check.with("error", fragment),
+        None => check,
+    }
+}
+
+/// The `error` fragment we word ourselves for a service check's `cause`, in the current
+/// language; `None` where the fragment is the OS's own words.
+fn cause_fragment(cause: &str) -> Option<String> {
+    match cause {
+        "not_allowed" => Some(tr("reason.not_allowed", &[])),
+        "impostor" => Some(tr("check.service.impostor", &[])),
+        _ => None,
+    }
+}
+
+/// `check` with the fragments we word ourselves said again in the current language, so a
+/// sentence re-said after a language change isn't half in the old one.
+pub fn retranslated_check(check: &Check) -> Check {
+    match check.args.get("cause").map(String::as_str) {
+        Some(cause) if cause_fragment(cause).is_some() => with_cause(check.clone(), cause),
+        _ => check.clone(),
     }
 }
 

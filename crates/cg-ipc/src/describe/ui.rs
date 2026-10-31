@@ -197,7 +197,13 @@ impl ServiceDown {
 
     /// The same reason, said in the current language.
     pub fn retranslated(&self) -> ServiceDown {
-        ServiceDown::new(self.reason.clone())
+        let reason = match &self.reason {
+            DownReason::Unreachable { check } => DownReason::Unreachable {
+                check: describe::retranslated_check(check),
+            },
+            reason => reason.clone(),
+        };
+        ServiceDown::new(reason)
     }
 
     /// Says the same as `other`, OS detail aside: telling the user again adds nothing.
@@ -824,6 +830,37 @@ mod tests {
         assert_ne!(again.text, gone.text);
         assert!(again.same_reason(&gone));
         assert!(ServiceDown::new(DownReason::NotInGroup).not_in_group);
+        cg_i18n::set(cg_i18n::Lang::En);
+    }
+
+    #[test]
+    fn our_own_fragment_is_said_again_in_the_new_language() {
+        let _lock = cg_i18n::lock_for_tests();
+        for (cause, key) in [
+            ("not_allowed", "reason.not_allowed"),
+            ("impostor", "check.service.impostor"),
+        ] {
+            cg_i18n::set(cg_i18n::Lang::En);
+            let english = cg_i18n::tr(key, &[]);
+            let down = ServiceDown::new(DownReason::Unreachable {
+                check: Check::new(CheckId::Service, false)
+                    .with("error", english.clone())
+                    .with("cause", cause),
+            });
+            assert!(down.text.contains(&english), "{}", down.text);
+            cg_i18n::set(cg_i18n::Lang::ZhCn);
+            let chinese = cg_i18n::tr(key, &[]);
+            let again = down.retranslated();
+            assert!(again.text.contains(&chinese), "{}", again.text);
+            assert!(!again.text.contains(&english), "{}", again.text);
+            assert!(again.same_reason(&down));
+        }
+        // The OS's own words are kept as they were.
+        let os = ServiceDown::new(DownReason::Unreachable {
+            check: Check::new(CheckId::Service, false).with("error", "Access is denied."),
+        });
+        assert!(os.retranslated().text.contains("Access is denied."));
+        cg_i18n::set(cg_i18n::Lang::En);
     }
 
     /// Connected through one iPhone that reports a frame: "phone connected" for the pages.

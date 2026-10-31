@@ -34,6 +34,9 @@ pub(crate) struct Shared {
     subscribed: AtomicBool,
     /// The language changed: say the last thing again.
     relabel: Notify,
+    /// The snapshot, the language or the preferences changed: the speed and leak pages look
+    /// again.
+    pub(crate) pages: Notify,
     /// Tests: the subscription panics on its next update.
     #[cfg(test)]
     pub(crate) panic_next: AtomicBool,
@@ -50,12 +53,19 @@ impl Shared {
 
     fn keep(&self, snapshot: Option<Snapshot>) {
         *self.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        self.pages_changed();
+    }
+
+    /// Something the speed and leak pages show may have changed.
+    pub(crate) fn pages_changed(&self) {
+        self.pages.notify_one();
     }
 
     /// After `SetLang`: a running subscription says its last `State` or `ServiceGone` again.
     /// (Without one the wake-up is kept and does nothing but recompute.)
     pub(crate) fn language_changed(&self) {
         self.relabel.notify_one();
+        self.pages_changed();
     }
 }
 
@@ -64,6 +74,8 @@ pub(crate) fn subscribe(context: &Context) -> ReplyResult {
     if context.shared.subscribed.swap(true, Ordering::SeqCst) {
         return ReplyResult::done();
     }
+    // The speed and leak pages follow what the subscription sees from now on.
+    crate::speed::watch(context);
     let context = context.clone();
     tokio::spawn(async move {
         let cancel = context.cancel.clone();
@@ -72,14 +84,16 @@ pub(crate) fn subscribe(context: &Context) -> ReplyResult {
             () = cancel.cancelled() => None,
             ended = run => Some(ended),
         };
+        // The snapshot no longer holds once nothing follows the service: `Toggle` must not act
+        // on it. Cleared before the app hears of a panic, so whatever it sends next sees that.
+        context.shared.keep(None);
+        context.shared.subscribed.store(false, Ordering::SeqCst);
         // A panic ends this subscription only: the app hears of it and may subscribe again.
         if let Some(Err(payload)) = ended {
             context.events.emit(Event::Fault {
                 message: panic_message(&*payload),
             });
         }
-        context.shared.keep(None);
-        context.shared.subscribed.store(false, Ordering::SeqCst);
     });
     ReplyResult::done()
 }
@@ -462,6 +476,8 @@ mod tests {
     fn a_panicking_subscription_is_a_fault_and_can_be_started_again() {
         let (rt, events, _dir) = offline_runtime();
         let shared = rt.shared();
+        // A snapshot from before (as if the service had been there): the panic drops it.
+        shared.keep(Some(connected_snapshot()));
         shared.panic_next.store(true, Ordering::SeqCst);
         rt.send(crate::api::Command::Subscribe);
         wait_until(&events, |e| {
@@ -469,6 +485,11 @@ mod tests {
                 .any(|e| matches!(e, Event::Fault { message } if message.contains("panic")))
         });
         wait_until(&events, |_| !shared.subscribed.load(Ordering::SeqCst));
+        assert_eq!(
+            shared.snapshot(),
+            None,
+            "a panicked subscription keeps no snapshot"
+        );
         assert!(
             !events
                 .lock()
