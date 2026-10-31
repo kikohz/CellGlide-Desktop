@@ -149,16 +149,19 @@ static SSID_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
 static SSID_BARE: LazyLock<Regex> = LazyLock::new(|| re(r#"(?i)\bssid[ \t]*[=:][ \t]*[^\s,;'"]+"#));
 static HOME: LazyLock<Regex> = LazyLock::new(|| re(r#"/home/[^/\s"'<>]+"#));
 // A Windows profile folder, `C:\Users\<name>`, with either slash (or escaped backslashes).
-// The name may hold spaces ("John Smith"): it runs to the next slash, quote or line end.
-// Failing that (a `:` or `<` comes first), it is the name up to the first blank.
+// The name may hold spaces ("John Smith"): it runs to the next slash, quote, character no
+// folder name holds (`:` `<` `>` `|` `*` `?`) or line end. Failing that, it is the name up
+// to the first blank. An apostrophe between letters ("O'Brien") is part of the name.
 static WINDOWS_PROFILE: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r#"(?im)(?<![A-Za-z0-9])[a-z]:(?:\\+|/)users(?:\\+|/)(?:[^\\/\r\n"'<>:|*?]+(?=[\\/"']|\r?$)|[^\\/\s"'<>:|*?]+)"#,
+        r#"(?im)(?<![A-Za-z0-9])[a-z]:(?:\\+|/)users(?:\\+|/)(?:(?:[^\\/\r\n"'<>:|*?]|(?<=\p{L})'(?=\p{L}))+(?=[\\/"'<>:|*?]|\r?$)|(?:[^\\/\s"'<>:|*?]|(?<=\p{L})'(?=\p{L}))+)"#,
     )
 });
-// A user's or group's SID in a domain or on this computer (`S-1-5-21-<domain>-<RID>`).
-// Well-known SIDs (`S-1-5-18`, `S-1-5-32-544`) name no one and stay.
-static WINDOWS_SID: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bS-1-5-21-\d+-\d+-\d+-\d+"));
+// A user's, group's or computer's SID: in a domain or on this computer
+// (`S-1-5-21-<domain>[-<RID>]`) or in Entra ID (`S-1-12-1-…`). The prefix stays.
+// Well-known SIDs (`S-1-5-18`, `S-1-5-32-544`) name no one and stay whole.
+static WINDOWS_SID: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?i)(S-1-5-21-|S-1-12-1-)\d+(?:-\d+){2,3}"));
 /// Folders under `C:\Users` that belong to no one.
 const SHARED_PROFILES: &[&str] = &["public", "default", "user"];
 static LOCATION_CITY: LazyLock<Regex> = LazyLock::new(|| re(r"· [^·\n]+, [A-Z]{2}(?= ·|\s*$)"));
@@ -227,7 +230,15 @@ fn redact_with_profile(
         result = replace_profile_name(&regex, &result);
     }
     result = replace_profile_name(&WINDOWS_PROFILE, &result);
-    result = replace(&WINDOWS_SID, &result, |_| "S-1-5-21-<SID>".to_string());
+    result = replace(&WINDOWS_SID, &result, |sid| {
+        let prefix = WINDOWS_SID
+            .captures(sid)
+            .ok()
+            .flatten()
+            .and_then(|found| found.get(1))
+            .map_or("S-1-5-21-", |prefix| prefix.as_str());
+        format!("{prefix}<SID>")
+    });
     // The login name shows up outside paths too (sudo, PAM and logind lines).
     if let Some(user) = user_name.filter(|u| login_name_is_redactable(u))
         && let Ok(regex) = Regex::new(&format!(
@@ -850,11 +861,76 @@ mod tests {
                 &names,
                 None
             ),
-            r"HKU\S-1-5-21-<SID>_Classes and S-1-5-21-<SID>\x"
+            r"HKU\s-1-5-21-<SID>_Classes and S-1-5-21-<SID>\x"
         );
         // Service and built-in group SIDs name no one.
         let kept = "S-1-5-32-544 S-1-5-19 S-1-1-0";
         assert_eq!(redact(kept, &names, None), kept);
+    }
+
+    #[test]
+    fn machine_entra_and_glued_sids_are_hidden() {
+        let names = BTreeMap::new();
+        // A computer's or domain's own SID, without a RID.
+        assert_eq!(
+            redact(
+                "machine S-1-5-21-1004336348-1177238915-682003330.",
+                &names,
+                None
+            ),
+            "machine S-1-5-21-<SID>."
+        );
+        // Entra ID accounts keep their own prefix.
+        assert_eq!(
+            redact(
+                "owner S-1-12-1-3123456789-1234567890-2345678901-3456789012 ok",
+                &names,
+                None
+            ),
+            "owner S-1-12-1-<SID> ok"
+        );
+        // Right after a word character.
+        assert_eq!(
+            redact(
+                "user_S-1-5-21-1-22-333-4444 keyS-1-12-1-1-2-3-4",
+                &names,
+                None
+            ),
+            "user_S-1-5-21-<SID> keyS-1-12-1-<SID>"
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_space_before_a_colon_is_hidden_whole() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(r"C:\Users\John Smith: Access is denied", &names, None),
+            r"C:\Users\User: Access is denied"
+        );
+        for end in ['<', '>', '|', '?', '*'] {
+            assert_eq!(
+                redact(&format!(r"C:\Users\John Smith{end} x"), &names, None),
+                format!(r"C:\Users\User{end} x")
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_with_an_apostrophe_is_hidden_whole() {
+        let names = BTreeMap::new();
+        assert_eq!(
+            redact(r"C:\Users\O'Brien\x", &names, None),
+            r"C:\Users\User\x"
+        );
+        assert_eq!(
+            redact(r"open C:\Users\O'Brien failed", &names, None),
+            r"open C:\Users\User"
+        );
+        // A quoted path still ends at its closing quote.
+        assert_eq!(
+            redact(r"path 'C:\Users\bob' ok", &names, None),
+            r"path 'C:\Users\User' ok"
+        );
     }
 
     #[test]

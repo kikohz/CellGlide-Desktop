@@ -119,16 +119,27 @@ fn signature_is_valid(path: &Path) -> bool {
 
 /// The resolver's port, `198.18.0.1:53`, free for us: no other process bound to it or to all
 /// addresses (IPv4 or IPv6) on port 53, over UDP or listening over TCP. While connected our
-/// own resolver holds it, which passes.
+/// own resolver holds it, which passes. A table that can't be read makes the check fail as
+/// "couldn't check" rather than pass, unless another table already names an owner.
 fn dns() -> Check {
-    let others = port_53_owners(&bindings(), std::process::id());
-    match others.first() {
-        None => Check::new(CheckId::Dns, true),
-        Some(&pid) => {
-            let owner = system::process_name(pid).unwrap_or_else(|| format!("PID {pid}"));
-            Check::new(CheckId::Dns, false).with("owner", owner)
-        }
+    let (rows, unread) = bindings();
+    dns_check(&port_53_owners(&rows, std::process::id()), &unread)
+}
+
+/// The check from the owners found and the tables that couldn't be read.
+fn dns_check(owners: &[u32], unread: &[String]) -> Check {
+    if let Some(&pid) = owners.first() {
+        let owner = system::process_name(pid).unwrap_or_else(|| format!("PID {pid}"));
+        return Check::new(CheckId::Dns, false).with("owner", owner);
     }
+    if unread.is_empty() {
+        return Check::new(CheckId::Dns, true);
+    }
+    let error = unread.join("; ");
+    tracing::warn!("doctor: could not read the port tables: {error}");
+    Check::new(CheckId::Dns, false)
+        .with("cause", "unreadable")
+        .with("error", error)
 }
 
 /// A local socket from the UDP table or a listener from the TCP table.
@@ -158,12 +169,12 @@ pub(crate) fn port_53_owners(rows: &[Binding], own_pid: u32) -> Vec<u32> {
     owners
 }
 
-/// Every UDP socket and TCP listener, IPv4 and IPv6, with its owning process. A table
-/// that can't be read adds nothing.
-fn bindings() -> Vec<Binding> {
+/// Every UDP socket and TCP listener, IPv4 and IPv6, with its owning process, and why each
+/// table that couldn't be read wasn't.
+fn bindings() -> (Vec<Binding>, Vec<String>) {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
         UDP_TABLE_OWNER_PID,
     };
     use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
@@ -173,70 +184,92 @@ fn bindings() -> Vec<Binding> {
     let port = |raw: u32| u16::from_be(raw as u16);
     let v4_addr = |raw: u32| IpAddr::V4(Ipv4Addr::from(u32::from_be(raw)));
     let mut found = Vec::new();
-    // SAFETY (each call): `buffer` is None or holds `size` bytes.
-    let udp = read_table(
-        "GetExtendedUdpTable (IPv4)",
-        |buffer, size| unsafe {
+    let mut unread = Vec::new();
+    let mut add = |table: Result<Vec<Binding>, String>| match table {
+        Ok(rows) => found.extend(rows),
+        Err(error) => unread.push(error),
+    };
+    add(
+        // SAFETY: `buffer` is None or holds `size` bytes (read_table's contract).
+        read_table::<MIB_UDPROW_OWNER_PID>("UDP (IPv4)", |buffer, size| unsafe {
             GetExtendedUdpTable(buffer, size, false, v4, UDP_TABLE_OWNER_PID, 0)
-        },
-        |table: &MIB_UDPTABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+        })
+        .map(|rows| {
+            rows.iter()
+                .map(|row| Binding {
+                    tcp: false,
+                    addr: v4_addr(row.dwLocalAddr),
+                    port: port(row.dwLocalPort),
+                    pid: row.dwOwningPid,
+                })
+                .collect()
+        }),
     );
-    found.extend(udp.iter().map(|row| Binding {
-        tcp: false,
-        addr: v4_addr(row.dwLocalAddr),
-        port: port(row.dwLocalPort),
-        pid: row.dwOwningPid,
-    }));
-    let udp6 = read_table(
-        "GetExtendedUdpTable (IPv6)",
-        |buffer, size| unsafe {
+    add(
+        // SAFETY: as above.
+        read_table::<MIB_UDP6ROW_OWNER_PID>("UDP (IPv6)", |buffer, size| unsafe {
             GetExtendedUdpTable(buffer, size, false, v6, UDP_TABLE_OWNER_PID, 0)
-        },
-        |table: &MIB_UDP6TABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+        })
+        .map(|rows| {
+            rows.iter()
+                .map(|row| Binding {
+                    tcp: false,
+                    addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+                    port: port(row.dwLocalPort),
+                    pid: row.dwOwningPid,
+                })
+                .collect()
+        }),
     );
-    found.extend(udp6.iter().map(|row| Binding {
-        tcp: false,
-        addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
-        port: port(row.dwLocalPort),
-        pid: row.dwOwningPid,
-    }));
-    let tcp = read_table(
-        "GetExtendedTcpTable (IPv4)",
-        |buffer, size| unsafe {
+    add(
+        // SAFETY: as above.
+        read_table::<MIB_TCPROW_OWNER_PID>("TCP (IPv4)", |buffer, size| unsafe {
             GetExtendedTcpTable(buffer, size, false, v4, TCP_TABLE_OWNER_PID_LISTENER, 0)
-        },
-        |table: &MIB_TCPTABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+        })
+        .map(|rows| {
+            rows.iter()
+                .map(|row| Binding {
+                    tcp: true,
+                    addr: v4_addr(row.dwLocalAddr),
+                    port: port(row.dwLocalPort),
+                    pid: row.dwOwningPid,
+                })
+                .collect()
+        }),
     );
-    found.extend(tcp.iter().map(|row| Binding {
-        tcp: true,
-        addr: v4_addr(row.dwLocalAddr),
-        port: port(row.dwLocalPort),
-        pid: row.dwOwningPid,
-    }));
-    let tcp6 = read_table(
-        "GetExtendedTcpTable (IPv6)",
-        |buffer, size| unsafe {
+    add(
+        // SAFETY: as above.
+        read_table::<MIB_TCP6ROW_OWNER_PID>("TCP (IPv6)", |buffer, size| unsafe {
             GetExtendedTcpTable(buffer, size, false, v6, TCP_TABLE_OWNER_PID_LISTENER, 0)
-        },
-        |table: &MIB_TCP6TABLE_OWNER_PID| (table.table.as_ptr(), table.dwNumEntries),
+        })
+        .map(|rows| {
+            rows.iter()
+                .map(|row| Binding {
+                    tcp: true,
+                    addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+                    port: port(row.dwLocalPort),
+                    pid: row.dwOwningPid,
+                })
+                .collect()
+        }),
     );
-    found.extend(tcp6.iter().map(|row| Binding {
-        tcp: true,
-        addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
-        port: port(row.dwLocalPort),
-        pid: row.dwOwningPid,
-    }));
-    found
+    (found, unread)
 }
 
-/// The rows of one IP Helper table: `fetch` fills a buffer of `size` bytes (or, given none,
-/// reports the size needed), and `rows` finds the rows in the table it holds. The table can
-/// grow between the size query and the read, so this tries a few times.
-fn read_table<T, R: Copy>(
+/// Where an IP Helper table's rows of type `R` start: every such table is a `u32`
+/// `dwNumEntries` followed by the rows, padded to their alignment.
+fn rows_offset<R>() -> usize {
+    std::mem::size_of::<u32>().next_multiple_of(std::mem::align_of::<R>())
+}
+
+/// The rows of one IP Helper table. `fetch` fills a buffer of `size` bytes or, given none,
+/// reports the size needed; it returns the Win32 error code. The table can grow between
+/// the size query and the read, so this tries a few times. The row count is trusted only
+/// as far as the bytes written reach.
+fn read_table<R: Copy>(
     what: &str,
     fetch: impl Fn(Option<*mut std::ffi::c_void>, &mut u32) -> u32,
-    rows: impl Fn(&T) -> (*const R, u32),
-) -> Vec<R> {
+) -> Result<Vec<R>, String> {
     use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 
     let mut size = 0u32;
@@ -247,20 +280,32 @@ fn read_table<T, R: Copy>(
             &mut size,
         );
         if result == NO_ERROR.0 && !buffer.is_empty() {
-            // SAFETY: on success the buffer starts with the table (u64 alignment suffices
-            // for its u32 fields), whose `dwNumEntries` rows follow within `size` bytes.
-            let (first, count) = rows(unsafe { &*buffer.as_ptr().cast::<T>() });
-            // SAFETY: as above.
-            return unsafe { std::slice::from_raw_parts(first, count as usize) }.to_vec();
+            let bytes = (size as usize).min(buffer.len() * 8);
+            let offset = rows_offset::<R>();
+            if bytes < offset {
+                return Err(format!("{what}: short table ({bytes} bytes)"));
+            }
+            let base = buffer.as_ptr().cast::<u8>();
+            // SAFETY: the buffer holds at least `offset` >= 4 initialised bytes and is
+            // u64-aligned, so the leading u32 count reads in bounds and aligned.
+            let claimed = unsafe { base.cast::<u32>().read() } as usize;
+            let fits = (bytes - offset) / std::mem::size_of::<R>();
+            if claimed > fits {
+                return Err(format!("{what}: {claimed} rows claimed, {fits} fit"));
+            }
+            // SAFETY: `claimed` rows of R start at `offset` (aligned: the buffer is
+            // u64-aligned and `offset` is a multiple of R's alignment) and end within the
+            // `bytes` the call wrote; the pointer derives from the whole buffer.
+            let rows = unsafe { std::slice::from_raw_parts(base.add(offset).cast::<R>(), claimed) };
+            return Ok(rows.to_vec());
         }
         if result != ERROR_INSUFFICIENT_BUFFER.0 && result != NO_ERROR.0 {
-            tracing::debug!("{what} failed: {result}");
-            return Vec::new();
+            return Err(format!("{what}: error {result}"));
         }
         buffer = vec![0u64; (size as usize).div_ceil(8) + 1];
         size = (buffer.len() * 8) as u32;
     }
-    Vec::new()
+    Err(format!("{what}: the table kept growing"))
 }
 
 #[cfg(test)]
@@ -402,6 +447,80 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_table_is_not_a_pass() {
+        let unread = ["TCP (IPv6): error 87".to_string()];
+        let check = dns_check(&[], &unread);
+        assert!(!check.ok);
+        assert_eq!(check.args["cause"], "unreadable");
+        assert_eq!(check.args["error"], "TCP (IPv6): error 87");
+        // An owner found in another table still names it.
+        let check = dns_check(&[u32::MAX], &unread);
+        assert!(!check.ok && check.args.contains_key("owner"));
+        assert!(dns_check(&[], &[]).ok);
+    }
+
+    #[test]
+    fn rows_start_where_the_tables_put_them() {
+        use std::mem::offset_of;
+        use windows::Win32::NetworkManagement::IpHelper::{
+            MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+            MIB_TCPTABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID,
+            MIB_UDPROW_OWNER_PID, MIB_UDPTABLE_OWNER_PID,
+        };
+        assert_eq!(
+            rows_offset::<MIB_UDPROW_OWNER_PID>(),
+            offset_of!(MIB_UDPTABLE_OWNER_PID, table)
+        );
+        assert_eq!(
+            rows_offset::<MIB_UDP6ROW_OWNER_PID>(),
+            offset_of!(MIB_UDP6TABLE_OWNER_PID, table)
+        );
+        assert_eq!(
+            rows_offset::<MIB_TCPROW_OWNER_PID>(),
+            offset_of!(MIB_TCPTABLE_OWNER_PID, table)
+        );
+        assert_eq!(
+            rows_offset::<MIB_TCP6ROW_OWNER_PID>(),
+            offset_of!(MIB_TCP6TABLE_OWNER_PID, table)
+        );
+    }
+
+    /// A fake table call: asks for `need` bytes, then writes `count` and `rows` u32 rows.
+    fn fake_table(
+        need: u32,
+        count: u32,
+        rows: &[u32],
+    ) -> impl Fn(Option<*mut std::ffi::c_void>, &mut u32) -> u32 {
+        let rows = rows.to_vec();
+        move |buffer, size| {
+            let Some(buffer) = buffer else {
+                *size = need;
+                return 122; // ERROR_INSUFFICIENT_BUFFER
+            };
+            let words = [count].into_iter().chain(rows.iter().copied());
+            for (i, word) in words.enumerate() {
+                // SAFETY: the tests ask for at least as many bytes as they write.
+                unsafe { buffer.cast::<u32>().add(i).write(word) };
+            }
+            *size = need;
+            0
+        }
+    }
+
+    #[test]
+    fn row_counts_are_checked_against_the_bytes() {
+        assert_eq!(
+            read_table::<u32>("t", fake_table(12, 2, &[7, 9])),
+            Ok(vec![7, 9])
+        );
+        // Claims three rows but only two fit in the 12 bytes written.
+        let error = read_table::<u32>("t", fake_table(12, 3, &[7, 9])).unwrap_err();
+        assert!(error.contains("3 rows claimed, 2 fit"), "{error}");
+        let failing = |_: Option<*mut std::ffi::c_void>, _: &mut u32| 5u32;
+        assert_eq!(read_table::<u32>("t", failing), Err("t: error 5".into()));
+    }
+
+    #[test]
     fn a_signed_system_file_passes_and_the_socket_tables_read() {
         let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap());
         // Catalog-signed system files have no embedded signature; ntoskrnl's is embedded.
@@ -413,7 +532,8 @@ mod tests {
         let tcp6 = std::net::TcpListener::bind("[::1]:0").unwrap();
         let udp4 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let udp6 = std::net::UdpSocket::bind("[::1]:0").unwrap();
-        let found = bindings();
+        let (found, unread) = bindings();
+        assert!(unread.is_empty(), "{unread:?}");
         for (tcp, local) in [
             (true, tcp4.local_addr().unwrap()),
             (true, tcp6.local_addr().unwrap()),

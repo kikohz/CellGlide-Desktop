@@ -588,6 +588,8 @@ impl Actor {
     async fn mux_event(&mut self, event: Option<MuxEvent>, events: &mpsc::Sender<Event>) {
         match event {
             Some(MuxEvent::Attached(device)) => {
+                // The device list changed: the next empty list is news again.
+                self.mux_listed_none = false;
                 if !self.devices.iter().any(|d| d.mux_id == device.mux_id) {
                     // A phone that is plugged in again is asked again.
                     self.forget_label(&device.serial);
@@ -599,6 +601,7 @@ impl Actor {
                 self.retry_soon();
             }
             Some(MuxEvent::Detached(id)) => {
+                self.mux_listed_none = false;
                 if let Some(gone) = self.devices.iter().find(|d| d.mux_id == id) {
                     let serial = gone.serial.clone();
                     self.forget_label(&serial);
@@ -618,6 +621,7 @@ impl Actor {
                 // usbmuxd went away: treat every phone as gone and listen again later.
                 tracing::warn!("usbmuxd connection closed");
                 self.mux_events = None;
+                self.mux_listed_none = false;
                 for _ in self.devices.drain(..) {
                     self.monitor.usb(false, Timestamp::now());
                 }
@@ -1969,6 +1973,45 @@ mod tests {
             connected(s) && r.backend.started() == 2
         })
         .await;
+    }
+
+    /// An empty device list is logged apart from "not reachable", once per change: not on
+    /// every relisten, but again after a phone came and went and usbmuxd restarted.
+    #[tokio::test]
+    async fn an_empty_device_list_is_logged_once_per_change() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let _log = tracing::subscriber::set_default(subscriber);
+        let message = "usbmuxd lists no iPhone";
+        let logged = |count: usize| {
+            let captured = captured.clone();
+            async move {
+                for _ in 0..80 {
+                    if captured.lines("DEBUG", message) >= count {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                panic!("{message} logged fewer than {count} times");
+            }
+        };
+
+        let r = rig(FakePhoneOptions::default(), any_port()).await;
+        logged(1).await;
+        r.mux.attach(device("aaaa", 1));
+        wait_for(&r.controller, "idle", |s| s.state == ConnState::Idle).await;
+        r.mux.detach(1);
+        wait_for(&r.controller, "no phone", |s| s.state == ConnState::NoPhone).await;
+        // usbmuxd restarts while no phone is plugged in: the list is empty again.
+        r.mux.drop_listeners();
+        logged(2).await;
+        assert_eq!(captured.lines("DEBUG", message), 2);
+        assert_eq!(captured.lines("DEBUG", "usbmuxd not reachable"), 0);
     }
 
     #[tokio::test]

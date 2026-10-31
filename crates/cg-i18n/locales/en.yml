@@ -122,6 +122,8 @@ check:
     ok: "CellGlide's DNS port 53 is free"
     fail: "Another program is using DNS port 53: %{owner}"
     fix: "turn off that program's DNS feature, such as Internet Connection Sharing (the SharedAccess service)"
+    unknown: "Couldn't check whether another program is using DNS port 53 (%{error})"
+    fix_unreadable: "run the check again; if it still can't check, restart the computer"
 cli:
   disconnected: "Disconnected. This computer is back on its own network"
   still_connecting: "Still connecting. Run cellglide watch to follow progress"

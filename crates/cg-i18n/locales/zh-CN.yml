@@ -122,6 +122,8 @@ check:
     ok: "CellGlide 的 DNS 端口 53 没有被占用"
     fail: "DNS 端口 53 被其他程序占用：%{owner}"
     fix: "停用该程序的 DNS 功能，例如「Internet 连接共享」（SharedAccess 服务）"
+    unknown: "无法检查 DNS 端口 53 是否被其他程序占用（%{error}）"
+    fix_unreadable: "再检查一次；如果仍然无法检查，请重启电脑"
 cli:
   disconnected: "已断开，电脑回到原来的网络"
   still_connecting: "仍在连接，可运行 cellglide watch 查看进度"

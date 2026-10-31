@@ -628,6 +628,24 @@ mod name_tests {
         let (names, _) = super::names(None, Some("ALICE-PC"), None);
         assert_eq!(names["ALICE-PC"], "computer");
     }
+
+    /// A host name longer than 15 characters has a NetBIOS name cut from it: both go, and
+    /// the longer name is not left half replaced by the shorter one.
+    #[test]
+    fn a_truncated_netbios_name_and_the_host_name_both_go() {
+        let (names, user) = names(Some("alice-thinkpad-x1c"), Some("ALICE-THINKPAD-"), None);
+        let text =
+            "host alice-thinkpad-x1c, netbios ALICE-THINKPAD-, at \\\\ALICE-THINKPAD-\\share";
+        let redacted = cg_diag::redact::redact(text, &names, user.as_deref());
+        let lower = redacted.to_lowercase();
+        for fragment in ["alice", "thinkpad", "x1c"] {
+            assert!(!lower.contains(fragment), "{fragment} left in {redacted}");
+        }
+        assert_eq!(
+            redacted,
+            "host computer, netbios computer, at \\\\computer\\share"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

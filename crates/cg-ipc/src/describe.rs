@@ -797,6 +797,12 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         {
             "idle"
         }
+        // The service couldn't read its port tables: not known to be free.
+        (false, CheckId::Dns)
+            if check.args.get("cause").map(String::as_str) == Some("unreadable") =>
+        {
+            "unknown"
+        }
         (true, _) => "ok",
         (false, _) => "fail",
     };
@@ -954,6 +960,25 @@ mod tests {
     /// The language is process-wide: tests that switch it take turns (the shared lock).
     fn language() -> MutexGuard<'static, ()> {
         cg_i18n::lock_for_tests()
+    }
+
+    #[test]
+    fn an_unreadable_port_table_reads_as_unchecked() {
+        let _lang = language();
+        let check = Check::new(CheckId::Dns, false)
+            .with("cause", "unreadable")
+            .with("error", "TCP (IPv6): error 87");
+        cg_i18n::set(Lang::En);
+        let (line, fix) = check_lines(&check);
+        assert_eq!(
+            line,
+            "Couldn't check whether another program is using DNS port 53 (TCP (IPv6): error 87)"
+        );
+        assert!(fix.unwrap().contains("restart the computer"));
+        cg_i18n::set(Lang::ZhCn);
+        let (line, fix) = check_lines(&check);
+        assert!(line.starts_with("无法检查 DNS 端口 53"), "{line}");
+        assert!(fix.unwrap().contains("重启电脑"));
     }
 
     fn snap(state: ConnState) -> Snapshot {

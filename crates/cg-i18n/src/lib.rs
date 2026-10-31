@@ -291,6 +291,8 @@ pub const KEYS: &[&str] = &[
     "check.dns.ok",
     "check.dns.fail",
     "check.dns.fix",
+    "check.dns.unknown",
+    "check.dns.fix_unreadable",
     "cli.disconnected",
     "cli.still_connecting",
     "cli.service_stopped",
