@@ -227,23 +227,41 @@ public sealed partial class MainWindow : Window
     }
 
     // ---- The minimum size, in DIP at the window's DPI now (WM_GETMINMAXINFO). ----
+    // Not OverlappedPresenter.PreferredMinimumWidth/Height: in WinAppSDK 2.6 they are physical
+    // pixels (760 gave a 760 px window at 125%), so they would not follow the window's DPI.
 
     const uint WM_GETMINMAXINFO = 0x0024;
+    const uint WM_NCDESTROY = 0x0082;
     const int GWLP_WNDPROC = -4;
 
-    /// <summary>The window procedure this replaced (there is one main window).</summary>
-    static nint s_previous;
+    /// <summary>Each subclassed window's previous procedure (window messages all run on the UI thread).</summary>
+    static readonly Dictionary<nint, nint> s_previous = [];
 
     static unsafe void KeepMinimumSize(nint hwnd)
     {
+        if (s_previous.ContainsKey(hwnd))
+        {
+            return;
+        }
         delegate* unmanaged[Stdcall]<nint, uint, nint, nint, nint> proc = &WindowProc;
-        s_previous = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (nint)proc);
+        s_previous[hwnd] = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (nint)proc);
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     static unsafe nint WindowProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
-        var result = CallWindowProcW(s_previous, hwnd, msg, wParam, lParam);
+        if (!s_previous.TryGetValue(hwnd, out var previous))
+        {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        if (msg == WM_NCDESTROY)
+        {
+            // The window is going: put its own procedure back before it handles its last message.
+            _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+            s_previous.Remove(hwnd);
+            return CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+        }
+        var result = CallWindowProcW(previous, hwnd, msg, wParam, lParam);
         if (msg == WM_GETMINMAXINFO && lParam != 0)
         {
             var dpi = GetDpiForWindow(hwnd);
@@ -280,6 +298,9 @@ public sealed partial class MainWindow : Window
 
     [LibraryImport("user32.dll")]
     private static partial nint CallWindowProcW(nint previous, nint hwnd, uint msg, nint wParam, nint lParam);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint DefWindowProcW(nint hwnd, uint msg, nint wParam, nint lParam);
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

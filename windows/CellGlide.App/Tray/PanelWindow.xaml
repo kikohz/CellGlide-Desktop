@@ -21,16 +21,16 @@
                              AutomationProperties.AccessibilityView="Raw"
                              Fill="{x:Bind s:Show.StatusBrush(Shell.Now), Mode=OneWay}" />
                     <StackPanel Grid.Column="1" Spacing="2">
-                        <TextBlock FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap"
-                                   Text="{x:Bind s:Show.TitleOrWhy(Shell.Now), Mode=OneWay}" />
+                        <TextBlock x:Name="TitleLine" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap"
+                                   Text="{x:Bind s:Show.TitleOrWhy(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite" />
                         <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    Text="{x:Bind s:Show.Detail(Shell.Now), Mode=OneWay}"
                                    Visibility="{x:Bind s:Show.HasState(Shell.Now), Mode=OneWay}" />
                     </StackPanel>
                 </Grid>
 
-                <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
-                           Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}"
+                <TextBlock x:Name="ErrorLine" FontSize="11" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
+                           Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite"
                            Visibility="{x:Bind s:Show.ErrorVisible(Shell.Now), Mode=OneWay}" />
 
                 <Button x:Name="MainButton" HorizontalAlignment="Stretch" Padding="10,6,10,6"

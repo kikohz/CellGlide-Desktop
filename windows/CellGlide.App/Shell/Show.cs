@@ -4,6 +4,8 @@ using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI.ViewManagement;
 
@@ -54,8 +56,32 @@ public static partial class Show
     /// <summary>Half strength for a dimmed card.</summary>
     public static double Opacity(bool dim) => dim ? 0.5 : 1.0;
 
+    /// <summary>
+    /// Has a screen reader say <paramref name="line"/> again whenever its text changes to something
+    /// (it carries AutomationProperties.LiveSetting; XAML does not raise LiveRegionChanged by itself).
+    /// </summary>
+    public static void AnnounceChanges(TextBlock line)
+    {
+        // Every state event sets the text again; only a different text is news.
+        var said = line.Text;
+        line.RegisterPropertyChangedCallback(TextBlock.TextProperty, (sender, _) =>
+        {
+            if (sender is not TextBlock changed || changed.Text == said)
+            {
+                return;
+            }
+            said = changed.Text;
+            if (said.Length > 0
+                && (FrameworkElementAutomationPeer.FromElement(changed) ?? FrameworkElementAutomationPeer.CreatePeerForElement(changed)) is { } peer)
+            {
+                peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            }
+        });
+    }
+
     // ---- The state as the panel and the overview show it: which of the DLL's texts, never new ones.
-    // They take ShellViewModel.Now, which is never null (see there why). ----
+    // They take ShellViewModel.Now, which is never null (see there why).
+    // Rule for every page: an x:Bind function is only passed paths that are never null (XBindTests checks). ----
 
     /// <summary>Shown while there is a state.</summary>
     public static Visibility HasState(ShellNow now) => Visible(now.Overview is not null);

@@ -59,6 +59,9 @@ public sealed partial class PanelWindow : Window
         AppWindow.Closing += OnClosing;
         // The dots' brushes follow a switch to or from high contrast.
         Show.Changed += () => Bindings.Update();
+        // A new state (or why there is none) and a failed command are read out.
+        Show.AnnounceChanges(TitleLine);
+        Show.AnnounceChanges(ErrorLine);
     }
 
     public ShellViewModel Shell { get; }

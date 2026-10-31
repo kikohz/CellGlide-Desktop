@@ -23,9 +23,18 @@ public sealed partial class OverviewPage : Page
         Shell = shell;
         _navigate = navigate;
         InitializeComponent();
-        // The dots' brushes follow a switch to or from high contrast while the page is shown.
-        Loaded += (_, _) => Show.Changed += Repaint;
+        // The dots' brushes follow a switch to or from high contrast while the page is shown, and
+        // are made again when it comes back (the switch may have happened while it was away).
+        Loaded += (_, _) =>
+        {
+            Show.Changed += Repaint;
+            Repaint();
+        };
         Unloaded += (_, _) => Show.Changed -= Repaint;
+        // A new state, a reason the service is away or a failed command is read out.
+        Show.AnnounceChanges(StateTitle);
+        Show.AnnounceChanges(NoStateLine);
+        Show.AnnounceChanges(ErrorLine);
     }
 
     public ShellViewModel Shell { get; }

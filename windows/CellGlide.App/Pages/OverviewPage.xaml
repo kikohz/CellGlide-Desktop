@@ -41,8 +41,8 @@
                                 </Grid.ColumnDefinitions>
                                 <Ellipse Width="10" Height="10" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"
                                          Fill="{x:Bind s:Show.StatusBrush(Shell.Now), Mode=OneWay}" />
-                                <TextBlock Grid.Column="1" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap"
-                                           Text="{x:Bind s:Show.Title(Shell.Now), Mode=OneWay}" />
+                                <TextBlock x:Name="StateTitle" Grid.Column="1" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap"
+                                           Text="{x:Bind s:Show.Title(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite" />
                             </Grid>
                             <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        Text="{x:Bind s:Show.Detail(Shell.Now), Mode=OneWay}"
@@ -51,11 +51,11 @@
                                        Text="{x:Bind StrictDnsOf(Shell.Now), Mode=OneWay}"
                                        Visibility="{x:Bind StrictDnsVisible(Shell.Now), Mode=OneWay}" />
                             <!-- Without a state: why (the service-gone sentence), or that the service is being reached. -->
-                            <TextBlock FontSize="13" TextWrapping="Wrap"
-                                       Text="{x:Bind s:Show.NoStateText(Shell.Now), Mode=OneWay}"
+                            <TextBlock x:Name="NoStateLine" FontSize="13" TextWrapping="Wrap"
+                                       Text="{x:Bind s:Show.NoStateText(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite"
                                        Visibility="{x:Bind s:Show.NoState(Shell.Now), Mode=OneWay}" />
-                            <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
-                                       Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}"
+                            <TextBlock x:Name="ErrorLine" FontSize="13" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
+                                       Text="{x:Bind s:Show.ErrorText(Shell.Now), Mode=OneWay}" AutomationProperties.LiveSetting="Polite"
                                        Visibility="{x:Bind s:Show.ErrorVisible(Shell.Now), Mode=OneWay}" />
                             <Button Padding="12,5,12,6"
                                     Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
@@ -103,12 +103,15 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="2" VerticalAlignment="Center">
-                                    <TextBlock FontSize="13" TextWrapping="Wrap" Text="{x:Bind h:L.T('overview.usb_device')}" />
+                                    <TextBlock x:Name="UsbDeviceLabel" FontSize="13" TextWrapping="Wrap" Text="{x:Bind h:L.T('overview.usb_device')}" />
                                     <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                Text="{x:Bind DeviceOf(Shell.Now), Mode=OneWay}"
                                                Visibility="{x:Bind DeviceVisible(Shell.Now), Mode=OneWay}" />
                                 </StackPanel>
+                                <!-- LabeledBy ties the button to its row; without the explicit Name, UIA would
+                                     take the label's text as the button's name and "Change…" would be lost. -->
                                 <Button Grid.Column="1" VerticalAlignment="Center"
+                                        AutomationProperties.LabeledBy="{x:Bind UsbDeviceLabel}" AutomationProperties.Name="{x:Bind h:L.T('overview.change')}"
                                         Content="{x:Bind h:L.T('overview.change')}" Click="OnChangeClick" />
                             </Grid>
                         </StackPanel>

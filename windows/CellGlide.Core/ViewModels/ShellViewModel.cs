@@ -64,6 +64,7 @@ public sealed class ShellViewModel : CoreViewModel
     /// value that is never null, replaced whenever one of them changes. XAML binds to this: x:Bind does
     /// not call a function again when its argument's path ends in null (the generated code skips it),
     /// so <c>F(Shell.Overview)</c> would keep showing the last state after the service went away.
+    /// Rule for the App: pass x:Bind functions only paths that are never null (XBindTests checks it).
     /// </summary>
     public ShellNow Now { get; private set; } = new(null, null, null);
 

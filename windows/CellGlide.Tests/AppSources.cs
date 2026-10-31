@@ -26,6 +26,21 @@ static partial class AppSources
         return keys;
     }
 
+
+    /// <summary>Every x:Bind function call in the App's *.xaml: file, function and its arguments as written.</summary>
+    public static IEnumerable<(string File, string Function, IReadOnlyList<string> Args)> BindCalls() =>
+        Files()
+            .Where(f => f.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(f => BindCalls(File.ReadAllText(f)).Select(c => (Path.GetRelativePath(AppDir, f), c.Function, c.Args)));
+
+    /// <summary>The x:Bind function calls in one XAML text.</summary>
+    public static IEnumerable<(string Function, IReadOnlyList<string> Args)> BindCalls(string xaml) =>
+        BindCall().Matches(xaml).Select(m => (
+            m.Groups[1].Value,
+            (IReadOnlyList<string>)m.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)));
+
+    [GeneratedRegex(@"\{x:Bind\s+([\w:.]+)\(([^)]*)\)")]
+    private static partial Regex BindCall();
     static IEnumerable<string> Files()
     {
         var skip = new[] { "bin", "obj" };
