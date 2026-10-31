@@ -9,7 +9,10 @@
     <!-- Both Windows architectures are restored every time, so the lock files record both and a
          `-r win-arm64` build or publish finds them already there (and leaves them unchanged). -->
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
-    <!-- Where cellglide_native.dll is found: cargo's debug output unless given with -p:CellGlideNativeDir=... -->
+    <!-- Where cellglide_native.dll is found unless given with -p:CellGlideNativeDir=...: cargo's release
+         output for a Release build or publish (`dotnet publish` is Release by default), its debug output
+         otherwise. CellGlide.Core refuses a Release build that would take a debug DLL. -->
+    <CellGlideNativeDir Condition="'$(CellGlideNativeDir)' == '' and '$(Configuration)' == 'Release'">$(MSBuildThisFileDirectory)..\target\release\</CellGlideNativeDir>
     <CellGlideNativeDir Condition="'$(CellGlideNativeDir)' == ''">$(MSBuildThisFileDirectory)..\target\debug\</CellGlideNativeDir>
     <!-- A relative directory is taken from windows\ (this file's directory), whichever project or
          working directory the build starts from; it may also lack its trailing slash. -->

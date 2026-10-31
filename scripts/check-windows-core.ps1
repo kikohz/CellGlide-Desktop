@@ -10,10 +10,12 @@
 #      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
 #      license is allowed or reviewed);
 #   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
+# Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's.
 # -Release takes the DLL from target\release instead of target\debug.
 # -Publish then builds cg-ffi in release and publishes CellGlide.App (Native AOT, self-contained) for
-# this machine's architecture, and checks that the publish folder (the project's PublishDir) has
-# CellGlide.exe and cellglide_native.dll and no onnxruntime*.dll or DirectML*.dll, and that the
+# this machine's architecture with a plain `dotnet publish -c Release` (no CellGlideNativeDir), and
+# checks that the publish folder (the project's PublishDir) has CellGlide.exe and target\release's
+# cellglide_native.dll (same SHA-256) and no onnxruntime*.dll or DirectML*.dll, and that the
 # shipped DLL has no debug-only diagnostics override (no CELLGLIDE_DIAG_TARGET or localhost string).
 # The dotnet steps run inside windows\ so that windows\global.json (SDK pin, test runner) applies.
 param(
@@ -67,6 +69,28 @@ try {
         Invoke-Step 'dotnet restore (locked)' { dotnet restore CellGlide.sln --locked-mode $native }
         Invoke-Step 'dotnet build' { dotnet build CellGlide.sln -c Debug --no-restore $native }
         Invoke-Step 'dotnet test' { dotnet test --project CellGlide.Tests --no-build -c Debug }
+
+        # A Release build or publish takes target\release's DLL unless told otherwise, and refuses a
+        # debug one (windows/Directory.Build.props, CellGlide.Core.csproj CheckCellGlideNativeRelease).
+        Write-Host '==> Release takes cellglide_native.dll from target\release and refuses target\debug'
+        $wantRelease = [IO.Path]::GetFullPath((Join-Path $root 'target\release\cellglide_native.dll'))
+        $releaseDll = (dotnet msbuild CellGlide.App -nologo -getProperty:CellGlideNativeDll -p:Configuration=Release | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $releaseDll -ne $wantRelease) {
+            Write-Host "FAILED: a Release build of CellGlide.App takes '$releaseDll', not '$wantRelease'."
+            exit 1
+        }
+        $refusal = (dotnet msbuild CellGlide.Core -nologo -t:CheckCellGlideNativeRelease -p:Configuration=Release '-p:CellGlideNativeDir=..\target\debug\' | Out-String)
+        if ($LASTEXITCODE -eq 0 -or $refusal -notmatch 'must not ship the debug DLL') {
+            Write-Host 'FAILED: a Release build with CellGlideNativeDir=..\target\debug\ was not refused:'
+            Write-Host $refusal
+            exit 1
+        }
+        $debugDll = (dotnet msbuild CellGlide.Core -nologo -t:CheckCellGlideNativeRelease -p:Configuration=Debug | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'FAILED: the Release-only DLL check refused a Debug build:'
+            Write-Host $debugDll
+            exit 1
+        }
     } finally {
         Pop-Location
     }
@@ -121,8 +145,9 @@ try {
             $publishDir = [IO.Path]::GetFullPath($publishDir)
             # An earlier publish must not satisfy the checks below.
             if (Test-Path $publishDir) { Remove-Item -Recurse -Force $publishDir }
-            Invoke-Step "dotnet publish CellGlide.App -r $rid" {
-                dotnet publish CellGlide.App -c Release -r $rid '-p:CellGlideNativeDir=..\target\release\'
+            # Plain: no CellGlideNativeDir, so the Release default (target\release) is what is checked.
+            Invoke-Step "dotnet publish CellGlide.App -c Release -r $rid" {
+                dotnet publish CellGlide.App -c Release -r $rid
             }
         } finally {
             Pop-Location
@@ -141,6 +166,14 @@ try {
             exit 1
         }
         Write-Host "==> CellGlide.exe and cellglide_native.dll are in $publishDir; no onnxruntime or DirectML"
+        # The plain publish took the DLL cargo just built in release, byte for byte.
+        $published = (Get-FileHash (Join-Path $publishDir 'cellglide_native.dll') -Algorithm SHA256).Hash
+        $built = (Get-FileHash (Join-Path $root 'target\release\cellglide_native.dll') -Algorithm SHA256).Hash
+        if ($published -ne $built) {
+            Write-Host "FAILED: the published cellglide_native.dll ($published) is not target\release's ($built)."
+            exit 1
+        }
+        Write-Host '==> the published cellglide_native.dll is target\release''s'
         # Diagnostics in a release build always go to production: the debug-only override
         # (crates/cg-ffi/src/runtime.rs, diag_target) must not be compiled in. Its variable name and
         # its loopback host would show as strings, ASCII or UTF-16.

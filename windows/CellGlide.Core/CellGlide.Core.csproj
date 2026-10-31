@@ -26,4 +26,13 @@
     <Error Text="$(CellGlideNativeDll) is missing: run 'cargo build -p cg-ffi' first (or pass -p:CellGlideNativeDir=...)." />
   </Target>
 
+  <!-- A Release build or publish ships the release DLL. The debug one is unoptimised, may be the
+       `testing` build that cargo test leaves there, and honours CELLGLIDE_DIAG_TARGET (diagnostics to any
+       local port). Also checked before the copy items are collected, so a publish that skips the build is caught too. -->
+  <Target Name="CheckCellGlideNativeRelease"
+          BeforeTargets="BeforeBuild;GetCopyToOutputDirectoryItems;GetCopyToPublishDirectoryItems"
+          Condition="'$(Configuration)' == 'Release' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(CellGlideNativeDll)', '(?i)[\\/]debug[\\/]cellglide_native\.dll$'))">
+    <Error Text="A Release build must not ship the debug DLL $(CellGlideNativeDll): run 'cargo build -p cg-ffi --release' and leave CellGlideNativeDir unset (Release defaults to target\release\), or pass -p:CellGlideNativeDir=..\target\release\." />
+  </Target>
+
 </Project>
