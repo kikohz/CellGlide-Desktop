@@ -51,12 +51,22 @@ public sealed partial class HistoryPage : Page
                 RetryButton.IsEnabled = !_history.LoadCommand.IsRunning;
             }
         };
-        _timer.Tick += (_, _) => _ = _history.RefreshCommand.ExecuteAsync(null);
+        _timer.Tick += (_, _) =>
+        {
+            // A minimise does not always raise a size change: look at the window itself before asking.
+            ApplyGate(askNow: false);
+            if (_gate.Running)
+            {
+                _ = _history.RefreshCommand.ExecuteAsync(null);
+            }
+        };
         Loaded += (_, _) =>
         {
             // Loaded can come twice in a row without Unloaded between: take any earlier subscription off first.
             Show.Changed -= OnBrushesChanged;
             Show.Changed += OnBrushesChanged;
+            _window.ScreenChanged -= OnScreenChanged;
+            _window.ScreenChanged += OnScreenChanged;
             _ = _history.LoadCommand.ExecuteAsync(null);
             _pageShown = true;
             ApplyGate(askNow: false);
@@ -67,12 +77,14 @@ public sealed partial class HistoryPage : Page
             _pageShown = false;
             ApplyGate(askNow: false);
             Show.Changed -= OnBrushesChanged;
+            _window.ScreenChanged -= OnScreenChanged;
         };
-        window.ScreenChanged += () => ApplyGate(askNow: true);
         Show.AnnounceChanges(ErrorLine);
         Show.AnnounceChanges(DayLabel);
         Render();
     }
+
+    void OnScreenChanged() => ApplyGate(askNow: true);
 
     /// <summary>
     /// Starts or stops the refresh as the page and its window come and go. Back on screen from the tray or from
