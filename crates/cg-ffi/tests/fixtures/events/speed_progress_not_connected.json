@@ -6,6 +6,7 @@
     "start_enabled": false,
     "start_note": "Connect the iPhone to test the phone connection",
     "uplink": null,
+    "offers_wifi": false,
     "legs": [],
     "verdict": null,
     "history": [],

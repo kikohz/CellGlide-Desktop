@@ -106,8 +106,8 @@ public sealed partial class MainWindow : Window
     Page Create(Section section) => section switch
     {
         Section.Overview => new OverviewPage(_shell, Open),
-        Section.SpeedTest => new SpeedPage(),
-        Section.DnsLeak => new LeakPage(),
+        Section.SpeedTest => new SpeedPage(App.Current.Speed, App.Current.Settings),
+        Section.DnsLeak => new LeakPage(App.Current.Leak),
         Section.History => new HistoryPage(),
         Section.Diagnostics => new DiagnosticsPage(),
         Section.Settings => new SettingsPage(),

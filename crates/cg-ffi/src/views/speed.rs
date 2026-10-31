@@ -28,6 +28,9 @@ pub struct SpeedView {
     pub start_note: Option<String>,
     /// This computer's own Wi‑Fi or Ethernet, for "Also test Wi‑Fi or Ethernet (…)".
     pub uplink: Option<String>,
+    /// Offer "Also test Wi‑Fi or Ethernet (…)": connected through the phone, and this computer
+    /// has its own uplink to compare with (the Linux window shows the checkbox just then).
+    pub offers_wifi: bool,
     /// One per route of the last (or current) run, in order.
     pub legs: Vec<SpeedLegView>,
     /// The comparison, once a run is over and both downloads are known.
@@ -131,6 +134,7 @@ pub(crate) fn speed(page: &SpeedPage, tz: &TimeZone) -> SpeedView {
         start_enabled,
         start_note,
         uplink: page.uplink.map(str::to_string),
+        offers_wifi: page.phone && page.uplink.is_some(),
         legs: page.legs.iter().map(leg).collect(),
         verdict: verdict(page),
         history: page.records.iter().map(|r| record(r, tz)).collect(),
@@ -271,6 +275,7 @@ mod tests {
             (true, None)
         );
         assert_eq!(view.uplink.as_deref(), Some("Wi-Fi"));
+        assert!(view.offers_wifi);
         assert_eq!(view.verdict, verdict_line(Some(20.0), Some(60.0)));
         let phone = &view.legs[0];
         assert!(phone.phone && phone.stage == StageView::Done);
@@ -310,6 +315,13 @@ mod tests {
         );
         assert!(!view.start_enabled);
         assert_eq!(view.start_note, Some(error_text(&SpeedError::NotConnected)));
+        assert!(!view.offers_wifi);
+        // Without the phone the test is the Wi‑Fi alone: nothing to choose.
+        let wifi_only = SpeedPage {
+            phone: false,
+            ..page(&legs, &[])
+        };
+        assert!(!speed(&wifi_only, &TimeZone::UTC).offers_wifi);
     }
 
     #[test]

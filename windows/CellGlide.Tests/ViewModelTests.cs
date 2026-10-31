@@ -201,6 +201,22 @@ public class ViewModelTests
     }
 
     [Fact]
+    public void Data_warning_is_requested_once_per_transition()
+    {
+        var (core, hub) = Fake();
+        var speed = new SpeedViewModel(hub, new SettingsViewModel(hub));
+        var asked = 0;
+        speed.DataWarningRequested += () => asked++;
+        var warning = Samples.Event("speed_progress_data_warning.json");
+        core.Raise(warning);
+        core.Raise(warning);                                          // same dialog, next frame
+        Assert.Equal(1, asked);
+        core.Raise(Samples.Event("speed_progress_latency.json"));     // dialog gone
+        core.Raise(warning);
+        Assert.Equal(2, asked);
+    }
+
+    [Fact]
     public async Task Leak_start_cancel_and_view()
     {
         var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));

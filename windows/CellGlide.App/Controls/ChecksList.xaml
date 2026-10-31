@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The doctor's checks, after cg-gui's widgets/checks.rs: a button that runs them, then one row per
+     check (a mark, the DLL's line and, when it has one, the fix with a Copy button). Filled in code. -->
+<UserControl
+    x:Class="CellGlide.App.Controls.ChecksList"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Spacing="10">
+        <Button x:Name="RunButton" HorizontalAlignment="Left" Padding="12,4,12,5" Click="OnRunClick" />
+        <TextBlock x:Name="ErrorLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed"
+                   AutomationProperties.LiveSetting="Polite" />
+        <StackPanel x:Name="Rows" Spacing="8" />
+    </StackPanel>
+</UserControl>

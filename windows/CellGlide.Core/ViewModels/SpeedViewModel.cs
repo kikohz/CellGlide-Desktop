@@ -17,8 +17,15 @@ public sealed class SpeedViewModel : CoreViewModel
         StartCommand = new AsyncRelayCommand<bool>(StartAsync);
         CancelCommand = new AsyncRelayCommand(() => RunAsync(new SpeedCancelCommand()));
         ClearHistoryCommand = new AsyncRelayCommand(() => RunAsync(new SpeedHistoryClearCommand()));
-        hub.SpeedProgress += view => View = view;
+        hub.SpeedProgress += OnProgress;
     }
+
+    /// <summary>
+    /// The DLL put the data warning up: raised once when <see cref="SpeedView.Dialog"/> becomes
+    /// <see cref="SpeedDialog.DataWarning"/>, not again for later frames of the same warning. The
+    /// page asks the user; the answer is <see cref="StartCommand"/> with true, or <see cref="CancelCommand"/>.
+    /// </summary>
+    public event Action? DataWarningRequested;
 
     public SpeedView? View
     {
@@ -49,5 +56,15 @@ public sealed class SpeedViewModel : CoreViewModel
             return;
         }
         await RunAsync(new SpeedStartCommand(prefs.IncludeWifi, confirmed, Caps));
+    }
+
+    void OnProgress(SpeedView view)
+    {
+        var shown = _view?.Dialog == SpeedDialog.DataWarning;
+        View = view;
+        if (!shown && view.Dialog == SpeedDialog.DataWarning)
+        {
+            DataWarningRequested?.Invoke();
+        }
     }
 }

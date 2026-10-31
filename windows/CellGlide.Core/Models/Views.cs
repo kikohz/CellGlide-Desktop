@@ -175,6 +175,7 @@ public sealed record SpeedView(
     bool StartEnabled,
     string? StartNote,
     string? Uplink,
+    bool OffersWifi,
     IReadOnlyList<SpeedLegView> Legs,
     string? Verdict,
     IReadOnlyList<SpeedRecordView> History,

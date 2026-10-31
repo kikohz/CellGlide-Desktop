@@ -273,6 +273,18 @@ Speed test finished
 - **截图**：会话 1 锁屏，截到的是锁屏画面（不是全黑），所以 Mica 背景和整体外观没能用眼睛看，留给 Task 10。
 - **fix round 1**：最小尺寸仍用 `WM_GETMINMAXINFO`，因为实测 WinAppSDK 2.6 的 `OverlappedPresenter.PreferredMinimumWidth/Height` 是物理像素（设 760×520，在 125% 缩放下窗口停在 760×520 px，即 608×416 DIP），不跟 DPI；子类化改成按窗口记录原窗口过程，`WM_NCDESTROY` 时换回。重测：设 300×200 后仍停在 760×520 DIP。
 
+### 测速页与 DNS 泄漏页（W3 Task 7，2026-10-31）
+
+- **实测方式**：同 Task 6，会话 1 临时交互计划任务（`CGT7`，用完删除）跑 UI Automation 驱动脚本；Debug 构建，`CELLGLIDE_LANG=en`、`CELLGLIDE_SPEED_CAPS=small`（10 MB 下行 / 5 MB 上行 / 5 秒）。连接与断开用 `cellglide.exe connect` / `disconnect`；连接前拍基线快照（当天新拍），断开后再拍，`-Compare` 结果 **identical**；最后又在未连接时做了一次泄漏检测（只走 Wi‑Fi）后再拍，仍 **identical**。结束时隧道未连接，没有残留进程和计划任务。
+- **手机流量**：`This session` 从 12.7 MB 到 38.4 MB，本任务共 **25.7 MB**（预算 30 MB）：
+  1. 开始 → 出现提醒 `A speed test can use up to about 1.3 GB of phone data.`（复选框 `Don't ask again`，按钮 `Continue` / `Cancel`）→ `Cancel`：12.8 → 12.8 MB，**没有测速流量**。再点开始，提醒**再次出现**：说明取消确实发了 `SpeedCancel`（否则 DLL 的 `dialog` 一直是 `DataWarning`，第二次没有「从无到有」，就不会再弹）。
+  2. `Continue`（不勾不再提示）：iPhone 腿 `Latency 117 ms` → `Testing Download… 0..3 / 5 s`（进度条 0→30%，数字逐帧更新）→ `Download reached the data cap after 3.5 s…` → `Testing Upload… 0..4 / 5 s`（35→90%）→ 完成；Wi‑Fi 腿接着 `Checking HTTPS latency…` → 下行 → 上行。结果 iPhone `Latency 117 ms · Download 28.0 Mbps · Upload 10.5 Mbps`，Wi‑Fi `Latency 67 ms · Download 79.1 Mbps · Upload 26.5 Mbps`，结论 `Wi‑Fi download is 2.8x faster than the iPhone.`，最近结果第一行 `2026-10-31 05:20 / Cricket · 5G NSA / ↓ 28.0 ↑ 10.5 Mbps · 117 ms / ↓ 79.1 ↑ 26.5 Mbps · 67 ms`。测速期间开始按钮是 `Cancel`，`Clear` 不可点。用量 12.8 → 27.9 MB（**15.1 MB**，即手机腿的两个上限）。这次上行在时间内达到上限，没有进入宽限期，所以「等待确认时进度条为不定状态」没有实测到（代码里是 `IsIndeterminate = Waiting`）。
+  3. 再测一次，iPhone 下行刚开始（`Testing Download… 0 / 5 s`）就点 `Cancel`：两条腿都显示 `Speed test cancelled`，按钮回到 `Start speed test`，历史不增加；十几秒后 `cellglide status` 的速度为 `↓ 0.2 KB/s ↑ 0.0 KB/s`。但这一步用了 **10.0 MB**（28.1 → 38.1）：41 Mbps 下 10 MB 的下行上限两秒就到，驱动脚本从找按钮到界面显示已取消也要约 2 秒，取消到达时下行多半已经满额。
+  4. 泄漏页（连接中）：`Start test` → `Testing…` → 约 3 秒后 `No leak` / `All of this computer's DNS queries go out through the encrypted DNS of Cloudflare…`；`Your exit` `AT&T Enterprises, LLC · Arizona, US`；`DNS servers`：`Cloudflare, Inc.`、`142 queries`、16 个地址、`Ontario, CA`；有多地址，所以显示 `leak.many_ips` 那句；按钮变成 `Test again`。随后 `dotnet run --project CellGlide.Probe -- leak`：`No leak`、同一句说明、`AT&T Enterprises, LLC · Arizona, US`、`Cloudflare, Inc.`（这次 2 个地址；Cloudflare 每次从一段地址里发出查询，地址不同属正常）。结论、出口、解析服务器的归属一致。
+- **未连接时**：测速页没有「Also test Wi‑Fi or Ethernet」复选框（DLL 新字段 `offers_wifi` 为假），开始按钮旁是 `No iPhone connected; this test measures Wi‑Fi or Ethernet only.`；泄漏页 `This computer is not using the phone's network`，出口 `T-Mobile USA, Inc. · California, US`，`T-Mobile USA, Inc.` `157 queries` `New Jersey, US`。
+- **实测中修的问题**：出口那行原来带 `AutomationProperties.LabeledBy`（指向「Your exit」），UIA 就把它的名字换成了「Your exit」，读屏读不到出口本身（Task 6 在「Change…」按钮上遇到过同一现象）。去掉 LabeledBy 后重测，名字是 `T-Mobile USA, Inc. · California, US`。另外腿的说明（notes）原来每帧重建，UIA 偶尔读到刚建好、还没排版的空行，改为内容变了才重建。
+- **没有实测到**：检查清单（`OffersChecks` 只在 DNS 未被 CellGlide 管理时为真，本机造不出来）；`Esc` 关提醒（会话 1 锁屏，没法发按键；`Cancel` 按钮和 Esc 走同一个 `ContentDialogResult.None` 分支）；勾「不再提示」后继续（会写真实偏好，之后测速不再提醒）。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

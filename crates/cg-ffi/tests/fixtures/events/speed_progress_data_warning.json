@@ -6,6 +6,7 @@
     "start_enabled": true,
     "start_note": null,
     "uplink": "Wi-Fi",
+    "offers_wifi": true,
     "legs": [],
     "verdict": null,
     "history": [],
