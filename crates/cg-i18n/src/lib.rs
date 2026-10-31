@@ -414,6 +414,8 @@ pub const KEYS: &[&str] = &[
     "gui.waiting_service",
     "gui.service_gone",
     "gui.service_timeout",
+    "gui.badge_warning",
+    "gui.badge_critical",
     "gui.state.waiting_usb.title",
     "gui.state.waiting_usb.detail",
     "gui.state.choose_phone.title",

@@ -37,10 +37,10 @@ fn reply_to(response: Response, now: Timestamp, tz: &TimeZone) -> ReplyResult {
         Response::History { day } => ok(ReplyValue::History {
             view: views::history(&day, now, tz),
         }),
-        Response::Diagnostics { json } => ok(ReplyValue::Diagnostics {
+        Response::Diagnostics { json } => ok(ReplyValue::diagnostics(
             json,
-            file_name: cg_diag::save::file_name(now, tz),
-        }),
+            cg_diag::save::file_name(now, tz),
+        )),
         // `call` already turns these into text; kept so no reply is ever lost.
         Response::Error { reason } => ReplyResult::err(describe::reason_text(&reason)),
     }
@@ -49,6 +49,7 @@ fn reply_to(response: Response, now: Timestamp, tz: &TimeZone) -> ReplyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cg_i18n::tr;
     use cg_ipc::{Check, CheckId, Reason};
 
     fn now() -> Timestamp {
@@ -104,7 +105,8 @@ mod tests {
             ReplyResult::Ok {
                 value: ReplyValue::Diagnostics {
                     json: "{}".into(),
-                    file_name: "cellglide-diagnostics-20261030-080910.json".into()
+                    file_name: "cellglide-diagnostics-20261030-080910.json".into(),
+                    size_text: tr("diag.preview_size", &[("size", &describe::amount(2))]),
                 }
             }
         );

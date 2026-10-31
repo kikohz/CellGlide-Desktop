@@ -3,7 +3,9 @@
 //! `null`, and nothing is a tuple or a fixed-size array.
 
 use crate::views::{ChromeView, HistoryView, LeakView, OverviewView, SpeedView};
+use cg_i18n::tr;
 use cg_ipc::DiagRange;
+use cg_ipc::describe;
 use cg_ipc::describe::ui::CheckRow;
 use cg_tools::prefs::Prefs;
 use serde::{Deserialize, Serialize};
@@ -140,9 +142,11 @@ pub enum ReplyValue {
     History {
         view: HistoryView,
     },
+    /// `size_text` is the line under the preview ("123 KB in total"), as the Linux window's.
     Diagnostics {
         json: String,
         file_name: String,
+        size_text: String,
     },
     /// The report code the server gave back.
     Sent {
@@ -155,12 +159,28 @@ pub enum ReplyValue {
         prefs: Prefs,
     },
     /// `licenses` is the Rust list followed by the NuGet list, each without its generator's
-    /// header line.
+    /// header line; `telegram_label` is the text the link shows.
     About {
         version: String,
         telegram_url: String,
+        telegram_label: String,
         licenses: String,
     },
+}
+
+impl ReplyValue {
+    /// A prepared bundle, with the size line the Linux window shows under its preview.
+    pub fn diagnostics(json: String, file_name: String) -> ReplyValue {
+        let size_text = tr(
+            "diag.preview_size",
+            &[("size", &describe::amount(json.len() as i64))],
+        );
+        ReplyValue::Diagnostics {
+            json,
+            file_name,
+            size_text,
+        }
+    }
 }
 
 impl ReplyResult {
@@ -237,6 +257,23 @@ mod tests {
     use super::*;
     use cg_ipc::{Contact, Request};
     use serde_json::{Value, json};
+
+    fn en() -> std::sync::MutexGuard<'static, ()> {
+        let guard = cg_i18n::lock_for_tests();
+        cg_i18n::set(cg_i18n::Lang::En);
+        guard
+    }
+
+    #[test]
+    fn the_diagnostics_reply_says_its_size() {
+        let _g = en();
+        let ReplyValue::Diagnostics { size_text, .. } =
+            ReplyValue::diagnostics("x".repeat(123_000), "f.json".into())
+        else {
+            panic!("expected Diagnostics");
+        };
+        assert_eq!(size_text, "123 KB in total");
+    }
 
     fn diagnostics(email: Option<&str>, note: Option<&str>) -> Command {
         Command::Request {

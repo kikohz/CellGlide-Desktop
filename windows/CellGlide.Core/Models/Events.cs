@@ -62,7 +62,7 @@ public sealed record ChecksValue(IReadOnlyList<CheckRow> Rows) : ReplyValue;
 
 public sealed record HistoryValue(HistoryView View) : ReplyValue;
 
-public sealed record DiagnosticsValue(string Json, string FileName) : ReplyValue;
+public sealed record DiagnosticsValue(string Json, string FileName, string SizeText) : ReplyValue;
 
 /// <summary>The report code the server gave back.</summary>
 public sealed record SentValue(string Code) : ReplyValue;
@@ -72,4 +72,4 @@ public sealed record SavedValue(string Path) : ReplyValue;
 public sealed record PrefsValue(Prefs Prefs) : ReplyValue;
 
 /// <summary>For the About page; <c>Licenses</c> is the Rust list then the NuGet list, each without its generator's header line.</summary>
-public sealed record AboutValue(string Version, string TelegramUrl, string Licenses) : ReplyValue;
+public sealed record AboutValue(string Version, string TelegramUrl, string TelegramLabel, string Licenses) : ReplyValue;

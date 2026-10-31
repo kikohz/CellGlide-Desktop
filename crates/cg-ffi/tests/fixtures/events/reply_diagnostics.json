@@ -6,7 +6,8 @@
     "value": {
       "kind": "diagnostics",
       "json": "{\"format\":1,\"platform\":\"windows\",\"log\":[]}",
-      "file_name": "cellglide-diagnostics-20261030-120000.json"
+      "file_name": "cellglide-diagnostics-20261030-120000.json",
+      "size_text": "0 KB in total"
     }
   }
 }

@@ -147,6 +147,7 @@ public class ViewModelTests
         await about.LoadCommand.ExecuteAsync(null);
         Assert.IsType<GetAboutCommand>(Assert.Single(core.Sent));
         Assert.Equal("https://t.me/cellglide", about.About!.TelegramUrl);
+        Assert.Equal("t.me/cellglide", about.About.TelegramLabel);
         Assert.Contains("CommunityToolkit.Mvvm", about.About.Licenses);
         Assert.Null(about.Error);
     }
@@ -295,7 +296,7 @@ public class ViewModelTests
         var diagnostics = new DiagnosticsViewModel(hub);
         Assert.False(diagnostics.SendCommand.CanExecute(null));
 
-        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json", "2 B in total"));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Week, "a@b.co", "hi"));
         Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Week, "a@b.co", "hi"), core.Sent[0]);
         Assert.Equal("{}", diagnostics.Json);
@@ -329,12 +330,26 @@ public class ViewModelTests
     }
 
     [Fact]
+    public async Task Diagnostics_size_comes_with_the_preview()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var diagnostics = new DiagnosticsViewModel(hub);
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json", "2 B in total"));
+        await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
+        Assert.Equal("2 B in total", diagnostics.SizeText);
+        // It goes with the bundle.
+        diagnostics.Discard();
+        Assert.Null(diagnostics.SizeText);
+    }
+
+    [Fact]
     public async Task Changing_the_form_discards_the_previewed_bundle()
     {
         var core = new ScriptedCore();
         var hub = new EventHub(core, new InlineDispatcher());
         var diagnostics = new DiagnosticsViewModel(hub);
-        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json", "2 B in total"));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
         core.Next = new ReplyOk(new SavedValue(@"C:\d\cellglide.json"));
         await diagnostics.SaveCommand.ExecuteAsync(null);
@@ -424,7 +439,7 @@ public class ViewModelTests
         var hub = new EventHub(core, new InlineDispatcher());
         var diagnostics = new DiagnosticsViewModel(hub);
         var input = new DiagnosticsInput(DiagRange.Day, "a@b.co", "");
-        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json", "2 B in total"));
         await diagnostics.PrepareToSaveCommand.ExecuteAsync(input);
         Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Day, "a@b.co", ""), core.Sent[0]);
         Assert.Equal("{}", diagnostics.Json);
@@ -451,19 +466,19 @@ public class ViewModelTests
         var core = new ScriptedCore();
         var hub = new EventHub(core, new InlineDispatcher());
         var diagnostics = new DiagnosticsViewModel(hub);
-        core.Next = new ReplyOk(new DiagnosticsValue("{\"old\":1}", "old.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"old\":1}", "old.json", "2 B in total"));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
         Assert.True(diagnostics.Previewed);
 
         // The user typed, but the change's event has not come yet (no Discard): View asks for the new form.
-        core.Next = new ReplyOk(new DiagnosticsValue("{\"new\":1}", "new.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"new\":1}", "new.json", "2 B in total"));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "a@b.co", ""));
         Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Day, "a@b.co", ""), core.Sent[1]);
         Assert.Equal("{\"new\":1}", diagnostics.Json);
         Assert.True(diagnostics.Previewed);
 
         // The same for Save: another range builds again, and the rebuilt bundle is not previewed.
-        core.Next = new ReplyOk(new DiagnosticsValue("{\"week\":1}", "week.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{\"week\":1}", "week.json", "2 B in total"));
         await diagnostics.PrepareToSaveCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Week, "a@b.co", ""));
         Assert.Equal(new DiagnosticsPrepareCommand(DiagRange.Week, "a@b.co", ""), core.Sent[2]);
         Assert.Equal("{\"week\":1}", diagnostics.Json);
@@ -477,7 +492,7 @@ public class ViewModelTests
         Assert.False(diagnostics.SaveCommand.CanExecute(null));
 
         // The same form again uses the bundle on hand.
-        core.Next = new ReplyOk(new DiagnosticsValue("{}", "x.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "x.json", "2 B in total"));
         await diagnostics.PrepareToSaveCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
         Assert.Equal(5, core.Sent.Count);
@@ -490,7 +505,7 @@ public class ViewModelTests
         var core = new ScriptedCore();
         var hub = new EventHub(core, new InlineDispatcher());
         var diagnostics = new DiagnosticsViewModel(hub);
-        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json"));
+        core.Next = new ReplyOk(new DiagnosticsValue("{}", "cellglide.json", "2 B in total"));
         await diagnostics.PrepareCommand.ExecuteAsync(new DiagnosticsInput(DiagRange.Day, "", ""));
         core.Next = new ReplyOk(new SavedValue(@"C:\d\cellglide.json"));
         await diagnostics.SaveCommand.ExecuteAsync(null);

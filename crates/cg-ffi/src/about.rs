@@ -7,6 +7,9 @@ use std::sync::OnceLock;
 
 pub const TELEGRAM_URL: &str = "https://t.me/cellglide";
 
+/// What the link shows, as on the Linux window's About page.
+pub const TELEGRAM_LABEL: &str = "t.me/cellglide";
+
 /// The crates cargo-about finds, then hev-socks5-tunnel and the C code it bundles
 /// (`scripts/update-licenses.sh`). The first line is a header for its freshness check.
 const RUST_LICENSES: &str = include_str!("../../cg-gui/assets/third-party-licenses.txt");
@@ -20,6 +23,7 @@ pub fn about() -> ReplyValue {
     ReplyValue::About {
         version: env!("CARGO_PKG_VERSION").into(),
         telegram_url: TELEGRAM_URL.into(),
+        telegram_label: TELEGRAM_LABEL.into(),
         licenses: licenses().to_owned(),
     }
 }
@@ -57,6 +61,7 @@ mod tests {
         let ReplyValue::About {
             version,
             telegram_url,
+            telegram_label,
             licenses,
         } = about()
         else {
@@ -64,6 +69,7 @@ mod tests {
         };
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
         assert_eq!(telegram_url, "https://t.me/cellglide");
+        assert_eq!(telegram_label, "t.me/cellglide");
         assert!(licenses.starts_with("CellGlide third-party licenses"));
         assert!(licenses.contains("tokio"));
         // The license texts themselves may have lines starting with '#' (a Markdown heading, a

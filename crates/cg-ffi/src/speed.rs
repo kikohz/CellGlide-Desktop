@@ -21,6 +21,8 @@ use futures::FutureExt;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use std::panic::AssertUnwindSafe;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -36,10 +38,12 @@ pub(crate) struct Speed {
     state: Mutex<State>,
     /// The page follows the uplink, the snapshot, the preferences and the language.
     watching: AtomicBool,
-    /// Tests only (`testing::panic_speed_watch_next`): the page's watch panics when it next
-    /// wakes up.
+    /// A page went out since the watch last looked: the watch's last panic is news again.
+    recovered: AtomicBool,
+    /// Tests only (`testing::panic_speed_watch`): the page's watch panics each of this many
+    /// next times it wakes up.
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) panic_next: AtomicBool,
+    pub(crate) panic_left: AtomicU32,
 }
 
 #[derive(Default)]
@@ -96,6 +100,7 @@ fn show(context: &Context, state: &mut State, force: bool) {
     if force || state.sent.as_ref() != Some(&view) {
         state.sent = Some(view.clone());
         context.events.emit(Event::SpeedProgress { view });
+        context.speed.recovered.store(true, Ordering::SeqCst);
     }
 }
 
@@ -107,7 +112,8 @@ async fn uplink(context: &Context) -> Option<String> {
 
 /// After `Subscribe`: sends the page now, then whenever something it shows changes. Once per
 /// runtime; it ends with the runtime. A panic is a `Fault`, and after `Config::retry` the page
-/// is followed again by itself (`Subscribe` doesn't start it twice).
+/// is followed again by itself (`Subscribe` doesn't start it twice). The same panic again is
+/// not a new `Fault` until a page has gone out in between, as for the subscription.
 pub(crate) fn watch(context: &Context) {
     if context.speed.watching.swap(true, Ordering::SeqCst) {
         return;
@@ -115,6 +121,8 @@ pub(crate) fn watch(context: &Context) {
     let context = context.clone();
     tokio::spawn(async move {
         let cancel = context.cancel.clone();
+        // The last panic's message, until a page is sent again.
+        let mut last_panic: Option<String> = None;
         loop {
             let run = AssertUnwindSafe(follow(&context)).catch_unwind();
             let ended = tokio::select! {
@@ -122,9 +130,14 @@ pub(crate) fn watch(context: &Context) {
                 ended = run => Some(ended),
             };
             let Some(Err(payload)) = ended else { break };
-            context.events.emit(Event::Fault {
-                message: panic_message(&*payload),
-            });
+            let message = panic_message(&*payload);
+            if context.speed.recovered.swap(false, Ordering::SeqCst) {
+                last_panic = None;
+            }
+            if last_panic.as_ref() != Some(&message) {
+                last_panic = Some(message.clone());
+                context.events.emit(Event::Fault { message });
+            }
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = tokio::time::sleep(context.config.retry) => {}
@@ -146,7 +159,14 @@ async fn follow(context: &Context) {
             () = context.shared.pages.notified() => None,
         };
         #[cfg(any(test, feature = "testing"))]
-        if context.speed.panic_next.swap(false, Ordering::SeqCst) {
+        if context
+            .speed
+            .panic_left
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
             panic!("a test asked the speed page's watch to panic");
         }
         {

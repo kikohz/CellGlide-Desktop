@@ -250,10 +250,10 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
             "reply_diagnostics",
             reply(
                 5,
-                ReplyValue::Diagnostics {
-                    json: DIAGNOSTICS_JSON.into(),
-                    file_name: "cellglide-diagnostics-20261030-120000.json".into(),
-                },
+                ReplyValue::diagnostics(
+                    DIAGNOSTICS_JSON.into(),
+                    "cellglide-diagnostics-20261030-120000.json".into(),
+                ),
             ),
         ),
         (
@@ -283,6 +283,7 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
                 ReplyValue::About {
                     version: "1.0.0".into(),
                     telegram_url: "https://t.me/cellglide".into(),
+                    telegram_label: "t.me/cellglide".into(),
                     // A short stand-in: the real lists run to hundreds of kilobytes.
                     licenses: "CellGlide third-party licenses\n\nMIT License\n  - tokio 1.48.0\n\
                                CommunityToolkit.Mvvm 8.4.2 MIT https://github.com/CommunityToolkit/dotnet\n"

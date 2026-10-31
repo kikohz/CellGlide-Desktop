@@ -744,7 +744,7 @@ async fn a_panicking_speed_page_follows_again() {
         |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
     )
     .await;
-    cellglide_native::testing::panic_speed_watch_next(&rt);
+    cellglide_native::testing::panic_speed_watch(&rt, 1);
     wait_for(&events, |e| matches!(e, Event::Fault { .. })).await;
     events.lock().unwrap().clear();
     // The phone goes: the page still follows, with no new Subscribe.
@@ -754,6 +754,51 @@ async fn a_panicking_speed_page_follows_again() {
         |e| matches!(e, Event::SpeedProgress { view } if !view.start_enabled),
     )
     .await;
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn persistent_speed_watch_panic_is_said_once() {
+    let svc = FakeService::start(Replies::default()).await;
+    svc.snapshots.send_replace(connected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
+    )
+    .await;
+    events.lock().unwrap().clear();
+    // The next three wake-ups panic: the first after this snapshot, then the first of each of
+    // the next two retries. The page changes (Start turns off), so `show` sends it at last.
+    cellglide_native::testing::panic_speed_watch(&rt, 3);
+    svc.snapshots.send_replace(disconnected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if !view.start_enabled),
+    )
+    .await;
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::Fault { .. })),
+        1,
+        "{:#?}",
+        events.lock().unwrap()
+    );
+    events.lock().unwrap().clear();
+    // Once a page went out, a panic is news again.
+    cellglide_native::testing::panic_speed_watch(&rt, 1);
+    svc.snapshots.send_replace(connected_snapshot());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
+    )
+    .await;
+    assert_eq!(
+        count(&events, |e| matches!(e, Event::Fault { .. })),
+        1,
+        "{:#?}",
+        events.lock().unwrap()
+    );
     rt.shutdown();
 }
 
@@ -855,13 +900,20 @@ async fn diagnostics_prepare_trims_the_contact() {
         note: "".into(),
     });
     let ReplyResult::Ok {
-        value: ReplyValue::Diagnostics { file_name, json },
+        value:
+            ReplyValue::Diagnostics {
+                file_name,
+                json,
+                size_text,
+            },
     } = reply_of(&events, id).await
     else {
         panic!("expected Diagnostics")
     };
     assert!(file_name.starts_with("cellglide-diagnostics-"));
     assert_eq!(json, "{}");
+    // The Linux window rounds to kilobytes: two bytes read "0 KB".
+    assert!(size_text.contains("0 KB"), "{size_text}");
     let contact = Contact {
         email: Some("a@b.co".into()),
         note: None,

@@ -25,12 +25,12 @@ pub fn panic_subscription(runtime: &crate::runtime::Runtime, times: u32) {
         .store(times, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// The speed page's watch panics the next time it wakes up.
-pub fn panic_speed_watch_next(runtime: &crate::runtime::Runtime) {
+/// The speed page's watch panics each of the next `times` times it wakes up.
+pub fn panic_speed_watch(runtime: &crate::runtime::Runtime, times: u32) {
     let speed = &runtime.context().speed;
     speed
-        .panic_next
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+        .panic_left
+        .store(times, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Events delivered by calling `sink` right away on the emitting thread.

@@ -21,6 +21,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
 {
     string? _json;
     string? _fileName;
+    string? _sizeText;
     string? _code;
     string? _savedPath;
     bool _previewed;
@@ -69,6 +70,13 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         private set => SetProperty(ref _fileName, value);
     }
 
+    /// <summary>The line under the preview ("123 KB in total"), from the DLL with <see cref="Json"/>; null with it.</summary>
+    public string? SizeText
+    {
+        get => _sizeText;
+        private set => SetProperty(ref _sizeText, value);
+    }
+
     /// <summary>The report code the server gave back.</summary>
     public string? Code
     {
@@ -101,6 +109,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
     {
         Json = null;
         FileName = null;
+        SizeText = null;
         Previewed = false;
         _builtFrom = null;
     }
@@ -154,6 +163,7 @@ public sealed class DiagnosticsViewModel : CoreViewModel
         Previewed = false;
         Json = bundle.Json;
         FileName = bundle.FileName;
+        SizeText = bundle.SizeText;
         _builtFrom = input;
         Code = null;
         SavedPath = null;

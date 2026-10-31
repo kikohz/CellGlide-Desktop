@@ -258,6 +258,8 @@ gui:
   waiting_service: "Connecting to the CellGlide service…"
   service_gone: "The CellGlide service stopped"
   service_timeout: "The CellGlide service isn't responding. Try again later."
+  badge_warning: "Needs attention"
+  badge_critical: "Problem"
   state:
     waiting_usb:
       title: "Waiting for USB"
