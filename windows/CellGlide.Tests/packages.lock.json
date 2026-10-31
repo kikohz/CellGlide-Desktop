@@ -135,6 +135,12 @@
           "CommunityToolkit.Mvvm": "[8.4.2, )"
         }
       },
+      "cellglide.probe": {
+        "type": "Project",
+        "dependencies": {
+          "CellGlide.Core": "[1.0.0, )"
+        }
+      },
       "CommunityToolkit.Mvvm": {
         "type": "CentralTransitive",
         "requested": "[8.4.2, )",

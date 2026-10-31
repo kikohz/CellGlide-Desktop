@@ -11,7 +11,8 @@
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <!-- Where cellglide_native.dll is found: cargo's debug output unless given with -p:CellGlideNativeDir=... -->
     <CellGlideNativeDir Condition="'$(CellGlideNativeDir)' == ''">$(MSBuildThisFileDirectory)..\target\debug\</CellGlideNativeDir>
-    <!-- A directory given on the command line may lack its trailing slash. -->
-    <CellGlideNativeDll>$([MSBuild]::EnsureTrailingSlash('$(CellGlideNativeDir)'))cellglide_native.dll</CellGlideNativeDll>
+    <!-- A relative directory is taken from windows\ (this file's directory), whichever project or
+         working directory the build starts from; it may also lack its trailing slash. -->
+    <CellGlideNativeDll>$([MSBuild]::EnsureTrailingSlash($([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildThisFileDirectory)', '$(CellGlideNativeDir)'))))))cellglide_native.dll</CellGlideNativeDll>
   </PropertyGroup>
 </Project>
