@@ -280,6 +280,112 @@ public class DesktopTests
         await life.QuitAsync(TimeSpan.FromSeconds(1));
         Assert.Equal(1, core.DisposeCount);
     }
+
+    // ---- Task 5: the tray icon file, its GUID, where the panel goes, chart geometry ----
+
+    static readonly PixelRect Screen = new(0, 0, 1920, 1032);
+
+    [Fact]
+    public void Panel_sits_above_a_bottom_taskbar_icon() =>
+        Assert.Equal(new PixelPoint(1542, 560), PanelPlacement.Place(new PixelRect(1700, 1040, 1724, 1072), Screen, TaskbarEdge.Bottom, 340, 460, 12));
+
+    [Fact]
+    public void Panel_is_clamped_inside_the_work_area() =>
+        Assert.Equal(new PixelPoint(1568, 560), PanelPlacement.Place(new PixelRect(1880, 1040, 1904, 1072), Screen, TaskbarEdge.Bottom, 340, 460, 12));
+
+    [Fact]
+    public void Panel_without_an_icon_goes_to_the_corner() =>
+        Assert.Equal(new PixelPoint(1568, 560), PanelPlacement.Place(null, Screen, TaskbarEdge.Bottom, 340, 460, 12));
+
+    [Fact]
+    public void Panel_beside_a_top_or_left_taskbar()
+    {
+        Assert.Equal(new PixelPoint(1542, 60), PanelPlacement.Place(new PixelRect(1700, 8, 1724, 40), new PixelRect(0, 48, 1920, 1080), TaskbarEdge.Top, 340, 460, 12));
+        Assert.Equal(new PixelPoint(60, 608), PanelPlacement.Place(new PixelRect(8, 900, 40, 924), new PixelRect(48, 0, 1920, 1080), TaskbarEdge.Left, 340, 460, 12));
+    }
+
+    [Fact]
+    public void Panel_beside_a_right_taskbar_and_in_the_other_corners()
+    {
+        var work = new PixelRect(0, 0, 1872, 1080);
+        Assert.Equal(new PixelPoint(1520, 422), PanelPlacement.Place(new PixelRect(1880, 640, 1912, 664), work, TaskbarEdge.Right, 340, 460, 12));
+        // No icon: the corner at that edge's end (bottom right; bottom left for a left taskbar).
+        Assert.Equal(new PixelPoint(1520, 608), PanelPlacement.Place(null, work, TaskbarEdge.Right, 340, 460, 12));
+        Assert.Equal(new PixelPoint(1520, 12), PanelPlacement.Place(null, work, TaskbarEdge.Top, 340, 460, 12));
+        Assert.Equal(new PixelPoint(60, 608), PanelPlacement.Place(null, new PixelRect(48, 0, 1920, 1080), TaskbarEdge.Left, 340, 460, 12));
+    }
+
+    [Fact]
+    public void Panel_on_a_left_monitor_with_negative_coordinates() =>
+        Assert.Equal(new PixelPoint(-352, 568), PanelPlacement.Place(null, new PixelRect(-1920, 0, 0, 1040), TaskbarEdge.Bottom, 340, 460, 12));
+
+    [Fact]
+    public void Panel_taller_than_the_work_area_starts_at_the_top() =>
+        Assert.Equal(0, PanelPlacement.Place(null, new PixelRect(0, 0, 800, 400), TaskbarEdge.Bottom, 340, 460, 12).Y);
+
+    [Fact]
+    public void Panel_wider_than_the_work_area_starts_at_the_left() =>
+        Assert.Equal(-100, PanelPlacement.Place(new PixelRect(0, 500, 20, 520), new PixelRect(-100, 0, 100, 1000), TaskbarEdge.Bottom, 340, 460, 12).X);
+
+    [Fact]
+    public void Tray_icon_follows_service_gone_chrome()
+    {
+        var gone = Samples.Chrome();                                  // service_gone_stopped.json
+        Assert.Equal(@"Assets\Tray\cellglide-idle-dark.ico", TrayIcons.FileFor(gone.Tray, lightTaskbar: false));
+        var connected = Samples.Overview().Chrome.Tray;               // active
+        Assert.Equal(@"Assets\Tray\cellglide-active-light.ico", TrayIcons.FileFor(connected with { Alert = false }, lightTaskbar: true));
+        Assert.Equal(@"Assets\Tray\cellglide-active-alert-dark.ico", TrayIcons.FileFor(connected with { Alert = true }, lightTaskbar: false));
+    }
+
+    [Fact]
+    public void Every_tray_icon_file_is_in_the_app()
+    {
+        var assets = Path.Combine(AppSources.AppDir, "Assets", "Tray");
+        foreach (var active in new[] { false, true })
+        {
+            foreach (var alert in new[] { false, true })
+            {
+                foreach (var light in new[] { false, true })
+                {
+                    var file = TrayIcons.FileFor(new TrayLook(active, alert, false, ""), light);
+                    Assert.True(File.Exists(Path.Combine(AppSources.AppDir, file)), file);
+                }
+            }
+        }
+        Assert.Equal(8, Directory.GetFiles(assets, "*.ico").Length);
+        Assert.Equal(@"Assets\Tray\cellglide-alert-light.ico", TrayIcons.FileFor(new TrayLook(false, true, true, ""), lightTaskbar: true));
+    }
+
+    [Fact]
+    public void Tray_guid_is_stable_per_path()
+    {
+        var a = TrayIdentity.GuidFor(@"C:\Program Files\CellGlide\app\CellGlide.exe");
+        Assert.Equal(a, TrayIdentity.GuidFor(@"c:\program files\cellglide\APP\CellGlide.exe"));
+        Assert.NotEqual(a, TrayIdentity.GuidFor(@"D:\dev\CellGlide.exe"));
+        Assert.Equal('5', a.ToString()[14]);
+        // Python: uuid.uuid5(UUID('6f1d3a52-8c2e-4b7a-9e43-2d5c0b8f71a4'), r'C:\PROGRAM FILES\CELLGLIDE\APP\CELLGLIDE.EXE')
+        Assert.Equal(new Guid("8f470192-ae5d-5fd6-b76e-2489ab95fcd2"), a);
+        // The same file named through ".." is the same icon.
+        Assert.Equal(a, TrayIdentity.GuidFor(@"C:\Program Files\CellGlide\x\..\app\CellGlide.exe"));
+    }
+
+    [Fact]
+    public void Geometry_flips_into_the_box()
+    {
+        var pts = Geometry.Plot([new CurvePoint(0, 0), new CurvePoint(1, 1)], 200, 50);
+        Assert.Equal(new[] { new PlotPoint(0, 50), new PlotPoint(200, 0) }, pts);
+        Assert.Equal(new StripSpan(150, 1), Geometry.Strip(new StripCell(500, 0.5f, Tone.Green, 0.6f), 300));
+    }
+
+    [Fact]
+    public void Geometry_of_a_trail_run_strips_and_ticks()
+    {
+        TrailPoint[] run = [new(0.5f, 1, 0.25f), new(1, 0, 0.5f)];
+        Assert.Equal(new[] { new PlotPoint(50, 0), new PlotPoint(100, 40) }, Geometry.Plot(run, upload: false, 100, 40));
+        Assert.Equal(new[] { new PlotPoint(50, 30), new PlotPoint(100, 20) }, Geometry.Plot(run, upload: true, 100, 40));
+        Assert.Equal(new StripSpan(0, 600), Geometry.Strip(new StripCell(0, 1000, Tone.Gray, 1), 600));
+        Assert.Equal(150, Geometry.Tick(0.25, 600));
+    }
 }
 
 /// <summary>A Run key in memory.</summary>

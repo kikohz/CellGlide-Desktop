@@ -243,6 +243,20 @@ Speed test finished
 - **DLL 起不来（fix round 1）**：把 Debug 输出复制一份、删掉 `cellglide_native.dll` 后启动（会话 1）：弹出标题 `CellGlide` 的错误框，内容为「The CellGlide installation is incomplete. Please reinstall CellGlide.」加「CellGlide 安装不完整，请重新安装 CellGlide。」；点掉后进程以退出码 2 结束。
 - **早到的转发（fix round 1）**：以 `--tray` 启动后 300 ms 就不带参数再启动一次：第二个进程以 0 退出，进程数 1，窗口出现（标题 `CellGlide`）。`Activated` 在 `Application.Start` 之前就订阅，没等到 `OnLaunched` 的转发会被记住，之后补上。
 
+### 托盘与面板（W3 Task 5，2026-10-31）
+
+- **图标**：`python -I scripts/gen-windows-icons.py` 生成 `windows/CellGlide.App/Assets/AppIcon.ico` 和 `Assets/Tray/cellglide-{idle,active,alert,active-alert}-{light,dark}.ico`（托盘每个 16/20/24/32/40/48 六帧，帧内容是 PNG）。`--check` 在内存里重新生成，与已提交文件逐字节比较：一致退出 0；往一个 .ico 末尾加一个字节后退出 1，并指出是哪个文件。写 PNG 时用不压缩的 deflate 存储块，所以输出不受 zlib 版本影响。这一步已接进 `check-windows-core.ps1`。`gen-about-icon.py` 把 PNG 解码抽成了 `decode_png`，重新生成的 `about-icon.rgba` 和 `.fnv1a64` 与原来逐字节相同（SHA-256 不变）。
+- **exe 图标**：从发布出来的 `CellGlide.exe` 用 `ExtractAssociatedIcon` 取出来的就是新图标（蓝色 C 加信号格）。
+- **实测**（会话 1 的临时计划任务里运行，`CELLGLIDE_LANG=en`，`--tray` 启动；Debug 构建和 AOT 发布版各跑一遍，结果相同；任务都已删除，没有留下进程）：
+  - 托盘图标注册：启动后 0.2–1.6 秒内 `Shell_NotifyIconGetRect`（按 exe 路径算出的 GUID）返回 S_OK，位置 1573,1020–1613,1080（物理像素，任务栏右侧）。
+  - 左键（向图标的消息窗口发 NOTIFYICON_VERSION_4 的 WM_LBUTTONDOWN/UP）：面板出现在 1381,430–1806,1005，即 425×575 物理像素（DPI 120 时的 340×460 DIP）。用同一套规则独立算出的期望位置完全一致：工作区 0,0–1920,1020，任务栏在底部，横向以图标为中心，离工作区底边 15 px（12 DIP）。
+  - 面板内容（UI Automation 读出）。未连接时：`Disconnected`、`Disconnected. Click Connect to use the phone's network again.`、按钮 `Connect`、`Open CellGlide…`、`Quit CellGlide`。已连接时：标题、说明、`Disconnect and go back to your network`、手机卡片（`Cricket`、`5G NSA`、`iPhone 16e`、`80%`、`↓ 1.4 KB/s`、`↑ 0.1 KB/s`、`Network quality Excellent · 65 ms · This session 12.5 MB`、电池行），健康行 `Connection OK · last drop 09:28 (10 sec)`。这些与 `cellglide.exe status` 的内容一致。
+  - 再点一次图标，面板隐藏；连发两次点击，最后只有一个面板窗口（H.NotifyIcon 用同一个单击计时器，紧挨着的第二次点击会把它重置，所以两次只触发一次切换）；按 Esc（WM_KEYDOWN 发给面板的焦点窗口）后面板隐藏。
+  - 右键：原生菜单依次是 `CellGlide 1.0.0`（不可点）、分隔线、`Connect`、`Open CellGlide`、分隔线、`Quit`，与 `chrome.Menu` 一致。选 `Open CellGlide`，主窗口出现；WM_CLOSE 后主窗口隐藏，进程还在。面板的 `Open CellGlide…`（UI Automation Invoke）：面板隐藏，主窗口出现。
+  - 菜单的 `Connect`：1.0 秒后 `cellglide.exe status` 显示 Connected，菜单项变成 `Disconnect`。再选 `Disconnect`：1.0 秒后断开，菜单项变回 `Connect`。前后网络快照 `-Compare` 结果为 `identical`（基线当天新拍）。连接只持续了约 8 秒，`This session` 两次读数都是 12.5 MB，流量远低于 1 MB。
+  - 退出：菜单的 `Quit` 和面板的 `Quit CellGlide` 都试过，进程在 0.5 秒内退出，退出码 0；之后 `Shell_NotifyIconGetRect` 失败，说明图标已经移除。
+- **没能用眼睛看**：会话 1 一直锁屏，截图要么全黑，要么是锁屏画面。所以托盘图标和面板的外观、真鼠标点击、失去激活后关闭（以及 300 ms 内的那次点击不会重新打开）、图标放进溢出区、切换浅色/深色后托盘图标跟着换，这几项都要等有人看着屏幕时再确认。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

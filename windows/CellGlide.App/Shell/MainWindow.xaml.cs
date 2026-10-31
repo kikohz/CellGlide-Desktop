@@ -38,6 +38,10 @@ public sealed partial class MainWindow : Window
     static void OnClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         // Decision 9: closing the window only hides it; quitting is the tray's (and About's) Quit.
+        if (App.Current.IsQuitting)
+        {
+            return;
+        }
         args.Cancel = true;
         sender.Hide();
     }

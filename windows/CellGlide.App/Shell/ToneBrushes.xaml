@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The DLL's tones (cg_ipc::describe::ui::Tone) as brushes, with the RGB of cg-gui's
+    widgets/kit.rs (the Mac's system colours), so dots and badges read the same on every platform.
+    Light and Dark use the same colours; High Contrast uses the system's text colour, so a dot is
+    never a colour the user's contrast theme does not allow. Show.Brush(Tone) looks them up.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="ToneGreenBrush" Color="#34C759" />
+            <SolidColorBrush x:Key="ToneOrangeBrush" Color="#FF9500" />
+            <SolidColorBrush x:Key="ToneRedBrush" Color="#FF3B30" />
+            <SolidColorBrush x:Key="ToneBlueBrush" Color="#007AFF" />
+            <SolidColorBrush x:Key="TonePurpleBrush" Color="#AF52DE" />
+            <SolidColorBrush x:Key="ToneGrayBrush" Color="#8E8E93" />
+            <!-- The phone card's low-power-mode battery (cg-gui phone_card.rs YELLOW). -->
+            <SolidColorBrush x:Key="LowPowerBrush" Color="#FFCC00" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+            <SolidColorBrush x:Key="ToneGreenBrush" Color="#34C759" />
+            <SolidColorBrush x:Key="ToneOrangeBrush" Color="#FF9500" />
+            <SolidColorBrush x:Key="ToneRedBrush" Color="#FF3B30" />
+            <SolidColorBrush x:Key="ToneBlueBrush" Color="#007AFF" />
+            <SolidColorBrush x:Key="TonePurpleBrush" Color="#AF52DE" />
+            <SolidColorBrush x:Key="ToneGrayBrush" Color="#8E8E93" />
+            <SolidColorBrush x:Key="LowPowerBrush" Color="#FFCC00" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+            <SolidColorBrush x:Key="ToneGreenBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ToneOrangeBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ToneRedBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ToneBlueBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="TonePurpleBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ToneGrayBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
+            <SolidColorBrush x:Key="LowPowerBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

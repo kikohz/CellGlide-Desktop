@@ -8,7 +8,8 @@
 #   4. dotnet test of windows/CellGlide.Tests against that DLL;
 #   5. scripts/tests/test-check-nuget-licenses.ps1 (the license script against fixtures), then
 #      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
-#      license is allowed or reviewed).
+#      license is allowed or reviewed);
+#   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
 # -Release takes the DLL from target\release instead of target\debug.
 # -Publish then builds cg-ffi in release and publishes CellGlide.App (Native AOT, self-contained) for
 # this machine's architecture, and checks that the publish folder (the project's PublishDir) has
@@ -75,6 +76,32 @@ try {
 
     Invoke-Step 'NuGet licenses' {
         powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'check-nuget-licenses.ps1') -Check
+    }
+
+    # The committed .ico files are what scripts/gen-windows-icons.py makes (pure Python, the same on
+    # every machine). Python 3: the py launcher, else python3 or python on PATH (not the Store stubs
+    # in WindowsApps), else the newest per-user install.
+    $python = $null
+    $pyLauncher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pyLauncher) {
+        $python = @($pyLauncher.Source, '-3')
+    } else {
+        $found = Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
+        if (-not $found) {
+            $found = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python3*\python.exe') -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+        }
+        if ($found) { $python = @($(if ($found.Source) { $found.Source } else { $found.FullName })) }
+    }
+    if (-not $python) {
+        Write-Host 'FAILED: Python 3 is needed to check the icons (scripts/gen-windows-icons.py --check).'
+        exit 1
+    }
+    Invoke-Step 'Windows icons match scripts/gen-windows-icons.py' {
+        $exe = $python[0]
+        $pre = @($python | Select-Object -Skip 1)
+        & $exe @pre -I (Join-Path $PSScriptRoot 'gen-windows-icons.py') --check
     }
 
     if ($Publish) {

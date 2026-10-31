@@ -22,6 +22,8 @@
     <IsPackable>false</IsPackable>
     <!-- The few user32 calls (LibraryImport) generate unsafe marshalling code. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Made by scripts/gen-windows-icons.py, as are the tray icons in Assets\Tray. -->
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <!-- With no -r, build for this machine's architecture, so `dotnet build CellGlide.sln` works as is. -->
@@ -48,6 +50,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CellGlide.Core\CellGlide.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The icons next to the exe (the tray loads them by path); the About page's icon is
+       packaging/icons/128.png itself. -->
+  <ItemGroup>
+    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\packaging\icons\128.png" Link="Assets\AppIcon-128.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tray panel, after cg-gui's panel.rs view: state, the connect button, the phone, the
+     connection's health, and a way into the main window. Every text is the DLL's. -->
+<Window
+    x:Class="CellGlide.App.Tray.PanelWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:c="using:CellGlide.App.Controls"
+    xmlns:h="using:CellGlide.App.Hosting"
+    xmlns:s="using:CellGlide.App.Shell">
+    <Grid x:Name="Root" KeyDown="OnRootKeyDown">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Padding="12" Spacing="10">
+                <!-- The state: a dot, the title and its explanation. -->
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="10" Height="10" Margin="0,4,0,0" VerticalAlignment="Top"
+                             Fill="{x:Bind StatusBrush(Shell.Overview), Mode=OneWay}" />
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap"
+                                   Text="{x:Bind TitleOf(Shell.Overview, Shell.ServiceDown), Mode=OneWay}" />
+                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="{x:Bind DetailOf(Shell.Overview), Mode=OneWay}"
+                                   Visibility="{x:Bind s:Show.Visible(Shell.Overview), Mode=OneWay}" />
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{x:Bind ErrorBrush}"
+                           Text="{x:Bind Shell.Error, Mode=OneWay}"
+                           Visibility="{x:Bind s:Show.Visible(Shell.Error), Mode=OneWay}" />
+
+                <Button x:Name="MainButton" HorizontalAlignment="Stretch" Padding="10,6,10,6"
+                        Content="{x:Bind ButtonLabel(Shell.Overview, Shell.Chrome), Mode=OneWay}"
+                        Style="{x:Bind ButtonStyle(Shell.Overview), Mode=OneWay}"
+                        Command="{x:Bind Shell.ToggleCommand}" />
+
+                <c:PhoneCard Compact="True" View="{x:Bind PhoneOf(Shell.Overview), Mode=OneWay}" />
+
+                <!-- The connection's health; opens the history. -->
+                <Button x:Name="HealthButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                        Padding="0,2,0,2" Background="Transparent" BorderThickness="0"
+                        Visibility="{x:Bind HealthVisible(Shell.Overview), Mode=OneWay}"
+                        Click="OnHealthClick">
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse Width="8" Height="8" VerticalAlignment="Center"
+                                 Fill="{x:Bind HealthBrush(Shell.Overview), Mode=OneWay}" />
+                        <TextBlock Grid.Column="1" FontSize="13" TextWrapping="Wrap" VerticalAlignment="Center"
+                                   Text="{x:Bind HealthLine(Shell.Overview), Mode=OneWay}" />
+                        <FontIcon Grid.Column="2" FontSize="10" Glyph="&#xE76C;" VerticalAlignment="Center"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                </Button>
+
+                <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+                <StackPanel Spacing="0">
+                    <Button x:Name="OpenButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Padding="6,4,6,4" Background="Transparent" BorderThickness="0"
+                            Content="{x:Bind h:L.T('panel.open')}" Click="OnOpenClick" />
+                    <Button x:Name="QuitButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Padding="6,4,6,4" Background="Transparent" BorderThickness="0"
+                            Content="{x:Bind h:L.T('panel.quit')}" Click="OnQuitClick" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CellGlide.App.Hosting;
 using CellGlide.App.Shell;
+using CellGlide.App.Tray;
 using CellGlide.Core.Desktop;
 using CellGlide.Core.Dispatch;
 using CellGlide.Core.Models;
@@ -26,6 +27,10 @@ public partial class App : Application
     DispatcherQueue? _queue;
     AppLifetime? _lifetime;
     MainWindow? _window;
+    TrayHost? _tray;
+    PanelWindow? _panel;
+    Guid _trayId;
+    Task? _quit;
 
     public App(LaunchOptions options)
     {
@@ -45,6 +50,9 @@ public partial class App : Application
     public SpeedViewModel Speed { get; private set; } = null!;
 
     public LeakViewModel Leak { get; private set; } = null!;
+
+    /// <summary>Set once quitting has begun: windows close for real, nothing opens any more.</summary>
+    public bool IsQuitting { get; private set; }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -72,6 +80,9 @@ public partial class App : Application
         Hub.PhonePlugged += OnPhonePlugged;
         Hub.Fault += message => Debug.WriteLine("CellGlide: fault: " + message);
 
+        _trayId = TrayIdentity.GuidFor(Environment.ProcessPath!);
+        _tray = new TrayHost(_trayId, Shell, queue, TogglePanel, () => ShowWindow(null), QuitAsync);
+
         Observe(Shell.SubscribeAsync(), "subscribe");
         Observe(Settings.LoadAsync(), "loading preferences");
         if (!_options.Tray)
@@ -92,20 +103,51 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Opens (creating it the first time) or brings forward the main window.</summary>
-    void ShowWindow(Section? section)
+    /// <summary>Opens (creating it the first time) or brings forward the main window; not while quitting.</summary>
+    internal void ShowWindow(Section? section)
     {
+        if (IsQuitting)
+        {
+            return;
+        }
         _window ??= new MainWindow(L.T("gui.title"));
         _window.ShowAt(section);
     }
 
-    /// <summary>Quits: cancels a running test, stops the DLL, then exits (Task 5 also removes the tray icon).</summary>
-    public async Task QuitAsync()
+    /// <summary>The tray click: opens or closes the panel (created the first time); not while quitting.</summary>
+    void TogglePanel()
     {
-        // Task 5: remove the tray icon and hide the window first, and ignore Activated and
-        // PhonePlugged from here on, so nothing reopens during the cancel wait.
+        if (IsQuitting)
+        {
+            return;
+        }
+        _panel ??= new PanelWindow(Shell, _trayId, ShowWindow, QuitAsync);
+        _panel.Toggle();
+    }
+
+    /// <summary>
+    /// Quits, once however often asked: takes the tray icon away and hides the windows first (from
+    /// here on nothing reopens them: <see cref="IsQuitting"/>), cancels a running test, stops the
+    /// DLL, then exits.
+    /// </summary>
+    public Task QuitAsync()
+    {
+        if (_quit is null)
+        {
+            // Before anything else, so Exit() closing the windows is not taken for a user's close.
+            IsQuitting = true;
+            _quit = QuitInOrderAsync();
+        }
+        return _quit;
+    }
+
+    async Task QuitInOrderAsync()
+    {
         try
         {
+            _tray?.Dispose();
+            _panel?.Dismiss();
+            _window?.AppWindow.Hide();
             if (_lifetime is not null)
             {
                 await _lifetime.QuitAsync(CancelWait);

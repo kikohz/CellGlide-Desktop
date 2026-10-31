@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CellGlide.Core.Dispatch;
 using CellGlide.Core.Models;
 using CellGlide.Core.ViewModels;
@@ -27,6 +29,33 @@ public class ViewModelTests
         core.Raise(new StateEvent(Samples.Overview()));
         Assert.Null(shell.ServiceDown);
     }
+
+    [Fact]
+    public void Chrome_follows_state_and_service_gone()
+    {
+        var (core, hub) = Fake();
+        var shell = new ShellViewModel(hub);
+        var changed = new List<string?>();
+        shell.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        Assert.Null(shell.Chrome);
+        core.Raise(new StateEvent(Samples.Overview()));
+        Assert.True(SameJson(Samples.Overview().Chrome, shell.Chrome!));
+        Assert.Contains(nameof(ShellViewModel.Chrome), changed);
+        changed.Clear();
+        core.Raise(new ServiceGoneEvent("gone", false, Samples.Chrome()));
+        Assert.True(SameJson(Samples.Chrome(), shell.Chrome!));
+        Assert.Contains(nameof(ShellViewModel.Chrome), changed);
+        changed.Clear();
+        core.Raise(new StateEvent(Samples.Overview()));
+        Assert.True(SameJson(Samples.Overview().Chrome, shell.Chrome!));
+        Assert.Contains(nameof(ShellViewModel.Chrome), changed);
+    }
+
+    // ChromeView's lists are IReadOnlyList (compared by reference) and each sample read is a new
+    // instance, so compare by JSON meaning.
+    static bool SameJson(ChromeView a, ChromeView b) => JsonNode.DeepEquals(
+        JsonSerializer.SerializeToNode(a, CoreJsonContext.Default.ChromeView),
+        JsonSerializer.SerializeToNode(b, CoreJsonContext.Default.ChromeView));
 
     [Fact]
     public async Task Toggle_sends_the_toggle_command()
