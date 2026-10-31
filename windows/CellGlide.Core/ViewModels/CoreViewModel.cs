@@ -22,7 +22,23 @@ public abstract class CoreViewModel(EventHub hub) : ObservableObject
     protected async Task<ReplyValue?> RunAsync(Command command)
     {
         Error = null;
-        switch (await Hub.SendAsync(command))
+        ReplyResult result;
+        try
+        {
+            result = await Hub.SendAsync(command);
+        }
+        catch (OperationCanceledException)
+        {
+            // The hub was disposed: the app is closing, nothing to tell the user.
+            return null;
+        }
+        catch (Exception e)
+        {
+            // The reply could not be handed to the UI thread.
+            Error = Hub.Tr("reason.internal", new Dictionary<string, string> { ["detail"] = e.Message });
+            return null;
+        }
+        switch (result)
         {
             case ReplyOk ok:
                 return ok.Value;

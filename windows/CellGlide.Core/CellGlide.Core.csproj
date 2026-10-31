@@ -11,6 +11,11 @@
     <PackageReference Include="CommunityToolkit.Mvvm" />
   </ItemGroup>
 
+  <!-- The native tests check the DLL's return codes against NativeMethods' constants. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="CellGlide.Tests" />
+  </ItemGroup>
+
   <!-- The Rust side: built by `cargo build -p cg-ffi`, copied next to whatever references this project.
        Always, not PreserveNewest: switching between the debug and release DLL must not keep the newer one. -->
   <ItemGroup>

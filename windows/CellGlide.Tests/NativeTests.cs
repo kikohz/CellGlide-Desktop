@@ -41,7 +41,7 @@ public class NativeTests
     {
         using var core = NativeCore.Start("en");
         var refused = Assert.Throws<InvalidOperationException>(() => NativeCore.Start("en"));
-        Assert.Contains("1", refused.Message);
+        Assert.Equal($"cg_init returned {NativeMethods.CG_ALREADY}", refused.Message);
     }
 
     [Fact]
@@ -62,16 +62,47 @@ public class NativeTests
     }
 
     [Fact]
-    public async Task Native_system_language_starts_and_events_stop_after_dispose()
+    public async Task Native_system_language_starts()
     {
-        var events = 0;
-        var core = NativeCore.Start("");
-        core.EventReceived += _ => Interlocked.Increment(ref events);
+        using var core = NativeCore.Start("");
         var hub = new EventHub(core, new InlineDispatcher());
         Assert.IsType<ReplyOk>(await hub.SendAsync(new SetLangCommand("en")).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
-        core.Dispose();
-        var after = Volatile.Read(ref events);
-        await Task.Delay(200, TestContext.Current.CancellationToken);
-        Assert.Equal(after, Volatile.Read(ref events));
+    }
+
+    [Fact]
+    public async Task Native_events_stop_after_dispose()
+    {
+        var events = 0;
+        var firstPush = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var core = NativeCore.Start("en");
+        core.EventReceived += ev =>
+        {
+            Interlocked.Increment(ref events);
+            // State, or ServiceGone when the service is not there: events the DLL sends on its own.
+            if (ev is StateEvent or ServiceGoneEvent)
+            {
+                firstPush.TrySetResult();
+            }
+        };
+        try
+        {
+            var hub = new EventHub(core, new InlineDispatcher());
+            Assert.IsType<ReplyOk>(await hub.SendAsync(new SubscribeCommand()).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+            await firstPush.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.True(Volatile.Read(ref events) >= 2);
+            // Keep replies queued in the DLL right up to the shutdown, so that callbacks would
+            // still be coming if cg_shutdown let any through after it returned.
+            for (var i = 0; i < 200; i++)
+            {
+                Assert.NotEqual(0UL, core.Send(new GetPrefsCommand()));
+            }
+        }
+        finally
+        {
+            core.Dispose();
+        }
+        var atDispose = Volatile.Read(ref events);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        Assert.Equal(atDispose, Volatile.Read(ref events));
     }
 }

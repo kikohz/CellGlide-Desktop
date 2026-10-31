@@ -19,4 +19,15 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!--
+    No test telemetry, however the tests are run. xunit.v3 brings in Microsoft.Testing.Extensions.Telemetry,
+    which registers itself through this builder hook (its buildMultiTargeting props); removing the hook keeps
+    it out of the generated entry point, so the test executable never loads it. The opt-out variable that
+    extension documents is also passed to the test process when it is started by dotnet test.
+  -->
+  <ItemGroup>
+    <TestingPlatformBuilderHook Remove="98058041-B5B6-4A75-9834-58E6DF796A22" />
+    <TestingPlatformEnvironmentVariable Include="TESTINGPLATFORM_TELEMETRY_OPTOUT" Value="1" />
+  </ItemGroup>
+
 </Project>

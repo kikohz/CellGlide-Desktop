@@ -1,7 +1,8 @@
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1 [-Release]
 #
 # The C# side of the Windows app (windows/CellGlide.Core, windows/CellGlide.Tests):
-#   1. cargo build -p cg-ffi (cellglide_native.dll, and csbindgen rewrites NativeMethods.g.cs);
+#   1. cargo build -p cg-ffi (cellglide_native.dll, and csbindgen rewrites NativeMethods.g.cs; build.rs
+#      is touched first, so its build script always runs, even on a target that was built before);
 #   2. the committed NativeMethods.g.cs must be what the build wrote;
 #   3. dotnet build of windows/CellGlide.sln (warnings are errors), with locked package versions;
 #   4. dotnet test of windows/CellGlide.Tests against that DLL.
@@ -30,6 +31,11 @@ function Invoke-Step([string]$name, [scriptblock]$command) {
 
 Push-Location $root
 try {
+    # cargo reruns build.rs only when ffi.rs, codes.rs or build.rs changed. A committed
+    # NativeMethods.g.cs that went stale without them changing would pass unnoticed, so give
+    # build.rs a new modification time (its content is untouched) to make csbindgen run now.
+    (Get-Item (Join-Path $root 'crates\cg-ffi\build.rs')).LastWriteTime = Get-Date
+
     if ($Release) {
         Invoke-Step 'cargo build -p cg-ffi --release' { cargo build -p cg-ffi --locked --release }
         $nativeDir = Join-Path $root 'target\release'

@@ -181,6 +181,71 @@ public class DispatchTests
         Assert.Equal("reason.internal", Assert.IsType<ReplyErr>(reply).Message);
     }
 
+    [Fact]
+    public async Task A_core_that_is_not_running_answers_through_the_dispatcher()
+    {
+        var ui = new HeldDispatcher();
+        var hub = new EventHub(new StoppedCore(), ui);
+        var send = hub.SendAsync(new GetPrefsCommand());
+        Assert.False(send.IsCompleted);
+        ui.RunAll();
+        var reply = await send.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal("reason.internal", Assert.IsType<ReplyErr>(reply).Message);
+    }
+
+    [Fact]
+    public async Task Dispose_cancels_commands_still_waiting()
+    {
+        var ui = new HeldDispatcher();
+        var core = new FakeCore();
+        var hub = new EventHub(core, ui);
+        var unanswered = hub.SendAsync(new GetPrefsCommand());
+        var posted = hub.SendAsync(new ToggleCommand());
+        // A reply that reached the dispatcher but never ran on the UI thread is cancelled too.
+        core.Raise(new ReplyEvent(core.SentIds[1], new ReplyOk(new DoneValue())));
+        hub.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => unanswered.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        ui.RunAll();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => posted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Sending_after_dispose_is_cancelled_and_sends_nothing()
+    {
+        var core = new FakeCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        hub.Dispose();
+        hub.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => hub.SendAsync(new GetPrefsCommand()).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.Empty(core.Sent);
+        var states = 0;
+        hub.State += _ => states++;
+        core.Raise(new StateEvent(Samples.Overview()));
+        Assert.Equal(0, states);
+    }
+
+    [Fact]
+    public async Task A_reply_the_dispatcher_refuses_faults_its_command()
+    {
+        var core = new FakeCore();
+        var hub = new EventHub(core, new RefusingDispatcher());
+        var send = hub.SendAsync(new GetPrefsCommand());
+        core.Raise(new ReplyEvent(core.SentIds[0], new ReplyOk(new DoneValue())));
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => send.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.Equal("ui thread gone", thrown.Message);
+
+        var inline = new EventHub(new FakeCore(new ReplyOk(new DoneValue())), new RefusingDispatcher());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => inline.SendAsync(new GetPrefsCommand()).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        var stopped = new EventHub(new StoppedCore(), new RefusingDispatcher());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => stopped.SendAsync(new GetPrefsCommand()).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>A dispatcher whose UI thread has gone away.</summary>
+    sealed class RefusingDispatcher : IUiDispatcher
+    {
+        public void Post(Action action) => throw new InvalidOperationException("ui thread gone");
+    }
+
     sealed class StoppedCore : ICore
     {
         public event Action<CoreEvent>? EventReceived

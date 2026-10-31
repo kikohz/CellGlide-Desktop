@@ -189,6 +189,47 @@ public class ViewModelTests
         Assert.Equal(new Prefs(false, false, false), settings.Prefs);
     }
 
+    [Fact]
+    public async Task Speed_start_sends_the_caps_when_set()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var settings = new SettingsViewModel(hub);
+        var speed = new SpeedViewModel(hub, settings);
+        Assert.Null(speed.Caps);
+        core.Raise(new PrefsEvent(new Prefs(true, true, false)));
+        speed.Caps = new SpeedCaps(20_000_000, 10_000_000, 10);
+        await speed.StartCommand.ExecuteAsync(true);
+        Assert.Equal(new SpeedStartCommand(true, true, new SpeedCaps(20_000_000, 10_000_000, 10)), Assert.Single(core.Sent));
+    }
+
+    [Fact]
+    public async Task A_command_cancelled_by_dispose_leaves_no_error()
+    {
+        var (_, hub) = Fake();
+        var checks = new ChecksViewModel(hub);
+        var run = checks.RunCommand.ExecuteAsync(null);
+        hub.Dispose();
+        await run.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Null(checks.Error);
+        Assert.Null(checks.Rows);
+    }
+
+    [Fact]
+    public async Task A_reply_that_cannot_reach_the_ui_is_an_internal_error()
+    {
+        var core = new FakeCore(new ReplyOk(new DoneValue()));
+        var hub = new EventHub(core, new ThrowingDispatcher());
+        var shell = new ShellViewModel(hub);
+        await shell.ToggleCommand.ExecuteAsync(null);
+        // FakeCore's Tr gives back the key.
+        Assert.Equal("reason.internal", shell.Error);
+    }
+
+    sealed class ThrowingDispatcher : IUiDispatcher
+    {
+        public void Post(Action action) => throw new InvalidOperationException("ui thread gone");
+    }
+
     /// <summary>Answers each command, inline, with whatever <see cref="Next"/> is.</summary>
     sealed class ScriptedCore : ICore
     {

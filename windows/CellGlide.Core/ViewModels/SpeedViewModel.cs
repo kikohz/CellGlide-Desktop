@@ -26,6 +26,12 @@ public sealed class SpeedViewModel : CoreViewModel
         private set => SetProperty(ref _view, value);
     }
 
+    /// <summary>
+    /// Limits for a small test, sent with every start; null (the default) is the full test. For
+    /// development and acceptance runs such as the console probe, never set by the app's UI.
+    /// </summary>
+    public SpeedCaps? Caps { get; set; }
+
     /// <summary>Parameter: the user accepted the data warning for this test.</summary>
     public IAsyncRelayCommand<bool> StartCommand { get; }
 
@@ -42,6 +48,6 @@ public sealed class SpeedViewModel : CoreViewModel
             Error = _settings.Error;
             return;
         }
-        await RunAsync(new SpeedStartCommand(prefs.IncludeWifi, confirmed, null));
+        await RunAsync(new SpeedStartCommand(prefs.IncludeWifi, confirmed, Caps));
     }
 }
