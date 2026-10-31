@@ -1,10 +1,19 @@
 <Project>
-  <!-- Central package versions. Every package here is MIT or Apache-2.0. -->
+  <!-- Central package versions. Their licenses are listed in packaging/licenses/nuget.txt by
+       scripts/check-nuget-licenses.ps1 (the Windows App SDK packages are a reviewed exception).
+       The WindowsAppSDK.AI/.ML/.Search and Windows.AI.MachineLearning versions follow what the
+       Microsoft.WindowsAppSDK metapackage asks for: CellGlide.App only references them to exclude them. -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageVersion Include="H.NotifyIcon.WinUI" Version="2.4.1" />
+    <PackageVersion Include="Microsoft.Windows.AI.MachineLearning" Version="2.4.89" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.6.4" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK.AI" Version="2.6.4" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK.ML" Version="2.6.4" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK.Search" Version="2.6.4" />
     <PackageVersion Include="xunit.v3" Version="4.0.2" />
   </ItemGroup>
 </Project>

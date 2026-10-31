@@ -211,6 +211,24 @@ Speed test finished
 - **手机流量**：本任务约 **12.6 MB**（重启前的会话约 0.2 MB，重启后的会话到断开 12.4 MB）。**W2 累计约 111 MB**（预算 300 MB）。W2 没有跑过完整测速。
 - **Ctrl+C（fix round 1）**：Probe 处理 `Console.CancelKeyPress`（`e.Cancel = true`，退回 `ProcessExit` 兜底），信号一到：正在跑的测试先发 `SpeedCancel`/`LeakCancel`，所有等待都结束，`using` 照常释放，所以总会调到 `cg_shutdown`；退出码 130。实机（Probe 在单独的控制台里运行，另一个进程 `AttachConsole` + `GenerateConsoleCtrlEvent` 发 Ctrl+C）：`status` 263 ms 内退出 130；`leak` 在测试进行中（开始约 0.6 秒后）退出 130；`speed-small` 在 iPhone 腿「Checking HTTPS latency…」时收到 Ctrl+C，DLL 随即发出两条腿「Speed test cancelled」，253 ms 内退出 130，手机 `↑↓` 回到 0。这一轮快照前后 `identical`（`snap-f1-before/after.json`），隧道已断开，手机流量约 **0.1 MB**（`This session` 12.4 → 12.5 MB）。W2 累计仍约 111 MB。
 
+## W3 界面
+
+### 工具链与 App 骨架（W3 Task 1，2026-10-31）
+
+- **没有装任何东西**。`dotnet build CellGlide.sln -c Debug` 只靠 NuGet 包（Microsoft.WindowsAppSDK 2.6.4、H.NotifyIcon.WinUI 2.4.1）就编过了，0 警告，不需要 VS 的 `Microsoft.VisualStudio.ComponentGroup.WindowsAppSDK.Cs` 组件。
+- **Native AOT 链接要 `vswhere.exe` 在 PATH 上**。ILCompiler 调 `vcvarsall.bat`，后者按 PATH 找 `vswhere.exe`，找不到时那句报错被拼进了 link.exe 的路径，链接失败。现在 `scripts/dev-env.ps1` 会把 `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer` 加进 PATH。
+- **代理的 shell 在会话 0**（没有交互桌面），WinUI 在那里起不来，`Microsoft.UI.Xaml.dll` 以 0xC000027B（E_ACCESSDENIED）崩溃。界面实测改用临时计划任务（`schtasks /it /ru iloss`），在会话 1 里启动、读标题、关窗口，查完就删掉任务。
+- Debug 运行：窗口标题 `CellGlide`（DLL 的 `gui.title`）；`CloseMainWindow` 后约 0.3 秒退出，退出码 0。
+- **AOT 还是 R2R：用 Native AOT**。`dotnet publish CellGlide.App -c Release -r win-x64 -p:CellGlideNativeDir=..\target\release\`：0 警告（包括 H.NotifyIcon 和 System.Drawing.Icon 被实际用到时），发布出来的 `CellGlide.exe` 标题正确、关窗口约 0.3 秒退出，退出码 0。没有挡路的问题，所以不退回 ReadyToRun。
+- **AOT 下的托盘（临时代码，查完已删）**：用 H.NotifyIcon `TaskbarIcon` 加一个临时 .ico，`ForceCreate` 后 `IsCreated=True`，`Shell_NotifyIconGetRect` 返回 S_OK 和任务栏上的位置（物理像素 1573,1020–1613,1080）。按 shell 点击图标时发的回调消息（NOTIFYICON_VERSION_4 的 WM_LBUTTONDOWN/UP、WM_RBUTTONDOWN/UP），`LeftClickCommand` 和 `RightClickCommand` 都被调到了。没能用眼睛确认：会话 1 截屏是全黑的（屏幕锁定或显示器关着），也没有用真鼠标点。
+- **去掉 AI/ML 组件**：Microsoft.WindowsAppSDK 元包（H.NotifyIcon.WinUI 也依赖它）会带进 `.AI`、`.ML`、`.Search` 和 `Microsoft.Windows.AI.MachineLearning`，发布目录里因此多了 onnxruntime.dll（22 MB）、DirectML.dll（17.8 MB）、语义搜索的 DLL 等。App 工程直接引用这四个包，并设 `ExcludeAssets="all"`，它们的文件就不再进构建和发布。WinUI 窗口和托盘照常工作（上面两条就是在这个配置下测的）。发布目录从 158.0 MB / 294 个文件降到 102.7 MB / 242 个。
+- **发布大小**：win-x64 共 102.7 MB、242 个文件，其中 pdb 27 MB，不含 pdb 75.6 MB；win-arm64 共 109.4 MB，不含 pdb 82.6 MB。
+- **ARM64 只编不跑**：`cargo build -p cg-ffi --release --target aarch64-pc-windows-msvc --locked` 后 `dotnet publish CellGlide.App -c Release -r win-arm64 -p:CellGlideNativeDir=..\target\aarch64-pc-windows-msvc\release\` 成功。`CellGlide.exe` 和 `cellglide_native.dll` 的 PE Machine 都是 0xAA64，锁文件没有变化。
+- **NuGet 许可**：`scripts/check-nuget-licenses.ps1` 生成 `packaging/licenses/nuget.txt`，`-Check` 已接进 `check-windows-core.ps1`。把 nuget.txt 里一个版本号改掉后，`-Check` 退出 1；删掉 `$Reviewed` 的一项后，脚本报「not in the allowed list and not reviewed」并退出 1。
+  - **Windows App SDK 不是宽松许可**（控制者裁定接受）：Microsoft.WindowsAppSDK 元包和各组件包都是 Microsoft Software License Terms，Microsoft.Windows.AI.MachineLearning 是 Windows ML Runtime 的同类条款。条款 §3.a.i 允许把 NuGet 包放到应用旁边的文件随应用分发，自包含部署也算。它们记在 `$Reviewed` 里。WebView2 的许可文件是 BSD-3-Clause 文本，也记在 `$Reviewed` 里。Windows SDK BuildTools / BuildTools.MSIX 标为「build only, not shipped」。
+  - **W4 必须做**：zip 和安装包要带上 Windows App SDK 的许可文本和最终用户条款提示（条款 §3.b.ii 要求分发者和最终用户同意至少同等保护微软的条款），`THIRD-PARTY-LICENSES` 也要列上它。
+- `scripts\check-windows-core.ps1` 与 `-Publish` 都退出 0：115 个测试通过；`-Publish` 的发布目录里有 `CellGlide.exe` 和 `cellglide_native.dll`。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

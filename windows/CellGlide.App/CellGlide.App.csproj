@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The WinUI 3 app: unpackaged, the Windows App SDK and .NET both carried in the publish folder. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>CellGlide</AssemblyName>
+    <RootNamespace>CellGlide.App</RootNamespace>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.22621.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.22621.0</SupportedOSPlatformVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <!-- Unpackaged apps still need resources.pri; the MSIX tooling is what makes it. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- Program.cs has its own Main. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishAot>true</PublishAot>
+    <Platforms>x64;ARM64</Platforms>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- With no -r, build for this machine's architecture, so `dotnet build CellGlide.sln` works as is. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == ''">
+    <RuntimeIdentifier Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">win-arm64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="H.NotifyIcon.WinUI" />
+  </ItemGroup>
+
+  <!-- The Windows App SDK metapackage (which H.NotifyIcon.WinUI also depends on) brings its AI,
+       machine learning and semantic search components; the app uses none of them. Referencing them
+       here with ExcludeAssets="all" keeps their files (onnxruntime, DirectML, ...) out of the build
+       and the publish folder. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK.AI" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.ML" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Search" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" ExcludeAssets="all" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CellGlide.Core\CellGlide.Core.csproj" />
+  </ItemGroup>
+
+</Project>

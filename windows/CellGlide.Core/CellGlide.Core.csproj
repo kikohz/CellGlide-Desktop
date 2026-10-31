@@ -19,7 +19,7 @@
   <!-- The Rust side: built by `cargo build -p cg-ffi`, copied next to whatever references this project.
        Always, not PreserveNewest: switching between the debug and release DLL must not keep the newer one. -->
   <ItemGroup>
-    <None Include="$(CellGlideNativeDll)" Link="cellglide_native.dll" CopyToOutputDirectory="Always" Visible="false" />
+    <None Include="$(CellGlideNativeDll)" Link="cellglide_native.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" Visible="false" />
   </ItemGroup>
 
   <Target Name="CheckCellGlideNative" BeforeTargets="BeforeBuild" Condition="!Exists('$(CellGlideNativeDll)')">

@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.Tests", "CellGlid
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.Probe", "CellGlide.Probe\CellGlide.Probe.csproj", "{325B732D-B393-4247-BF24-CA6FA70E8DDE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CellGlide.App", "CellGlide.App\CellGlide.App.csproj", "{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x64.Build.0 = Release|Any CPU
 		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x86.ActiveCfg = Release|Any CPU
 		{325B732D-B393-4247-BF24-CA6FA70E8DDE}.Release|x86.Build.0 = Release|Any CPU
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|x64.ActiveCfg = Debug|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|x64.Build.0 = Debug|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|x86.ActiveCfg = Debug|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Debug|x86.Build.0 = Debug|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|x64.ActiveCfg = Release|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|x64.Build.0 = Release|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|x86.ActiveCfg = Release|x64
+		{FFBEAEBC-8BE4-47DE-ABA4-A28D538BA18A}.Release|x86.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
