@@ -49,3 +49,11 @@ System.Numerics.Tensors 9.0.0 MIT https://dot.net/
 # Terms, not a permissive license. The zip and the installer must carry the Windows App SDK license
 # text and an end-user terms notice (section 3.b.ii of those terms), and THIRD-PARTY-LICENSES must
 # list it.
+# THIRD-PARTY-LICENSES must also carry the full license text and copyright notice (not just the
+# one line above) of every NuGet package shipped with the app under MIT, BSD or a similar license
+# (CommunityToolkit.Mvvm, the H.NotifyIcon packages, System.Drawing.Common,
+# Microsoft.Win32.SystemEvents, Microsoft.Web.WebView2 (BSD-3-Clause), ...), which can be gathered
+# from each package's license file or licenseUrl; plus the notices of the .NET runtime that Native
+# AOT compiles into CellGlide.exe (the ILCompiler runtime packages: MIT, and their own
+# THIRD-PARTY-NOTICES) and of the Windows SDK projection / CsWinRT compiled in (MIT), which are not
+# in the lock files. Whether the About page shows the full texts too is decided in W4.

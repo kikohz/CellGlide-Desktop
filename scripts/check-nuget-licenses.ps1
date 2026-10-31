@@ -153,6 +153,14 @@ $out.Add('# Note for W4 (packaging): the Windows App SDK files ship under the Mi
 $out.Add('# Terms, not a permissive license. The zip and the installer must carry the Windows App SDK license')
 $out.Add('# text and an end-user terms notice (section 3.b.ii of those terms), and THIRD-PARTY-LICENSES must')
 $out.Add('# list it.')
+$out.Add('# THIRD-PARTY-LICENSES must also carry the full license text and copyright notice (not just the')
+$out.Add('# one line above) of every NuGet package shipped with the app under MIT, BSD or a similar license')
+$out.Add('# (CommunityToolkit.Mvvm, the H.NotifyIcon packages, System.Drawing.Common,')
+$out.Add('# Microsoft.Win32.SystemEvents, Microsoft.Web.WebView2 (BSD-3-Clause), ...), which can be gathered')
+$out.Add('# from each package''s license file or licenseUrl; plus the notices of the .NET runtime that Native')
+$out.Add('# AOT compiles into CellGlide.exe (the ILCompiler runtime packages: MIT, and their own')
+$out.Add('# THIRD-PARTY-NOTICES) and of the Windows SDK projection / CsWinRT compiled in (MIT), which are not')
+$out.Add('# in the lock files. Whether the About page shows the full texts too is decided in W4.')
 $text = ($out -join "`n") + "`n"
 
 if ($problems.Count -gt 0) {

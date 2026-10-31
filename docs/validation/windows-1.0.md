@@ -403,6 +403,7 @@ Speed test finished
   - 测后 `AppsUseLightTheme` 写回 `0x1`（`SystemUsesLightTheme` 未改动，仍为 `0x1`），`reg query` 确认。
   ![深色启动后切到浅色：概览](images/windows-w3-theme-to-light-overview.png)
   ![深色启动后切到浅色：连接历史](images/windows-w3-theme-to-light-history.png)
+- **W4 承接：第三方许可全文（I3，W3 只记录，不实现）**：W4 打包时 THIRD-PARTY-LICENSES 除 Windows App SDK 条款与 3.b.ii 终端用户声明外，还必须含：每个随 App 发布的 MIT / BSD 一类 NuGet 包的版权声明和许可全文（CommunityToolkit.Mvvm、H.NotifyIcon 三个包、System.Drawing.Common、Microsoft.Win32.SystemEvents、Microsoft.Web.WebView2（BSD-3-Clause）等，可由 `check-nuget-licenses.ps1` 从包里的 license 文件 / `licenseUrl` 汇总）；Native AOT 编进 `CellGlide.exe` 的 .NET 运行时（ILCompiler 运行时包，MIT，连同其 THIRD-PARTY-NOTICES）；以及不在锁文件里、但 AOT 编进去的 Windows SDK 投影 / CsWinRT（MIT）。关于页是否也显示全文到 W4 一并定。同一要求已写进 `packaging/licenses/nuget.txt` 末尾的 W4 说明（由 `check-nuget-licenses.ps1` 生成）。
 
 ## 已知问题（W1 实测发现，未修）
 
