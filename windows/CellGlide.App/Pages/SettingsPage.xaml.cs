@@ -158,9 +158,7 @@ public sealed partial class SettingsPage : Page
             var proxy = service?.Proxy;
             ProxyText.Text = proxy ?? L.T("settings.proxy_none");
             ProxyText.FontFamily = proxy is null ? FontFamily : new Microsoft.UI.Xaml.Media.FontFamily("Consolas");
-            ProxyText.Foreground = proxy is null
-                ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
-                : (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+            ProxyText.Style = Show.ThemeStyle(proxy is null ? "SecondaryText" : "PrimaryText");
             CopyFeedback.SetLabel(CopyProxyButton, _copy.Copied is not null);
             // Off while their change is on its way (or without a state); all at once, so a control going off hands focus
             // to its nearest neighbour that is on, and gets it back when the change is done.

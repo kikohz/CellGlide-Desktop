@@ -282,6 +282,12 @@ public static partial class Show
 
     static Brush Resource(string key) => (Brush)Application.Current.Resources[key];
 
+    /// <summary>
+    /// One of App.xaml's theme styles (SecondaryText, PrimaryText, DividerRule, RowBorder, RowExpander): how code
+    /// gives an element a theme colour that follows a light/dark switch (a brush taken from the resources would not).
+    /// </summary>
+    public static Style ThemeStyle(string key) => (Style)Application.Current.Resources[key];
+
     /// <summary>Whether high contrast is on now (SPI_GETHIGHCONTRAST, HCF_HIGHCONTRASTON).</summary>
     static unsafe bool HighContrast()
     {

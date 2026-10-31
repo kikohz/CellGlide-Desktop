@@ -9,6 +9,27 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <ResourceDictionary Source="ms-appx:///Shell/ToneBrushes.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            <!--
+                Theme colours for elements made or recoloured in code. Code sets one of these styles, never a
+                brush taken from Application.Current.Resources: that is a fixed brush of the theme the app
+                started in, while a style's ThemeResource setter follows a light/dark switch while running.
+            -->
+            <Style x:Key="SecondaryText" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Style>
+            <Style x:Key="PrimaryText" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+            </Style>
+            <Style x:Key="DividerRule" TargetType="Rectangle">
+                <Setter Property="Fill" Value="{ThemeResource DividerStrokeColorDefaultBrush}" />
+            </Style>
+            <Style x:Key="RowBorder" TargetType="Border">
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            </Style>
+            <!-- Not BasedOn: the template comes from the control's default style either way. -->
+            <Style x:Key="RowExpander" TargetType="Expander">
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

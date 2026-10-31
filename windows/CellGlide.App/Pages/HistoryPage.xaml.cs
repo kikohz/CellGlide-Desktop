@@ -225,10 +225,9 @@ public sealed partial class HistoryPage : Page
         line.Children.Add(title);
 
         var border = lineAbove ? new Thickness(0, 1, 0, 0) : new Thickness(0);
-        var divider = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
         if (row.Details.Count == 0)
         {
-            return new Border { Child = line, Padding = new Thickness(14, 10, 14, 10), BorderThickness = border, BorderBrush = divider };
+            return new Border { Child = line, Padding = new Thickness(14, 10, 14, 10), BorderThickness = border, Style = Show.ThemeStyle("RowBorder") };
         }
         var expander = new Expander
         {
@@ -238,7 +237,7 @@ public sealed partial class HistoryPage : Page
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             BorderThickness = border,
-            BorderBrush = divider,
+            Style = Show.ThemeStyle("RowExpander"),
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             CornerRadius = new CornerRadius(0),
         };
@@ -288,7 +287,7 @@ public sealed partial class HistoryPage : Page
         Text = text,
         FontSize = size,
         TextWrapping = TextWrapping.Wrap,
-        Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        Style = Show.ThemeStyle("SecondaryText"),
     };
 
     async void OnPrevClick(object sender, RoutedEventArgs e)

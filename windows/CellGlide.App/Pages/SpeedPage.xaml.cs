@@ -170,7 +170,7 @@ public sealed partial class SpeedPage : Page
         if (column > 0)
         {
             Legs.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var rule = new Rectangle { Width = 1, Fill = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"] };
+            var rule = new Rectangle { Width = 1, Style = Show.ThemeStyle("DividerRule") };
             Grid.SetColumn(rule, column++);
             Legs.Children.Add(rule);
         }
@@ -203,7 +203,7 @@ public sealed partial class SpeedPage : Page
         Text = text,
         FontSize = size,
         TextWrapping = TextWrapping.Wrap,
-        Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        Style = Show.ThemeStyle("SecondaryText"),
     };
 
     /// <summary>
@@ -332,7 +332,7 @@ public sealed partial class SpeedPage : Page
         foreach (var record in records)
         {
             row++;
-            var rule = new Rectangle { Height = 1, Fill = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"] };
+            var rule = new Rectangle { Height = 1, Style = Show.ThemeStyle("DividerRule") };
             Add(rule, row, 0);
             Grid.SetColumnSpan(rule, 3);
             row++;

@@ -20,7 +20,8 @@
                 <TextBlock x:Name="RadioText" Margin="6,1,6,1" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
             </Grid>
             <TextBlock x:Name="ModelText" Grid.Column="3" FontSize="13" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <TextBlock x:Name="BatteryText" Grid.Column="4" FontSize="13" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <!-- Its colour comes from the style, so it follows a light/dark switch; low power mode sets yellow over it. -->
+            <TextBlock x:Name="BatteryText" Grid.Column="4" FontSize="13" VerticalAlignment="Center" Style="{StaticResource SecondaryText}" />
         </Grid>
 
         <TextBlock x:Name="NotSharingText" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

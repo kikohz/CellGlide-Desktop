@@ -154,7 +154,7 @@ public sealed partial class LeakPage : Page
         Text = text,
         FontSize = size,
         TextWrapping = TextWrapping.Wrap,
-        Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        Style = Show.ThemeStyle("SecondaryText"),
     };
 
     async void OnStartClick(object sender, RoutedEventArgs e)

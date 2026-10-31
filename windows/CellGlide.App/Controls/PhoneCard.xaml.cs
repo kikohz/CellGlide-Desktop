@@ -4,7 +4,6 @@ using CellGlide.Core.Models;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 
 namespace CellGlide.App.Controls;
 
@@ -22,12 +21,9 @@ public sealed partial class PhoneCard : UserControl
     public static readonly DependencyProperty CompactProperty = DependencyProperty.Register(
         nameof(Compact), typeof(bool), typeof(PhoneCard), new PropertyMetadata(false, (d, _) => ((PhoneCard)d).Apply()));
 
-    readonly Brush _secondary;
-
     public PhoneCard()
     {
         InitializeComponent();
-        _secondary = BatteryText.Foreground;
         Apply();
         // The tone brushes follow a switch to or from high contrast while the card is shown.
         Loaded += (_, _) => Show.Changed += Apply;
@@ -66,7 +62,15 @@ public sealed partial class PhoneCard : UserControl
         ModelText.Visibility = Show.Visible(card.Model);
         BatteryText.Text = card.Battery?.Label ?? "";
         BatteryText.Visibility = Show.Visible(card.Battery);
-        BatteryText.Foreground = card.Battery?.LowPower == true ? Show.LowPowerBrush() : _secondary;
+        if (card.Battery?.LowPower == true)
+        {
+            BatteryText.Foreground = Show.LowPowerBrush();
+        }
+        else
+        {
+            // Back to the SecondaryText style's colour, which follows the theme (a stored brush would not).
+            BatteryText.ClearValue(TextBlock.ForegroundProperty);
+        }
 
         NotSharingText.Text = L.T("phone.not_sharing");
         NotSharingText.Visibility = Show.Visible(card.Speeds == Speeds.NotShared);

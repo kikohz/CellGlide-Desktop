@@ -394,6 +394,16 @@ Speed test finished
 - **AOT 结论**（Task 1 定，W3 全程验证）：App 用 Native AOT 发布（win-x64，0 警告），本清单 a–r 全部在 AOT 发布版上测过；没有遇到需要退回 ReadyToRun 的问题。
 - **诊断发送只对本地假服务测过**（Task 8）：W3 实机只做了预览和保存，从未向 `diag.cellglide.com` 发送；W4 发送正式服务须经用户同意。
 
+### W3 最终评审修复（2026-10-31）
+
+- **运行中切换浅色 / 深色（I2）**：代码里设的次要文字、分隔线、历史行边框改由 `App.xaml` 的样式（`SecondaryText`、`PrimaryText`、`DividerRule`、`RowBorder`、`RowExpander`，Setter 用 `{ThemeResource}`）给出，代码只套样式（`Show.ThemeStyle`）；电话卡片的电池文字在非省电时 `ClearValue` 回到样式颜色。源码测试禁止代码从 `Application.Current.Resources` 取主题画刷。
+  - 实测（Debug 构建，会话 1 临时计划任务，英文界面）：测前 `AppsUseLightTheme = 0x1`、`SystemUsesLightTheme = 0x1`。只改 `AppsUseLightTheme` 并广播 `WM_SETTINGCHANGE("ImmersiveColorSet")`：深色启动 → 浅色 → 深色 → 浅色，每次切换后逐页 PrintWindow 截图（概览、面板、测速、泄漏、连接历史、设置）。浅色下电池百分比「80%」、历史的时间列 / 图例 / 色条钟点、测速最近结果的运营商行、泄漏页「160 queries」和位置、设置页的代理地址都是浅色主题的颜色，清楚可读；切回深色同样正确。
+  - 第一次实测发现 `RowExpander` 用 `BasedOn="{StaticResource DefaultExpanderStyle}"` 时，切换主题后打开连接历史偶尔报「Cannot find a resource with the given key: RowExpander」并崩溃（0xc000027b）；去掉 `BasedOn`（模板本来就来自控件的默认样式）后，深 / 浅来回切换并反复进出连接历史 3 轮不再出现，外观与 Task 10 的截图相同。
+  - 概览电话卡片与面板需要连接：连接约 40 秒（`This session` 18.5 MB 前后不变，< 0.1 MB），前后快照 `-Compare` **identical**。
+  - 测后 `AppsUseLightTheme` 写回 `0x1`（`SystemUsesLightTheme` 未改动，仍为 `0x1`），`reg query` 确认。
+  ![深色启动后切到浅色：概览](images/windows-w3-theme-to-light-overview.png)
+  ![深色启动后切到浅色：连接历史](images/windows-w3-theme-to-light-history.png)
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

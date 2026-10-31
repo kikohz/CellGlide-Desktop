@@ -39,6 +39,43 @@ public class XBindTests
     }
 
     /// <summary>
+    /// W3 final review I2: a brush taken from Application.Current.Resources in code is a fixed instance of the theme
+    /// the app started in, so text painted with it stays dark-theme grey after a switch to light. Code gives theme
+    /// colours through App.xaml's styles (Show.ThemeStyle), whose ThemeResource setters follow the switch. Only
+    /// Show.cs reads brushes from the resources, and only the tone brushes, which are the same in light and dark.
+    /// </summary>
+    [Fact]
+    public void Code_takes_theme_colours_from_styles_not_resource_brushes()
+    {
+        var themeBrush = new System.Text.RegularExpressions.Regex(@"Resources\[\s*""(TextFill|DividerStroke|CardStroke|ControlFill|SolidBackground|LayerFill|CardBackground|AccentFill|AccentTextFill)");
+        var brushCast = new System.Text.RegularExpressions.Regex(@"\(\s*(Microsoft\.UI\.Xaml\.Media\.)?Brush\s*\)\s*Application\.Current\.Resources");
+        var bad = AppSources.CodeFiles()
+            .Where(f => themeBrush.IsMatch(f.Text) || (brushCast.IsMatch(f.Text) && !f.File.EndsWith("Show.cs", StringComparison.Ordinal)))
+            .Select(f => f.File)
+            .ToList();
+        Assert.Empty(bad);
+
+        var show = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "Show.cs"));
+        Assert.Contains("Resource(\"Tone\" + tone + \"Brush\")", show);
+        Assert.Contains("Resource(\"LowPowerBrush\")", show);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(show, @"\bResource\(").Count);
+
+        var app = File.ReadAllText(Path.Combine(AppSources.AppDir, "App.xaml"));
+        foreach (var (key, brush) in new[]
+        {
+            ("SecondaryText", "TextFillColorSecondaryBrush"),
+            ("PrimaryText", "TextFillColorPrimaryBrush"),
+            ("DividerRule", "DividerStrokeColorDefaultBrush"),
+            ("RowBorder", "CardStrokeColorDefaultBrush"),
+            ("RowExpander", "CardStrokeColorDefaultBrush"),
+        })
+        {
+            var style = System.Text.RegularExpressions.Regex.Match(app, $"""<Style x:Key="{key}"[\s\S]*?</Style>""").Value;
+            Assert.Contains("{ThemeResource " + brush + "}", style);
+        }
+    }
+
+    /// <summary>
     /// Checklist e (W3 Task 10, user-reported): the sidebar's group headings must read as headings, not as
     /// items. The stock NavigationViewItemHeader draws its text like the items under it; the header gets the
     /// SidebarHeader style, whose template shows the DLL's heading with SidebarHeading (caption size, semibold,

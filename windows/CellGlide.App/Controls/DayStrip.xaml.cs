@@ -77,7 +77,7 @@ public sealed partial class DayStrip : UserControl
             {
                 Text = tick.Label,
                 FontSize = 11,
-                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                Style = Show.ThemeStyle("SecondaryText"),
             };
             // The hours belong to the picture: not read one by one (Raw on the canvas would not hide its children).
             AutomationProperties.SetAccessibilityView(label, AccessibilityView.Raw);
