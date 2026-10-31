@@ -334,6 +334,66 @@ Speed test finished
 - **截图**：解锁后截到了设置页和关于页（不是黑屏），只用于自查，没有放进仓库（Task 10 统一截图）。
 - **网络与流量**：基线与结束时快照 `-Compare` **identical**；结束时隧道已断开，`Auto connect: on`、`Strict DNS: on`。手机流量 `This session` 38.5 → 43.3 MB（约 4.8 MB，连接约 20 分钟，含 Chrome 打开 t.me 页面）。
 
+### W3 界面清单（W3 Task 10，2026-10-31）
+
+- **准备**：基线快照当天新拍（07:57）；`scripts\install-dev.ps1 -Release`（服务为 HEAD `c91f1c2`）；`scripts\check-windows-core.ps1 -Publish` exit 0（187/187）。实测一律用发布版（`…\win-x64\publish\CellGlide.exe`，即将来装进 `app\` 的形态），在会话 1 用临时交互计划任务 `CGT10`（每次用完删除）跑 UI Automation 驱动脚本；启动时都设 `CELLGLIDE_DIAG_TARGET` 为没人监听的本地端口（发布版本来就忽略），驱动脚本对 `Send` 直接拒绝执行。测速只在 `CELLGLIDE_SPEED_CAPS=small` 下。会话 1 一直锁屏（截图为锁屏画面），所以外观和真鼠标、真键盘的项目留到用户在场时。
+- **测前状态**：未连接；`Auto connect: on`、`Strict DNS: on`、iPhone automatic；HKCU Run 无 `CellGlide`；StartupApproved\Run 有 Windows 在 Task 9 写的 `CellGlide = 00…`（不碰）；没有 `prefs.json`；`speedtests.json` 2 条（已备份）；「下载」5 个文件。
+- **流量起点**：`This session` 43.3 MB。
+
+| # | 项目 | 结果 | 证据 |
+|---|---|---|---|
+| a | 自启后的托盘 | 通过 | 以 Run 值的命令（`"…\publish\CellGlide.exe" --tray`，第 k 项里由 App 写入的值）启动：0.2 秒注册图标，0 个可见窗口；菜单首项 `CellGlide 1.0.0` = 关于页 `Version 1.0.0` = 窗口底部 = `cellglide --version`（`1.0.0`） |
+| b | 面板 | 通过（外观、真鼠标、点别处关闭、Esc、溢出区：用户确认，2026-10-31） | 左键：面板 1381,430–1806,1005，与独立算出的期望一致；再点关闭；连点两次最后只有 1 个面板；Esc 关闭。**图标当时在溢出区**（任务栏 UIA 里只有 `Show Hidden Icons`，`Shell_NotifyIconGetRect` 给的是 V 形按钮的位置）。打开溢出区后用 UIA Invoke 系统里的 `CellGlide` 图标（shell 自己发的点击）：面板 1280,430–1705,1005，以图标 1467..1517 为中心，在工作区内 |
+| c | 右键菜单 | 通过 | `CellGlide 1.0.0 [disabled]`、分隔线、`Disconnect`/`Connect`、`Open CellGlide`、分隔线、`Quit`；菜单的 `Disconnect` → status 断开，菜单变 `Connect`；`Connect` → 3 秒内 Connected。断开后快照 `-Compare` identical |
+| d | 图标状态（**裁定后的标准**：连接为走手机的图标、断开为普通图标；橙点只在健康问题开着时出现（约 10 秒），之后服务放弃会话重试，图标变为普通图标，恢复后回到走手机的图标；浅色/深色各一套） | 通过（橙点、浅色/深色：用户确认，2026-10-31） | 溢出区里图标的提示文字：连接时 `CellGlide Connected, this computer is using the phone's network`。图标图案、飞行模式橙点、浅色/深色两套要用眼睛看 |
+| e | 窗口 | 通过（Mica、标题栏、带到前面：用户确认，2026-10-31；侧栏分组标题按用户意见修好，见下） | 标题 `CellGlide · Connected`；侧栏 4 组 7 项（`Overview`；`Tools`：`Speed test`、`DNS Leak Test`；`Activity`：`Connection History`、`Diagnostics`；`App`：`Settings`、`About`）；底部 `CellGlide 1.0.0`；WM_CLOSE 后 0 个可见窗口，进程和图标都在 |
+| f | 概览与卡片（**裁定后的标准**：与 `cellglide.exe status` 一致；切走手机 App 时只看走势缺口，有没有缺口取决于 iOS App 在后台是否还上报；USB 有电池读数时卡片不变淡） | 通过（走势：用户确认，2026-10-31） | 概览：标题、说明、`Strict DNS: on (…)`、`Cricket`/`5G NSA`/`iPhone 16e`/`80%`、`Network quality Excellent · 67 ms · This session 43.8 MB`、电池行、健康行、`iPhone · iPhone 16e`，与同时刻 `cellglide.exe status` 逐项相同 |
+| g | 测速（小数据量） | 通过 | `Start speed test` → 提醒 `A speed test can use up to about 1.3 GB of phone data.`；勾 `Don't ask again` → `Continue`；iPhone `Latency 187 ms · Download 27.4 Mbps · Upload 4.1 Mbps`，Wi‑Fi `Latency 59 ms · Download 52.7 Mbps · Upload 13.2 Mbps`；阶段文字 `Testing Download… 0..1 / 5 s`、`Testing Upload… 0..3 / 5 s`；结论 `Wi‑Fi download is 1.9x faster than the iPhone.`。`prefs.json` 为 `"speed_confirmed": true`；第 q 项再测时没有提醒。最近结果第一行 `2026-10-31 08:10`（共 3 条，下面两条在视口外）。`Clear` → `Clear speed test history?` → `Cancel` 不变；→ `Clear` 后 `No speed tests yet`，文件清空。**iPhone 上行的宽限期出现了**：进度条读屏名 `Busy` + `Waiting for the server to confirm the upload…`，没有 RangeValue，即不定状态。用量 44.2 → 58.2 MB（14.0 MB） |
+| h | DNS 泄漏 | 通过 | App：`No leak`、出口 `AT&T Enterprises, LLC · Arizona, US`、`Cloudflare, Inc.`（第一次另有 `Google LLC` 6 条和 ECS 那句，第二次只有 Cloudflare 144 条）；`CellGlide.Probe -- leak` 两次：`No leak`、同一出口、只有 `Cloudflare, Inc.`。结论、出口、归属一致；多出的 Google 组只出现一次，属手机侧解析的波动 |
+| i | 连接历史 | 通过（飞行模式那次中断见下；色条：用户确认，2026-10-31） | `Today, Oct 31` 的事件与当天操作一致（`08:07 Sharing stopped`、`08:08 Sharing started` 即第 c 项）；`Previous` → `Yesterday, Oct 30`，`Next` 回今天后不可点。**最小化时不刷新**（W3 挂起项）：最小化后 `cellglide disconnect`，11 秒内列表顶上仍是 `08:08 Sharing started`；还原后出现 `08:13 Sharing stopped`；快照 identical |
+| j | 诊断（只预览和保存） | 通过 | 打开页面 `Send` 不可点，提示 `View what will be sent before sending.`；`View…` 3.6 秒出预览（150266 字符，`{ "app": "1.0.0", "createdAt": …`），之后 `Send` 才可点（**没有点**）。先在「下载」放好接下来 40 秒的同名占位文件，`Save to File` 得到 `cellglide-diagnostics-20261031-081431-2.json`（150270 字节），40 个占位文件都没被动。`Save As…`：建议名 `cellglide-diagnostics-20261031-081428.json`，类型 `Diagnostics (JSON) (*.json)`，选「下载」里已有的 11 字节文件 → `Confirm Save As`（`Yes`/`No`）→ `Yes` → 150270 字节的 JSON。`Show in Folder` → `Downloads - File Explorer`，选中项为刚保存的文件（随后关掉）。两个文件查 `iloss`、计算机名、用户 SID 都是 0 处，已删除，「下载」恢复为测前 5 个文件。**发送未对正式服务做过；W4 须经用户同意**（本地假服务的结果见 Task 8） |
+| k | 设置 | 通过（被系统禁用、拔插打开窗口含最小化时：用户确认，2026-10-31；代理复制解锁后自动测过） | iPhone 下拉框选中 `Auto discovery / waiting for selected device`（另一项 `iPhone · iPhone 16e`）= `iPhone to use: automatic`；自动连接 关 → `Auto connect: off`，开 → `on`；严格 DNS（连接中，前后快照 identical）关 → `Strict DNS: off`、status 与概览 `Strict DNS: off in settings`，开 → `Strict DNS: on`、`… (DNS queries can only go through the phone)`；登录启动 开 → Run 值 `"…\publish\CellGlide.exe" --tray`，关 → 值删除；检查 6 行与 `cellglide.exe doctor` 的 7 个 ✓ 相同（少 CLI 自己加的服务一行）。代理 `socks5h://127.0.0.1:49838`：锁屏时剪贴板打不开，按钮保持 `Copy`（不假装成功），要解锁后再测 |
+| l | 关于 | 通过 | 点 `Telegram channel`：Chrome 以 `--single-argument https://t.me/cellglide` 启动（锁屏下窗口标题 `Untitled`，随后关掉）。许可对话框：列表可滚动（50 / 100 / 0 %），按内容找到首段、含 `tokio 1.53.3` 的段、Rust 部分末段和 NuGet 段（共 2763 + 1 段），`Close` 关闭 |
+| m | 单实例 | 通过（带到前面：用户确认） | `--tray` 已运行时再启动：第二个进程以 0 退出，进程 1 个、图标 1 个，窗口仍隐藏；不带参数再启动：第二个以 0 退出，原进程的窗口出现；窗口开着时 `--tray`：以 0 退出，不变 |
+| n | 服务停止/重启 | 通过 | 连接中 `Stop-Service`：1 秒内标题 `CellGlide`、概览 `The CellGlide service stopped`（随后 `✗ Can't reach the CellGlide service … Fix: … Start-Service CellGlide`），菜单 `Connect`，面板只有原因、`Connect`、`Open CellGlide…`、`Quit CellGlide`；`Start-Service` 后 3 秒内自动恢复 `CellGlide · Connected`、菜单 `Disconnect`（自动连接重新连上） |
+| o | 资源管理器重启 | 通过 | `Stop-Process -Name explorer`：图标消失，Explorer 自动拉起后 11.4 秒内图标回来（之后在任务栏可见区） |
+| p | 中文界面 | 通过 | `CELLGLIDE_LANG=zh-CN`：七页、面板、托盘菜单（`连接`/`断开`、`打开 CellGlide`、`退出`）都是中文；未连接和已连接、默认尺寸和最小尺寸（760×520 DIP）下，没有文字超出窗口，没有键名样子的文字（`a.b_c` 形式，0 处） |
+| q | 退出 | 通过 | 小测速 `Testing Download… 2 / 5 s` 时托盘 `Quit`：进程不到 0.5 秒结束，图标移除；2 秒后 status 正常（Connected），之后 `↓ 0.0 KB/s ↑ 0.0 KB/s`；历史不增加。这次没有提醒（`speed_confirmed`）。用量 64.9 → 71.1 MB |
+| r | 网络不变 | 通过（见下「最终快照」） | 期间每次断开后与基线比较都是 identical，直到服务停止那一步之后：Wi‑Fi 多了 `fd55:ab04:2c04:48cc::/64` 和两个 /128 路由（路由器 RA 给的 ULA 前缀，已弃用，preferred 0，08:40 时 valid 还剩 25:48）。CellGlide 不碰 Wi‑Fi；最后一次比较前看它是否过期 |
+
+- **实测中发现的驱动脚本问题（不是 App 的问题）**：UIA 对许可对话框里约 2800 行的列表做全树搜索会很慢；计划任务超时后 `schtasks /end` 不会结束子进程，残留的驱动脚本一直在查 UIA，让 App 的 UI 线程占满一个核。结束残留脚本后 App 立刻回到 0% CPU；只打开对话框不做 UIA 查询时也是 0%。之后改为广度优先、不进列表行的查找。
+- **用户第一轮（09:22–09:27）**：
+  - 飞行模式：health 记录 issue 从 16:22:25Z 开到 16:22:37Z（12 秒），随后服务以 `released noExit` 放弃会话，Retrying 到 16:23:21Z 重新连上。`tray_look` 在 Retrying 时 `alert` 为假（共用逻辑，Linux 相同），所以橙点只有那 12 秒；用户没看到。清单 d 的写法待控制者裁定。
+  - 卡片变淡：`dim = stale && 有帧 && 没有 USB 电池读数`；USB 连着、有电池读数时永远不变淡（Linux 相同）。清单 f 的写法待控制者裁定。
+  - 拔插：四次拔插间隔 4–7 秒，都不到 `REPLUG_AFTER`（60 秒），按设计不打开窗口；要等 65 秒以上再插回重测。
+  - 用户之后退出了 App（无崩溃记录）；开发版没有开始菜单快捷方式，W4 安装包才有。已重新启动。
+- **控制者裁定**：d、f 接受共用设计（Linux 相同），按上表改写标准；本任务流量上限提到 80 MB。
+- **用户第二轮（重测和其余眼看项目）**，用户原话：「「Tools / Activity / App」这几个字看起来不像分组标题，你需要优化一下 其它的都好像正常」。据此记为**通过（用户确认，2026-10-31）**：R1 橙点（health 记录 17:13:48Z issue 开、17:14:09Z 结束，21 秒）、R2 走势、R3 拔插（等满一分钟后插回窗口打开；窗口最小化时的情况）、浅色/深色、窗口外观（Mica、标题栏）、带到前面、被 Windows 禁用的说明、键盘焦点、最小宽度下的许可对话框，以及第一轮的托盘外观、真鼠标点击、点别处关闭、Esc、溢出区。
+- **侧栏分组标题（清单 e，用户提出，已修，`97cc19e`）**：原来 `NavigationViewItemHeader` 直接放字符串，自带模板把「Tools / Activity / App」画成和下面各项一样的字号和颜色。现在标题用自己的模板：DLL 给的文字，Caption 字号、半粗、次要颜色、上方留白；不可聚焦、不可选（UIA：Group `Tools`，`IsKeyboardFocusable=False`、`IsEnabled=False`），读屏按名称读出。新源码测试 `Sidebar_headings_use_the_heading_style` 在旧代码上失败。重新发布后截图确认（见下面概览截图的侧栏）。
+- **解锁后自动做的项目**：
+  - 代理复制：`Copy` → 按钮变 `Copied`，剪贴板 `socks5h://127.0.0.1:64309` 与页面相同，3 秒后变回 `Copy`。
+  - 测速提醒按真 Esc（先删掉 `prefs.json`，SendKeys `{ESC}`）：提醒关闭，没有开始测速（`This session` 4.0 → 4.0 MB）；再点开始，提醒再次出现（说明发了取消）。
+  - 焦点读数（诊断页，焦点在 `View what will be sent…` 上 Invoke）：忙时按钮不可用，焦点移到侧栏 `Overview`（表单里全部不可用，阅读顺序上最近的可用控件在侧栏）；预览出来后焦点在预览框 `What will be sent`。用户用键盘实测也认可。
+- **截图**（发布版，`CELLGLIDE_LANG=en`，`PrintWindow` 只截 CellGlide 自己的窗口）：
+
+  ![概览](images/windows-w3-overview.png)
+  ![面板](images/windows-w3-panel.png)
+  ![测速（小测速结束后）](images/windows-w3-speed.png)
+  ![连接历史](images/windows-w3-history.png)
+  ![设置](images/windows-w3-settings.png)
+
+  测速截图那次小测速：iPhone `Latency 82 ms · Download 79.6 Mbps · Upload 3.8 Mbps`，Wi‑Fi `Latency 86 ms · Download 79.0 Mbps · Upload 39.6 Mbps`，`The two connections run at similar speeds.`；用量 4.0 → 18.1 MB（14.1 MB）。
+- **收尾**：退出 App；Run 值由 App 的开关删除（`reg query` 找不到；StartupApproved 只有 Windows 自己写的 `00…`，我们没写）；`prefs.json` 不存在（与测前相同）；`speedtests.json` 用备份恢复，SHA-256 `62B71C14…118D` 与测前相同；`Auto connect: on`、`Strict DNS: on`、iPhone automatic；`cellglide disconnect` 后隧道未连接（与测前相同）；「下载」5 个文件（与测前相同）；没有残留进程和计划任务。
+- **最终快照**：与 07:57 的基线 `-Compare`：**identical**。
+  - 中间那次差异（服务停止那步之后 Wi‑Fi 出现 `fd55:ab04:2c04:48cc::/64` 和两个 /128，路由器 RA 给的已弃用 ULA 前缀，preferred 0）在最终快照里已经没有了（过期）。
+  - 第一次最终比较还报了 Wi‑Fi 的 `Tcpip\{f870e3e0-…}\DhcpInterfaceOptions` 变化。逐项看：只有每个选项的接收时间（`60aeacc0` → `cdf8acc0`）和租期、T1、T2（选项 51、58、59）的值变了，DNS（6，`10.10.10.1`）、路由器、域名 `lan`、子网、服务器标识都相同，即 DHCPv4 续租的记账。`scripts/network-snapshot.ps1` 里 DHCPv6 的同类值本来就不比较；这次改为把 `DhcpInterfaceOptions` 解析后去掉接收时间和 51/58/59 再比较，其余选项照常比较。反例：把副本里 DNS 选项的 `10.10.10.1` 改成 `10.10.10.2`，`-Compare` 报出 `DhcpInterfaceOptions` 变化并退出 1。改后最终比较为 identical；之前各次快照（第 c、i、k、n 项之后）照样比较，结果不变（第 n 项之后仍报那条 ULA 路由）。
+- **流量**：
+  - 本任务实测：小测速 14.0 MB（g）+ 6.2 MB（q）+ 14.1 MB（截图）= 34.3 MB；其余是泄漏检测、诊断、Telegram 页面。
+  - 但隧道连着时整台电脑的流量都走手机：`This session` 43.3 → 102.5 MB（到 09:33，其中 71.1 → 102.5 的 31.4 MB 是用户操作期间电脑的普通流量）；10:15 手机端开了新会话（health 里新 session `D4D7E972…`），计数从 0 开始，到断开前为 18.5 MB；09:33–10:15 之间的流量没有读数（用户第二轮重测期间）。
+  - 合计：本任务至少 59.2 + 18.5 = **77.7 MB**（另加 09:33–10:15 未读到的一段），W3 合计至少约 **109 MB / 200 MB**。
+- **AOT 结论**（Task 1 定，W3 全程验证）：App 用 Native AOT 发布（win-x64，0 警告），本清单 a–r 全部在 AOT 发布版上测过；没有遇到需要退回 ReadyToRun 的问题。
+- **诊断发送只对本地假服务测过**（Task 8）：W3 实机只做了预览和保存，从未向 `diag.cellglide.com` 发送；W4 发送正式服务须经用户同意。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
