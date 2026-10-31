@@ -229,6 +229,18 @@ Speed test finished
   - **W4 必须做**：zip 和安装包要带上 Windows App SDK 的许可文本和最终用户条款提示（条款 §3.b.ii 要求分发者和最终用户同意至少同等保护微软的条款），`THIRD-PARTY-LICENSES` 也要列上它。
 - `scripts\check-windows-core.ps1` 与 `-Publish` 都退出 0：115 个测试通过；`-Publish` 的发布目录里有 `CellGlide.exe` 和 `cellglide_native.dll`。
 
+### 宿主：单实例与自启动（W3 Task 4，2026-10-31）
+
+- **单实例**（Debug 构建，服务 Running；会话 1 的临时计划任务里运行，查完已删除任务，没有留下进程）：
+  1. 第一次启动：窗口出现，标题 `CellGlide`，进程数 1。
+  2. 窗口开着时再启动（不带参数）：第二个进程 121 ms 后以 0 退出；5 秒后进程数 1，窗口仍可见。
+  3. 关窗口（WM_CLOSE）：窗口隐藏，进程还在；再启动一次：进程数 1，窗口重新出现（说明激活确实转给了第一个实例）。
+  4. 窗口隐藏时带 `--tray` 启动：第二个进程 94 ms 后以 0 退出；5 秒后进程数 1，窗口仍隐藏。窗口可见时带 `--TRAY` 启动：同样退出，窗口不变。
+  5. `Stop-Process -Name CellGlide`。
+  6. 另加：第一次就以 `--tray` 启动：有进程、没有窗口；随后不带参数启动：窗口出现，进程数 1。
+  - **「带到前面」没能确认**：会话 1 当时锁屏，`GetForegroundWindow` 一直是 0（连新开的 cmd 窗口也不是前台）。代码上，第二个实例先 `AllowSetForegroundWindow(第一个实例的 PID)`，第一个实例在 `Activated` 里 `AppWindow.Show()`、`Activate()`、`SetForegroundWindow`。要在屏幕解锁时再看一次（Task 10）。
+- **自启动，真实的 HKCU Run 值**（临时控制台程序用 `RegistryRunKey()`、`RegistryStartupApproved()` 的默认路径，exe 路径用 `C:\Program Files\CellGlide\app\CellGlide.exe`）：测前 Run 里没有 `CellGlide`，StartupApproved\Run 里也没有；`Read()` 为 Off；`Set(true)` 后值为 `"C:\Program Files\CellGlide\app\CellGlide.exe" --tray`（REG_SZ），`Read()` 为 On；`Set(false)` 后值消失，`Read()` 为 Off；最后按测前状态恢复（没有值），比对 Run 值和 StartupApproved 值与测前一致。StartupApproved 只读，没有写过。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

@@ -20,6 +20,8 @@
     <PublishAot>true</PublishAot>
     <Platforms>x64;ARM64</Platforms>
     <IsPackable>false</IsPackable>
+    <!-- The few user32 calls (LibraryImport) generate unsafe marshalling code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <!-- With no -r, build for this machine's architecture, so `dotnet build CellGlide.sln` works as is. -->

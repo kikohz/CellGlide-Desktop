@@ -37,8 +37,22 @@ sealed class FakeCore(ReplyResult? autoReply = null) : ICore
 
     public void Raise(CoreEvent ev) => EventReceived?.Invoke(ev);
 
+    public bool Disposed => DisposeCount > 0;
+
+    public int DisposeCount { get; private set; }
+
+    /// <summary>How many commands had been sent when Dispose was first called; -1 before that.</summary>
+    public int SentCountAtDispose { get; private set; } = -1;
+
     public void Dispose()
     {
+        lock (_gate)
+        {
+            if (DisposeCount++ == 0)
+            {
+                SentCountAtDispose = Sent.Count;
+            }
+        }
     }
 }
 

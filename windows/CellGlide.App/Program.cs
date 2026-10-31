@@ -1,20 +1,66 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using CellGlide.Core.Desktop;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.Windows.AppLifecycle;
 
 namespace CellGlide.App;
 
-/// <summary>The entry point (the XAML-generated Main is disabled; Task 4 adds single-instance handling here).</summary>
-public static class Program
+/// <summary>The entry point (the XAML-generated Main is disabled): launch options, then single instance.</summary>
+public static partial class Program
 {
+    /// <summary>The single-instance key every CellGlide process registers or finds.</summary>
+    const string InstanceKey = "CellGlide.Main";
+
+    /// <summary>How long a second instance waits for the running one to take its activation.</summary>
+    static readonly TimeSpan RedirectWait = TimeSpan.FromSeconds(5);
+
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
-        Application.Start(static _ =>
+        var options = LaunchOptions.Parse(args, Environment.GetEnvironmentVariable("CELLGLIDE_SPEED_CAPS"));
+        var main = AppInstance.FindOrRegisterForKey(InstanceKey);
+        switch (LaunchDecision.Decide(main.IsCurrent, options.Tray))
+        {
+            case Launch.Exit:
+                return;
+            case Launch.Redirect:
+                if (Redirect(main))
+                {
+                    return;
+                }
+                // The running app did not take it: better a second app than nothing on screen (as on Linux).
+                break;
+        }
+        Application.Start(_ =>
         {
             var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
             SynchronizationContext.SetSynchronizationContext(context);
-            new App();
+            new App(options);
         });
     }
+
+    /// <summary>Hands this launch to the running app (on a background thread, at most <see cref="RedirectWait"/>); false if that failed.</summary>
+    static bool Redirect(AppInstance main)
+    {
+        try
+        {
+            // This process was started by the user, so it may let the running one come to the front.
+            _ = AllowSetForegroundWindow(main.ProcessId);
+            var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+            var redirect = Task.Run(() => main.RedirectActivationToAsync(activation).AsTask());
+            return redirect.Wait(RedirectWait);
+        }
+        catch (Exception e)
+        {
+            Debug.WriteLine("CellGlide: redirecting to the running instance failed: " + e);
+            return false;
+        }
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AllowSetForegroundWindow(uint processId);
 }
