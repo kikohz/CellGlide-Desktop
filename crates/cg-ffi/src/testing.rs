@@ -8,6 +8,9 @@ use cg_ipc::phone::{PhoneCard, PhoneFrame, PhoneLabel};
 use cg_ipc::{ConnState, DnsMode, Snapshot};
 
 pub use crate::runtime::{Events, guarded};
+pub use shape::tuple_free;
+
+mod shape;
 
 /// The serial of the iPhone in [`connected_snapshot`] and [`disconnected_snapshot`].
 pub const SERIAL: &str = "00008140-000000000000002C";

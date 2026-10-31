@@ -1,9 +1,12 @@
 //! Client side of the control socket (a named pipe on Windows), used by cellglide and the GUI.
 
-use crate::describe::{self, ui::ServiceDown};
+use crate::describe::{
+    self,
+    ui::{DownReason, ServiceDown},
+};
 use crate::{
-    Check, CheckId, Endpoint, MAX_REPLY_LINE, Reason, Request, Response, Snapshot, from_line,
-    read_line_limited, to_line,
+    Endpoint, MAX_REPLY_LINE, Reason, Request, Response, Snapshot, from_line, read_line_limited,
+    to_line,
 };
 use cg_i18n::tr;
 use std::time::Duration;
@@ -143,21 +146,33 @@ pub async fn call(endpoint: &Endpoint, request: Request) -> Result<Response, Str
 pub async fn handshake(endpoint: &Endpoint) -> Result<(), ServiceDown> {
     match request(endpoint, &Request::Hello).await {
         Ok(Response::Hello { protocol, .. }) if protocol == crate::PROTOCOL_VERSION => Ok(()),
-        Ok(Response::Hello { protocol, .. }) => Err(ServiceDown::other(
-            describe::version_mismatch(&protocol.to_string()),
-        )),
+        Ok(Response::Hello { protocol, .. }) => {
+            Err(ServiceDown::new(DownReason::VersionMismatch {
+                service: protocol.to_string(),
+            }))
+        }
         Ok(Response::Error {
             reason: Reason::NotInGroup,
-        }) => Err(ServiceDown {
-            text: describe::checks(&[Check::new(CheckId::Group, false)])
-                .trim_end()
-                .into(),
-            not_in_group: true,
-        }),
+        }) => Err(ServiceDown::new(DownReason::NotInGroup)),
         // A v1 reply this client can parse but doesn't expect; unparsable ones are covered by `unreachable`.
-        Ok(_) => Err(ServiceDown::other(describe::version_mismatch("1"))),
-        Err(error) => Err(ServiceDown::other(describe::unreachable(&error))),
+        Ok(_) => Err(ServiceDown::new(DownReason::VersionMismatch {
+            service: "1".into(),
+        })),
+        Err(error) => Err(unreachable_down(&error)),
     }
+}
+
+/// [`describe::unreachable`] as a reason that can be said again: an unparsable reply is a
+/// service from another version, anything else what the doctor's service check says.
+fn unreachable_down(error: &ClientError) -> ServiceDown {
+    ServiceDown::new(match error {
+        ClientError::Json(_) => DownReason::VersionMismatch {
+            service: "1".into(),
+        },
+        _ => DownReason::Unreachable {
+            check: describe::service_check(error),
+        },
+    })
 }
 
 /// What a window hears from [`watch`].
@@ -186,9 +201,7 @@ pub fn watch(endpoint: Endpoint, retry: Duration) -> mpsc::Receiver<Update> {
 async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Update>) {
     loop {
         let subscribed = match handshake(endpoint).await {
-            Ok(()) => subscribe(endpoint)
-                .await
-                .map_err(|e| ServiceDown::other(describe::unreachable(&e))),
+            Ok(()) => subscribe(endpoint).await.map_err(|e| unreachable_down(&e)),
             Err(problem) => Err(problem),
         };
         let down = match subscribed {
@@ -198,7 +211,7 @@ async fn watch_loop(endpoint: &Endpoint, retry: Duration, tx: &mpsc::Sender<Upda
                         return;
                     }
                 }
-                ServiceDown::other(tr("gui.service_gone", &[]))
+                ServiceDown::new(DownReason::Gone)
             }
             Err(problem) => problem,
         };

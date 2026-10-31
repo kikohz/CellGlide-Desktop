@@ -748,6 +748,7 @@ mod tests {
         ServiceDown {
             text: text.into(),
             not_in_group: false,
+            ..ServiceDown::default()
         }
     }
 
@@ -942,6 +943,7 @@ mod tests {
         let _ = app.update(Message::ServiceDown(ServiceDown {
             text: "not in group".into(),
             not_in_group: true,
+            ..ServiceDown::default()
         }));
         assert!(app.snapshot.is_none());
         assert_eq!(

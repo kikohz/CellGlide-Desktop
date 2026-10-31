@@ -2,7 +2,7 @@
 //! here (or a `cg_ipc::describe::ui` type it refers to); fields are snake_case, an `Option` is
 //! `null`, and nothing is a tuple or a fixed-size array.
 
-use crate::views::{HistoryView, LeakView, OverviewView, SpeedView};
+use crate::views::{ChromeView, HistoryView, LeakView, OverviewView, SpeedView};
 use cg_ipc::DiagRange;
 use cg_ipc::describe::ui::CheckRow;
 use cg_tools::prefs::Prefs;
@@ -82,6 +82,8 @@ pub enum Event {
     ServiceGone {
         text: String,
         not_in_group: bool,
+        /// The tray, its menu, the sidebar and its dots while there is no state.
+        chrome: ChromeView,
     },
     PhonePlugged {
         serial: String,

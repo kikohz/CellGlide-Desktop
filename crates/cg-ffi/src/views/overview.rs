@@ -1,6 +1,7 @@
 //! The overview page, the panel, the tray, the sidebar's dots and the settings page, all from
 //! one snapshot.
 
+use super::chrome::{ChromeView, chrome};
 use cg_i18n::tr;
 use cg_ipc::describe::{self, BatteryBadge, Heat, ui};
 use cg_ipc::phone::{PhoneCard, TRAIL_LENGTH};
@@ -25,12 +26,8 @@ pub struct OverviewView {
     pub strict_dns: Option<String>,
     /// Only when the card has something to show.
     pub phone: Option<PhoneCardView>,
-    pub tray: ui::TrayLook,
-    /// The tray's right-click menu, in order.
-    pub menu: Vec<MenuItemView>,
-    pub badges: BadgesView,
-    /// The sidebar's groups in the Mac's order; the dots are in `badges`.
-    pub sidebar: Vec<SidebarGroupView>,
+    /// The tray, its menu, the sidebar and its dots.
+    pub chrome: ChromeView,
     pub settings: SettingsView,
 }
 
@@ -39,14 +36,6 @@ pub struct OverviewView {
 pub struct HealthRowView {
     pub tone: ui::Tone,
     pub line: String,
-}
-
-/// The dots beside the sections that can have one.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct BadgesView {
-    pub overview: ui::Badge,
-    pub history: ui::Badge,
-    pub settings: ui::Badge,
 }
 
 /// The settings page's values.
@@ -101,44 +90,9 @@ pub struct HeatView {
     pub severe: bool,
 }
 
-/// One entry of the tray's menu (`ui::menu_layout`, which is a list of pairs).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct MenuItemView {
-    pub kind: MenuKind,
-    /// Empty for a separator.
-    pub label: String,
-    pub enabled: bool,
-}
-
-/// What a menu entry does. `toggle` sends `Command::Toggle`; its label says which way.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MenuKind {
-    Version,
-    Separator,
-    Toggle,
-    Open,
-    Quit,
-}
-
-/// One group of the sidebar (`ui::GROUPS`, which is a fixed array of pairs).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SidebarGroupView {
-    pub heading: Option<String>,
-    pub sections: Vec<SidebarItemView>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SidebarItemView {
-    pub section: ui::Section,
-    pub title: String,
-}
-
 pub fn overview(snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> OverviewView {
     let some = Some(snapshot);
     let state = describe::gui_state(snapshot);
-    let tray = ui::tray_look(some);
-    let badge = |section| ui::badge(section, some, None);
     OverviewView {
         connected: ui::is_connected(some),
         wants_connection: snapshot.wants_connection,
@@ -157,24 +111,21 @@ pub fn overview(snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> OverviewV
             .as_ref()
             .filter(|card| describe::card_visible(card))
             .map(phone_card),
-        menu: menu(&tray),
-        tray,
-        badges: BadgesView {
-            overview: badge(ui::Section::Overview),
-            history: badge(ui::Section::History),
-            settings: badge(ui::Section::Settings),
-        },
-        sidebar: sidebar(),
+        chrome: chrome(some, None),
         settings: settings(snapshot),
     }
 }
 
 fn settings(snapshot: &Snapshot) -> SettingsView {
     let (phones, selected) = ui::phone_options(snapshot);
-    let selected_phone = phones
-        .iter()
-        .position(|option| *option == selected)
-        .unwrap_or(0);
+    // Always in the list: a remembered phone that isn't plugged in has its own entry ("not
+    // connected"), as in the Linux window, so the choice is never shown as "automatic".
+    let selected_phone = phones.iter().position(|option| *option == selected);
+    debug_assert!(
+        selected_phone.is_some(),
+        "phone_options lists its selection"
+    );
+    let selected_phone = selected_phone.unwrap_or(0);
     let dns = match &snapshot.state {
         ConnState::Connected { dns, .. } => Some(*dns),
         _ => None,
@@ -225,49 +176,6 @@ fn battery(badge: BatteryBadge) -> BatteryView {
     }
 }
 
-fn menu(look: &ui::TrayLook) -> Vec<MenuItemView> {
-    ui::menu_layout(look)
-        .into_iter()
-        .map(|(entry, enabled)| {
-            let (kind, label) = match entry {
-                ui::MenuEntry::Version => (MenuKind::Version, ui::version_line()),
-                ui::MenuEntry::Separator => (MenuKind::Separator, String::new()),
-                ui::MenuEntry::Toggle { disconnect } => {
-                    let key = if disconnect {
-                        "tray.disconnect"
-                    } else {
-                        "tray.connect"
-                    };
-                    (MenuKind::Toggle, tr(key, &[]))
-                }
-                ui::MenuEntry::Open => (MenuKind::Open, tr("tray.open", &[])),
-                ui::MenuEntry::Quit => (MenuKind::Quit, tr("tray.quit", &[])),
-            };
-            MenuItemView {
-                kind,
-                label,
-                enabled,
-            }
-        })
-        .collect()
-}
-
-fn sidebar() -> Vec<SidebarGroupView> {
-    ui::GROUPS
-        .iter()
-        .map(|(heading, sections)| SidebarGroupView {
-            heading: heading.map(|key| tr(key, &[])),
-            sections: sections
-                .iter()
-                .map(|&section| SidebarItemView {
-                    section,
-                    title: tr(section.title_key(), &[]),
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +183,7 @@ mod tests {
     use cg_ipc::health::IssueCause;
     use cg_ipc::phone::SpeedPoint;
     use cg_ipc::{DnsMode, PhoneChoice, StrictDns};
-    use ui::{Badge, Section, Tone};
+    use ui::{Badge, Tone};
 
     fn en() -> std::sync::MutexGuard<'static, ()> {
         let guard = cg_i18n::lock_for_tests();
@@ -292,7 +200,7 @@ mod tests {
         let _g = en();
         let s = connected_snapshot();
         let v = overview(&s, now(), &TimeZone::UTC);
-        assert!(v.connected && v.tray.active);
+        assert!(v.connected && v.chrome.tray.active);
         assert_eq!(v.title, describe::gui_state(&s).title);
         assert_eq!(v.status_tone, Tone::Green);
         assert_eq!(v.button_label, cg_i18n::tr("gui.disconnect_long", &[]));
@@ -363,10 +271,10 @@ mod tests {
             Some(health.line),
             ui::connected_health_line(&s, now(), &TimeZone::UTC)
         );
-        assert!(v.tray.alert);
-        assert_ne!(v.badges.overview, Badge::None);
-        assert_eq!(v.badges.history, v.badges.overview);
-        assert_eq!(v.badges.settings, Badge::None);
+        assert!(v.chrome.tray.alert);
+        assert_ne!(v.chrome.badges.overview, Badge::None);
+        assert_eq!(v.chrome.badges.history, v.chrome.badges.overview);
+        assert_eq!(v.chrome.badges.settings, Badge::None);
     }
 
     #[test]
@@ -434,68 +342,52 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_and_the_sidebar_are_named_lists() {
+    fn a_remembered_phone_that_is_not_plugged_in_stays_selected() {
         let _g = en();
-        let v = overview(&connected_snapshot(), now(), &TimeZone::UTC);
-        let kinds: Vec<MenuKind> = v.menu.iter().map(|m| m.kind).collect();
+        let mut s = disconnected_snapshot();
+        s.settings.chosen_serial = Some("OTHER".into());
+        let v = overview(&s, now(), &TimeZone::UTC);
+        let selected = &v.settings.phones[v.settings.selected_phone];
         assert_eq!(
-            kinds,
-            [
-                MenuKind::Version,
-                MenuKind::Separator,
-                MenuKind::Toggle,
-                MenuKind::Open,
-                MenuKind::Separator,
-                MenuKind::Quit
-            ]
-        );
-        assert!(!v.menu[0].enabled && v.menu[0].label == ui::version_line());
-        assert_eq!(v.menu[2].label, cg_i18n::tr("tray.disconnect", &[]));
-        let idle = overview(&disconnected_snapshot(), now(), &TimeZone::UTC);
-        assert_eq!(idle.menu[2].label, cg_i18n::tr("tray.connect", &[]));
-        let order: Vec<Section> = v
-            .sidebar
-            .iter()
-            .flat_map(|g| g.sections.iter().map(|s| s.section))
-            .collect();
-        assert_eq!(order, Section::ALL);
-        assert_eq!(v.sidebar[0].heading, None);
-        assert_eq!(
-            v.sidebar[1].heading.as_deref(),
-            Some(cg_i18n::tr("nav.tools", &[]).as_str())
+            selected.choice,
+            PhoneChoice::Serial {
+                serial: "OTHER".into()
+            }
         );
         assert_eq!(
-            v.sidebar[0].sections[0].title,
-            cg_i18n::tr("nav.overview", &[])
+            selected.label,
+            cg_i18n::tr("settings.remembered_offline", &[])
         );
+        assert_ne!(v.settings.selected_phone, 0);
     }
 
     #[test]
-    fn the_view_is_json_without_tuples() {
+    fn the_view_has_no_tuples_or_fixed_arrays() {
         let _g = en();
-        let v = overview(&connected_snapshot(), now(), &TimeZone::UTC);
-        let json = serde_json::to_value(&v).unwrap();
-        fn no_arrays_of_scalars(value: &serde_json::Value, path: &str) {
-            match value {
-                serde_json::Value::Array(items) => {
-                    for (i, item) in items.iter().enumerate() {
-                        assert!(
-                            item.is_object() || item.is_array(),
-                            "{path}[{i}] is a bare value: a tuple?"
-                        );
-                        no_arrays_of_scalars(item, &format!("{path}[{i}]"));
-                    }
-                }
-                serde_json::Value::Object(map) => {
-                    for (k, item) in map {
-                        no_arrays_of_scalars(item, &format!("{path}.{k}"));
-                    }
-                }
-                _ => {}
-            }
-        }
-        no_arrays_of_scalars(&json, "view");
+        // Every optional part filled in, so the walk reaches all of it.
+        let mut s = connected_snapshot();
+        s.health.cause = Some(IssueCause::PhoneNetwork);
+        s.health.since = Some(now());
+        s.settings.chosen_serial = Some("OTHER".into());
+        s.strict_dns = StrictDns::On;
+        let card = s.phone.as_mut().unwrap();
+        card.trail = vec![Some(SpeedPoint {
+            download: 1.0,
+            upload: 2.0,
+        })];
+        let frame = card.frame.as_mut().unwrap();
+        frame.battery = Some(0.8);
+        frame.thermal = Some(3);
+        let v = overview(&s, now(), &TimeZone::UTC);
+        assert!(
+            v.phone
+                .as_ref()
+                .is_some_and(|p| p.battery.is_some() && p.heat.is_some())
+        );
+        assert!(v.health.is_some() && v.strict_dns.is_some());
+        assert_eq!(crate::testing::tuple_free(&v), Ok(()));
         // Options are null, never left out.
+        let json = serde_json::to_value(&v).unwrap();
         assert!(json["phone"]["model"].is_null());
         assert_eq!(serde_json::from_value::<OverviewView>(json).unwrap(), v);
     }

@@ -280,6 +280,12 @@ impl Runtime {
         }
     }
 
+    /// What the commands share (the subscription's state).
+    #[cfg(test)]
+    pub(crate) fn shared(&self) -> Arc<Shared> {
+        self.context.shared.clone()
+    }
+
     /// The switch that stops delivery to `sink`, even what is already queued; it keeps working
     /// after the runtime itself has been handed elsewhere.
     pub(crate) fn gate(&self) -> EventGate {
@@ -370,6 +376,8 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
     match command {
         Command::SetLang { lang } => {
             cg_i18n::set(lang_from(&lang));
+            // The page and the tray change language now, not at the next tick.
+            context.shared.language_changed();
             ReplyResult::done()
         }
         Command::GetPrefs => ReplyResult::Ok {

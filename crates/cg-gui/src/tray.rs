@@ -332,6 +332,7 @@ mod tests {
         let down = ServiceDown {
             text: "服务已停止".into(),
             not_in_group: false,
+            ..ServiceDown::default()
         };
         show(&state, down_look(&down));
         let look = seen.borrow_and_update().clone();

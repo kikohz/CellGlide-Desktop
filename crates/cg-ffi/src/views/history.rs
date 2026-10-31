@@ -149,6 +149,7 @@ mod tests {
         assert!(v.ticks.windows(2).all(|w| w[0].at < w[1].at));
         assert_eq!(v.rows.len(), day.events.len());
         assert_eq!(v.legend.len(), 4);
+        assert_eq!(crate::testing::tuple_free(&v), Ok(()));
     }
 
     #[test]

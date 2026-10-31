@@ -7,13 +7,16 @@
 //! Everything here is a pure function of its arguments: the time and the time zone come from
 //! the caller.
 
+mod chrome;
 mod history;
 mod overview;
 
+pub use chrome::{
+    BadgesView, ChromeView, MenuItemView, MenuKind, SidebarGroupView, SidebarItemView, chrome,
+};
 pub use history::{DetailItem, HistoryRowView, HistoryView, TickView, checks, history};
 pub use overview::{
-    BadgesView, BatteryView, HealthRowView, HeatView, MenuItemView, MenuKind, OverviewView,
-    PhoneCardView, SettingsView, SidebarGroupView, SidebarItemView, overview,
+    BatteryView, HealthRowView, HeatView, OverviewView, PhoneCardView, SettingsView, overview,
 };
 
 use serde::{Deserialize, Serialize};

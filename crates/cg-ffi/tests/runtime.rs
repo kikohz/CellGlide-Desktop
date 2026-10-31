@@ -147,14 +147,15 @@ async fn non_utf8_command_replies_error() {
         reply_of(&events, id).await,
         ReplyResult::Err { .. }
     ));
-    // Later commands are handled as usual.
-    let id = rt.send(Command::SetLang { lang: "en".into() });
-    assert_eq!(
+    // Later commands are handled as usual. (Not SetLang: `a_new_language_is_said_at_once` is the
+    // only test in this binary that switches the language.)
+    let id = rt.send(Command::GetPrefs);
+    assert!(matches!(
         reply_of(&events, id).await,
         ReplyResult::Ok {
-            value: ReplyValue::Done
+            value: ReplyValue::Prefs { .. }
         }
-    );
+    ));
     rt.shutdown();
 }
 
@@ -694,4 +695,43 @@ fn every_key_the_dll_names_is_listed() {
         cg_i18n::testing::unlisted_keys(&[root.join("src")]),
         Vec::<(std::path::PathBuf, String)>::new()
     );
+}
+
+#[tokio::test]
+async fn a_new_language_is_said_at_once() {
+    let mut svc = FakeService::start(Replies::default()).await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    let id = rt.send(Command::SetLang { lang: "en".into() });
+    reply_of(&events, id).await;
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    let english = cg_i18n::tr_in(cg_i18n::Lang::En, "gui.connect", &[]);
+    let chinese = cg_i18n::tr_in(cg_i18n::Lang::ZhCn, "gui.connect", &[]);
+    events.lock().unwrap().clear();
+    // Nothing changes on the service's side: only the language.
+    let id = rt.send(Command::SetLang {
+        lang: "zh-CN".into(),
+    });
+    reply_of(&events, id).await;
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.button_label == chinese),
+    )
+    .await;
+    // While the service is away, ServiceGone is said again in the new language.
+    svc.stop().await;
+    wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    events.lock().unwrap().clear();
+    let id = rt.send(Command::SetLang { lang: "en".into() });
+    reply_of(&events, id).await;
+    let gone = wait_for(&events, |e| matches!(e, Event::ServiceGone { .. })).await;
+    let Event::ServiceGone { chrome, .. } = gone else {
+        unreachable!()
+    };
+    assert_eq!(
+        chrome.menu[2].label,
+        cg_i18n::tr_in(cg_i18n::Lang::En, "tray.connect", &[])
+    );
+    assert_ne!(english, chinese);
+    rt.shutdown();
 }

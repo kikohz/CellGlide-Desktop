@@ -93,6 +93,7 @@ mod tests {
         let down = ServiceDown {
             text: "down".into(),
             not_in_group: false,
+            ..ServiceDown::default()
         };
         for (snapshot, service, error) in [
             (Some(&connected), None, None),

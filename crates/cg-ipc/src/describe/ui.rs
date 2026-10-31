@@ -7,7 +7,7 @@
 use crate::describe::{self, CardText, EventTone};
 use crate::health::{HealthEvent, HistoryDay, Span, SpanKind, day_bounds, day_spans, hour_marks};
 use crate::phone::{PhoneCard, SpeedPoint};
-use crate::{Check, ConnState, Contact, DnsMode, PhoneChoice, Snapshot};
+use crate::{Check, CheckId, ConnState, Contact, DnsMode, PhoneChoice, Snapshot};
 use cg_i18n::tr;
 use jiff::Timestamp;
 use jiff::civil::Date;
@@ -136,18 +136,73 @@ pub fn badge(
 
 /// Why the app has no snapshots: the text to show, and whether it is because the user isn't in
 /// the `cellglide` group (Settings then shows a dot).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceDown {
     pub text: String,
     pub not_in_group: bool,
+    /// What `text` says, kept so it can be said again in another language and so a retry that
+    /// fails the same way (with other OS detail) reads as the same reason.
+    #[serde(skip)]
+    pub reason: DownReason,
+}
+
+/// Why there are no snapshots.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DownReason {
+    /// The subscription ended: the service stopped.
+    #[default]
+    Gone,
+    /// The user isn't in the `cellglide` group.
+    NotInGroup,
+    /// The service speaks another protocol version.
+    VersionMismatch { service: String },
+    /// It couldn't be reached; the doctor's service check says why.
+    Unreachable { check: Check },
+}
+
+impl DownReason {
+    /// The sentence, in the current language.
+    pub fn text(&self) -> String {
+        match self {
+            DownReason::Gone => tr("gui.service_gone", &[]),
+            DownReason::NotInGroup => describe::checks(&[Check::new(CheckId::Group, false)])
+                .trim_end()
+                .into(),
+            DownReason::VersionMismatch { service } => describe::version_mismatch(service),
+            DownReason::Unreachable { check } => describe::checks(std::slice::from_ref(check))
+                .trim_end()
+                .into(),
+        }
+    }
+
+    /// The same reason, whatever the OS said in detail (`error`).
+    pub fn same_kind(&self, other: &DownReason) -> bool {
+        match (self, other) {
+            (DownReason::Unreachable { check: a }, DownReason::Unreachable { check: b }) => {
+                a.id == b.id && a.ok == b.ok && a.args.get("cause") == b.args.get("cause")
+            }
+            (a, b) => a == b,
+        }
+    }
 }
 
 impl ServiceDown {
-    pub(crate) fn other(text: String) -> ServiceDown {
+    pub fn new(reason: DownReason) -> ServiceDown {
         ServiceDown {
-            text,
-            not_in_group: false,
+            text: reason.text(),
+            not_in_group: reason == DownReason::NotInGroup,
+            reason,
         }
+    }
+
+    /// The same reason, said in the current language.
+    pub fn retranslated(&self) -> ServiceDown {
+        ServiceDown::new(self.reason.clone())
+    }
+
+    /// Says the same as `other`, OS detail aside: telling the user again adds nothing.
+    pub fn same_reason(&self, other: &ServiceDown) -> bool {
+        self.not_in_group == other.not_in_group && self.reason.same_kind(&other.reason)
     }
 }
 
@@ -733,12 +788,43 @@ pub fn contact(email: &str, note: &str) -> Option<Contact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Reason;
     use crate::health::{DayStart, EventKind, EventPhase, HealthStatus, IssueCause, LastIssue};
     use crate::phone::{PhoneFrame, PhoneLabel, UsbPhone};
-    use crate::{CheckId, Reason};
     use jiff::SignedDuration;
 
     const SERIAL: &str = "00008140-000000000000002C";
+
+    #[test]
+    fn a_down_reason_is_said_again_in_the_new_language_and_os_detail_is_not_a_new_reason() {
+        let _lock = cg_i18n::lock_for_tests();
+        let unreachable = |error: &str| {
+            ServiceDown::new(DownReason::Unreachable {
+                check: Check::new(CheckId::Service, false).with("error", error),
+            })
+        };
+        cg_i18n::set(cg_i18n::Lang::En);
+        let busy = unreachable("All pipe instances are busy.");
+        let missing = unreachable("The system cannot find the file specified.");
+        assert_ne!(busy.text, missing.text);
+        assert!(busy.same_reason(&missing));
+        let refused = ServiceDown::new(DownReason::Unreachable {
+            check: Check::new(CheckId::Service, false)
+                .with("error", "x")
+                .with("cause", "not_allowed"),
+        });
+        assert!(!busy.same_reason(&refused));
+        let gone = ServiceDown::new(DownReason::Gone);
+        assert!(!gone.same_reason(&busy));
+        assert!(!gone.same_reason(&ServiceDown::new(DownReason::NotInGroup)));
+        assert_eq!(gone.text, cg_i18n::tr("gui.service_gone", &[]));
+        cg_i18n::set(cg_i18n::Lang::ZhCn);
+        let again = gone.retranslated();
+        assert_eq!(again.text, cg_i18n::tr("gui.service_gone", &[]));
+        assert_ne!(again.text, gone.text);
+        assert!(again.same_reason(&gone));
+        assert!(ServiceDown::new(DownReason::NotInGroup).not_in_group);
+    }
 
     /// Connected through one iPhone that reports a frame: "phone connected" for the pages.
     fn connected_snapshot() -> Snapshot {
@@ -862,14 +948,9 @@ mod tests {
         let connecting = with(ConnState::Connecting, None);
         let unmanaged = with(connected(DnsMode::Unmanaged), None);
         let fine = with(connected(DnsMode::Phone), None);
-        let outside = ServiceDown {
-            text: "x".into(),
-            not_in_group: true,
-        };
-        let stopped = ServiceDown {
-            text: "x".into(),
-            not_in_group: false,
-        };
+        let outside = ServiceDown::new(DownReason::NotInGroup);
+        let stopped = ServiceDown::new(DownReason::Gone);
+        assert!(outside.not_in_group && !stopped.not_in_group);
 
         assert_eq!(
             badge(Section::Overview, Some(&severe), None),
