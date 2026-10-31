@@ -124,8 +124,8 @@ public sealed partial class MainWindow : Window
         Section.DnsLeak => new LeakPage(App.Current.Leak),
         Section.History => new HistoryPage(App.Current.History, this),
         Section.Diagnostics => new DiagnosticsPage(App.Current.Diagnostics),
-        Section.Settings => new SettingsPage(),
-        _ => new AboutPage(),
+        Section.Settings => new SettingsPage(App.Current.Settings, _shell, App.Current.Autostart, this),
+        _ => new AboutPage(App.Current.About),
     };
 
     void OnSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

@@ -498,6 +498,60 @@ public class DesktopTests
         Assert.All(sidebar.Skip(1), g => Assert.False(string.IsNullOrEmpty(g.Heading)));
         Assert.Equal(Enum.GetValues<Section>(), sidebar.SelectMany(g => g.Sections).Select(s => s.Section));
     }
+
+    [Fact]
+    public void License_text_splits_on_blank_lines() =>
+        Assert.Equal(new[] { "a 1.0\nMIT", "b 2.0\nApache-2.0" }, LicenseText.Paragraphs("\na 1.0\nMIT\n\n\nb 2.0\nApache-2.0\n"));
+
+    [Fact]
+    public void License_text_keeps_lines_inside_a_paragraph_and_handles_crlf_and_blank_input()
+    {
+        // A line of spaces separates paragraphs too; indentation inside a paragraph stays as it is.
+        Assert.Equal(new[] { "x\n  indented", "y" }, LicenseText.Paragraphs("x\r\n  indented\r\n   \r\ny\r\n"));
+        Assert.Empty(LicenseText.Paragraphs(""));
+        Assert.Empty(LicenseText.Paragraphs("\n\n \n"));
+        Assert.Equal(new[] { "only" }, LicenseText.Paragraphs("only"));
+    }
+
+    [Fact]
+    public void Autostart_toggle_reads_back_what_the_registry_says()
+    {
+        var run = new FakeRunKey();
+        var approved = new FakeApproved();
+        var autostart = new Autostart(run, approved, @"C:\A B\CellGlide.exe");
+
+        // Turning it on writes our value and reads back On.
+        Assert.Equal(new AutostartChange(AutostartState.On, null), AutostartToggle.Apply(autostart, true));
+        Assert.Equal("\"C:\\A B\\CellGlide.exe\" --tray", run.Read(Autostart.ValueName));
+
+        // A failed write passes the reason on and shows what is really there.
+        run.Fail = true;
+        var failed = AutostartToggle.Apply(autostart, false);
+        Assert.Equal(AutostartState.On, failed.State);
+        Assert.False(string.IsNullOrEmpty(failed.Error));
+        run.Fail = false;
+
+        // Disabled by the system: the toggle never writes, it only reads.
+        approved[Autostart.ValueName] = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        Assert.Equal(new AutostartChange(AutostartState.DisabledBySystem, null), AutostartToggle.Apply(autostart, false));
+        Assert.NotNull(run.Read(Autostart.ValueName));
+
+        // Off deletes our value.
+        approved[Autostart.ValueName] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        Assert.Equal(new AutostartChange(AutostartState.Off, null), AutostartToggle.Apply(autostart, false));
+        Assert.Null(run.Read(Autostart.ValueName));
+    }
+
+    [Fact]
+    public void Service_toggle_sends_only_a_user_change_that_differs()
+    {
+        // The switch shows the service's value; setting it to that value (a redraw) sends nothing.
+        Assert.False(ServiceToggle.ShouldSend(shown: true, service: true, busy: false));
+        Assert.True(ServiceToggle.ShouldSend(shown: false, service: true, busy: false));
+        // Nothing while a change is on its way, or without a state.
+        Assert.False(ServiceToggle.ShouldSend(shown: false, service: true, busy: true));
+        Assert.False(ServiceToggle.ShouldSend(shown: false, service: null, busy: false));
+    }
 }
 
 /// <summary>A Run key in memory.</summary>
@@ -506,7 +560,7 @@ sealed class FakeRunKey : IRunKey
     readonly Dictionary<string, string> _values = [];
 
     /// <summary>Every write and delete throws, as the registry does when access is denied.</summary>
-    public bool Fail { get; init; }
+    public bool Fail { get; set; }
 
     public string this[string name]
     {

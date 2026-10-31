@@ -1,14 +1,182 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A stand-in with the page's title only; Task 9 fills it. The frame is cg-gui's kit::page. -->
+<!-- Settings, after cg-gui's pages/settings.rs, in its order: which iPhone, connect automatically, start at
+     login and open on plug, then Advanced: strict DNS, the manual proxy address, and DNS with the checks.
+     Every text is the DLL's; the code fills what follows the state, the preferences and the Run key. -->
 <Page
     x:Class="CellGlide.App.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:h="using:CellGlide.App.Hosting">
+    xmlns:h="using:CellGlide.App.Hosting"
+    xmlns:c="using:CellGlide.App.Controls">
+    <Page.Resources>
+        <!-- cg-gui's kit::card: 14 padding, 10 corners, a hairline edge. -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Padding" Value="14" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        </Style>
+        <Style x:Key="Rule" TargetType="Rectangle">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Fill" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        </Style>
+        <Style x:Key="RowLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="Note" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Style>
+        <!-- A bare switch, like cg-gui's toggler: no On/Off words (they would not be the DLL's). -->
+        <Style x:Key="Switch" TargetType="ToggleSwitch">
+            <Setter Property="OnContent" Value="{x:Null}" />
+            <Setter Property="OffContent" Value="{x:Null}" />
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+    </Page.Resources>
+
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <Grid Padding="24,20,24,20">
-            <StackPanel MaxWidth="620" Spacing="18">
-                <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Text="{x:Bind h:L.T('nav.settings')}" />
+            <StackPanel MaxWidth="620" Spacing="14">
+                <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,4" Text="{x:Bind h:L.T('nav.settings')}" />
+
+                <!-- The last refused command (the DLL's sentence). -->
+                <TextBlock x:Name="ErrorLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+
+                <!-- Which iPhone. -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="8">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource RowLabel}" VerticalAlignment="Center" Text="{x:Bind h:L.T('settings.usb_device')}" />
+                            <ComboBox x:Name="PhoneChooser" Grid.Column="1" MinWidth="200" MaxWidth="340" FontSize="13" SelectionChanged="OnPhoneChanged"
+                                      AutomationProperties.Name="{x:Bind h:L.T('settings.usb_device')}"
+                                      AutomationProperties.HelpText="{x:Bind h:L.T('settings.switch_note')}" />
+                        </Grid>
+                        <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.switch_note')}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Connect automatically. -->
+                <Border Style="{StaticResource Card}">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('settings.auto_connect')}" />
+                            <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.auto_connect_note')}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AutoConnectSwitch" Grid.Column="1" Style="{StaticResource Switch}" Toggled="OnAutoConnectToggled"
+                                      AutomationProperties.Name="{x:Bind h:L.T('settings.auto_connect')}"
+                                      AutomationProperties.HelpText="{x:Bind h:L.T('settings.auto_connect_note')}" />
+                    </Grid>
+                </Border>
+
+                <!-- Start at login (our Run value), and open on plug (a preference). -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('settings.launch_at_login')}" />
+                                <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.launch_note')}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="AutostartSwitch" Grid.Column="1" Style="{StaticResource Switch}" Toggled="OnAutostartToggled"
+                                          AutomationProperties.Name="{x:Bind h:L.T('settings.launch_at_login')}" />
+                        </Grid>
+                        <!-- Turned off in Windows' Startup apps: only Windows turns it back on. -->
+                        <TextBlock x:Name="DisabledBySystemLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed"
+                                   AutomationProperties.LiveSetting="Polite" Text="{x:Bind h:L.T('settings.launch_disabled_by_system')}" />
+                        <TextBlock x:Name="AutostartErrorLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+                        <Rectangle Style="{StaticResource Rule}" />
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('settings.open_on_plug')}" />
+                                <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.open_on_plug_note')}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="OpenOnPlugSwitch" Grid.Column="1" Style="{StaticResource Switch}" Toggled="OnOpenOnPlugToggled"
+                                          AutomationProperties.Name="{x:Bind h:L.T('settings.open_on_plug')}"
+                                          AutomationProperties.HelpText="{x:Bind h:L.T('settings.open_on_plug_note')}" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock FontSize="13" FontWeight="SemiBold" Margin="0,4,0,-6" AutomationProperties.HeadingLevel="Level2"
+                           Text="{x:Bind h:L.T('settings.advanced')}" />
+
+                <!-- Strict DNS (the service's setting). -->
+                <Border Style="{StaticResource Card}">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('settings.strict_dns')}" />
+                            <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.strict_dns_note')}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="StrictDnsSwitch" Grid.Column="1" Style="{StaticResource Switch}" Toggled="OnStrictDnsToggled"
+                                      AutomationProperties.Name="{x:Bind h:L.T('settings.strict_dns')}"
+                                      AutomationProperties.HelpText="{x:Bind h:L.T('settings.strict_dns_note')}" />
+                    </Grid>
+                </Border>
+
+                <!-- The manual proxy address, with Copy. -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="8">
+                        <StackPanel Spacing="2">
+                            <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('settings.proxy')}" />
+                            <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('settings.proxy_note')}" />
+                        </StackPanel>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Border Padding="8,5,8,5" CornerRadius="6" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                                <TextBlock x:Name="ProxyText" FontSize="12" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                            </Border>
+                            <!-- Named by its own text ("Copy" / "Copied"); the help text says what it copies. -->
+                            <Button x:Name="CopyProxyButton" Grid.Column="1" FontSize="12" Padding="8,2,8,3" VerticalAlignment="Center"
+                                    AutomationProperties.LiveSetting="Polite" AutomationProperties.HelpText="{x:Bind h:L.T('settings.proxy')}"
+                                    Click="OnCopyProxyClick" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- DNS, and the checks. -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource RowLabel}" VerticalAlignment="Center" Text="{x:Bind h:L.T('settings.dns')}" />
+                            <StackPanel x:Name="DnsRow" Grid.Column="1" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" Visibility="Collapsed">
+                                <Ellipse x:Name="DnsDot" Width="8" Height="8" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw" />
+                                <TextBlock x:Name="DnsText" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+                            </StackPanel>
+                        </Grid>
+                        <c:ChecksList x:Name="Checks" />
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </Grid>
     </ScrollViewer>

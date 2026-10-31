@@ -314,6 +314,26 @@ Speed test finished
   - 范围的两个单选现在是一个组，读屏名 `Time range`。保存的文件脱敏检查 0 处，已删除。
 - **给 Task 10 的提醒**：用户在场看界面时，凡是可能打开诊断页的构建（Debug 版），启动时都必须把 `CELLGLIDE_DIAG_TARGET` 设成一个没人监听的本地端口（例如 `http://127.0.0.1:18081/v1/reports`）；否则就请用户不要按 `Send`。Debug 版不设这个变量时会发往正式服务；Release / 发布版一定发往正式服务，W3 里不要在发布版上按 `Send`。
 
+### 设置页与关于页（W3 Task 9，2026-10-31）
+
+- **实测方式**：同前几个任务，会话 1 临时交互计划任务 `CGT9`（用完已删）跑 UI Automation 驱动脚本。Debug 构建，`CELLGLIDE_LANG=en`，`CELLGLIDE_DIAG_TARGET` 指向没人监听的本地端口。前半段会话 1 锁屏（剪贴板不可用、系统「设置」窗口不渲染），后半段用户解锁了屏幕，剪贴板、系统「启动应用」和截图三项是在解锁后做的。开始前拍基线快照（当天新拍），然后 `cellglide.exe connect`；全部做完后 `disconnect` 再拍。
+- **严格 DNS**（连接中）：开关为开（服务值）→ 拨关：`cellglide.exe settings` 为 `Strict DNS: off`，`status` 为 `Strict DNS: off in settings`，概览的严格 DNS 行为 `Strict DNS: off in settings`；拨回开：`settings` 为 `Strict DNS: on`，`status` 与概览为 `Strict DNS: on (DNS queries can only go through the phone)`。这一来回共做了两次（第一次驱动脚本的 CLI 调用写错没记下输出，第二次完整记录）。**最后为开（默认）**。开关的读屏名 `Strict DNS`，帮助文字是 `settings.strict_dns_note` 全文。
+- **自动连接**：拨关 → `Auto connect: off`；拨回 → `Auto connect: on`。最后为开。
+- **代理地址**：页面显示 `socks5h://127.0.0.1:57769`；点 `Copy` 后按钮变为 `Copied`，3 秒后回到 `Copy`，剪贴板内容为 `socks5h://127.0.0.1:57769`。`cellglide.exe status` 不显示代理地址（brief 写的对照来源不存在），所以只和页面上 DLL 给的地址比对。锁屏时剪贴板打不开，复制按钮保持 `Copy`（不声称复制成功）。
+- **检查**：`Run Checks` → 6 行：`Apple's device service is installed (Apple Devices app)`、`… answering on port 27015`、`1 iPhone(s) detected`、`The iPhone trusts this computer`、`wintun.dll is present and properly signed`、`CellGlide's DNS port 53 is free`，与 `cellglide.exe doctor` 的 7 行（全部 ✓）相同，只少 CLI 自己加的第一行 `The CellGlide service is running`（cg-cli `main.rs` 在连上服务后自行补上，cg-gui 同样没有这一行）。✓ 标记对读屏是 Raw，状态不能从 UIA 读到，以 CLI 的 ✓ 为准。
+- **插上 iPhone 时打开窗口**：开关拨开 → `prefs.json` 为 `"open_on_plug": true`；拨回 → `false`。**拔插 iPhone 的那一步没有做**（需要用户在场拔插）。测试前没有 `prefs.json`，测完的内容等于默认值，已删除，恢复为测前状态。
+- **登录后在后台启动**（真实 HKCU Run；测前 Run 里没有 `CellGlide`，StartupApproved\Run 里也没有）：
+  1. 打开 → `reg query …\Run /v CellGlide` 为 `REG_SZ "C:\Users\iloss\CellGlide-Desktop\windows\CellGlide.App\bin\Debug\net10.0-windows10.0.26100.0\win-x64\CellGlide.exe" --tray`。
+  2. 驱动脚本在系统「设置 › 应用 › 启动」（`ms-settings:startupapps`）里把 `CellGlide` 拨关（写 StartupApproved 的是 Windows，不是我们的代码或脚本）：StartupApproved 为 `01000000…`；回到 App 切走再回来，开关为关、不可操作，帮助文字和下面那行都是 `Turned off in Windows Settings › Apps › Startup. Turn it back on there.`。
+  3. 在系统里拨回开：StartupApproved 为 `000000000000000000000000`；App 切走再回来，开关为开、可操作，那行消失。
+  4. 在 App 里拨关：Run 里的 `CellGlide` 被删除（`reg query` 找不到）。Run 恢复为测前状态。**StartupApproved\Run 里留下了 Windows 自己写的 `CellGlide = 00…`（启用）**；按规则我们不写也不删这个键。
+- **关于**：版本 `Version 1.0.0`，与窗口底部（即托盘菜单第一项）`CellGlide 1.0.0`、`cellglide --version` 一致；`Copy` 后剪贴板为 `1.0.0`（解锁后，AOT 发布版）。`Telegram channel` 的链接显示 DLL 的 `https://t.me/cellglide`；点击后默认浏览器（Chrome，测前没有在运行）以 `chrome.exe … --single-argument https://t.me/cellglide` 启动，窗口标题 `Telegram: View @cellglide - Google Chrome`；随后用 `CloseMainWindow` 正常关掉，没有残留浏览器进程。
+- **许可**：`View` 打开对话框（标题与读屏名 `Open Source Licenses`），列表能滚动（滚到 50% / 100% / 0%）。按 `LicenseText` 的分段规则从 DLL 嵌入的两份文件算出预期的段落（Rust 部分 2763 段，加 NuGet 一段），用 `ItemContainerPattern.FindItemByProperty` 在列表里找到了含 `H.NotifyIcon.WinUI`、`Microsoft.WindowsAppSDK`、`CommunityToolkit.Mvvm` 的那一行和含 `tokio 1.53.3` 的那一行（滚到它时列表在 69.7%）。`Close` 关掉对话框，焦点回到 `View`。（用 UIA 逐行枚举约 2800 行太慢，会超时，所以改成按预期内容查找。）
+- **退出**：`Quit CellGlide` 后进程 112 ms 退出，退出码 0（Debug 版和 AOT 发布版各一次）。
+- **AOT 发布版冒烟**：设置页各控件与 Debug 版相同；关于页、许可对话框（2763 + 1 段、四个名字都找到）、复制版本号、退出都正常。
+- **截图**：解锁后截到了设置页和关于页（不是黑屏），只用于自查，没有放进仓库（Task 10 统一截图）。
+- **网络与流量**：基线与结束时快照 `-Compare` **identical**；结束时隧道已断开，`Auto connect: on`、`Strict DNS: on`。手机流量 `This session` 38.5 → 43.3 MB（约 4.8 MB，连接约 20 分钟，含 Chrome 打开 t.me 页面）。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

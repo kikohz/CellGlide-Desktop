@@ -55,6 +55,11 @@ public partial class App : Application
 
     public DiagnosticsViewModel Diagnostics { get; private set; } = null!;
 
+    public AboutViewModel About { get; private set; } = null!;
+
+    /// <summary>Start at login: our own value in HKCU\...\Run for this executable (StartupApproved is only read).</summary>
+    public Autostart Autostart { get; private set; } = null!;
+
     /// <summary>Set once quitting has begun: windows close for real, nothing opens any more.</summary>
     public bool IsQuitting { get; private set; }
 
@@ -82,6 +87,8 @@ public partial class App : Application
         Leak = new LeakViewModel(Hub);
         History = new HistoryViewModel(Hub);
         Diagnostics = new DiagnosticsViewModel(Hub);
+        About = new AboutViewModel(Hub);
+        Autostart = new Autostart(new RegistryRunKey(), new RegistryStartupApproved(), Environment.ProcessPath!);
         _lifetime = new AppLifetime(Hub, core, Speed, Leak);
 
         Hub.PhonePlugged += OnPhonePlugged;

@@ -1,14 +1,83 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A stand-in with the page's title only; Task 9 fills it. The frame is cg-gui's kit::page. -->
+<!-- About, after cg-gui's pages/about.rs: the icon, name and version (with Copy), the Telegram channel and the
+     billing note, the open source licenses (in a dialog), and Quit. The version, link and licenses are the
+     DLL's (GetAbout); the code fills them in once they come. -->
 <Page
     x:Class="CellGlide.App.Pages.AboutPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:h="using:CellGlide.App.Hosting">
+    <Page.Resources>
+        <!-- cg-gui's kit::card: 14 padding, 10 corners, a hairline edge. -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Padding" Value="14" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        </Style>
+        <Style x:Key="Rule" TargetType="Rectangle">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Fill" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        </Style>
+    </Page.Resources>
+
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <Grid Padding="24,20,24,20">
-            <StackPanel MaxWidth="620" Spacing="18">
-                <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Text="{x:Bind h:L.T('nav.about')}" />
+            <StackPanel MaxWidth="620" Spacing="14">
+                <TextBlock FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,4" Text="{x:Bind h:L.T('nav.about')}" />
+
+                <TextBlock x:Name="ErrorLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+
+                <!-- The icon, the name, the version and Copy. -->
+                <StackPanel Spacing="6" HorizontalAlignment="Center">
+                    <Image x:Name="Icon" Width="88" Height="88" HorizontalAlignment="Center" AutomationProperties.Name="{x:Bind h:L.T('gui.title')}" />
+                    <TextBlock FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Text="{x:Bind h:L.T('gui.title')}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                        <TextBlock x:Name="VersionText" FontSize="13" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <!-- Named by its own text ("Copy" / "Copied"); the help text is the version it copies. -->
+                        <Button x:Name="CopyVersionButton" FontSize="12" Padding="8,2,8,3" VerticalAlignment="Center"
+                                AutomationProperties.LiveSetting="Polite" Click="OnCopyVersionClick" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- The Telegram channel, and the billing note. -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap" Text="{x:Bind h:L.T('about.telegram')}" />
+                            <!-- Shows the DLL's link; read out as the channel it opens, with the link as help text. -->
+                            <HyperlinkButton x:Name="TelegramButton" Grid.Column="1" FontSize="13" IsEnabled="False" Click="OnTelegramClick"
+                                             AutomationProperties.Name="{x:Bind h:L.T('about.telegram')}" />
+                        </Grid>
+                        <Rectangle Style="{StaticResource Rule}" />
+                        <TextBlock FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind h:L.T('about.billing')}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- The open source licenses. -->
+                <Border Style="{StaticResource Card}">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="LicensesLabel" FontSize="13" TextWrapping="Wrap" Text="{x:Bind h:L.T('about.licenses')}" />
+                            <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind h:L.T('about.licenses_note')}" />
+                        </StackPanel>
+                        <!-- "View", tied to its row; the explicit Name keeps "View" as its name (LabeledBy alone would replace it). -->
+                        <Button x:Name="ShowLicensesButton" Grid.Column="1" FontSize="13" VerticalAlignment="Center" IsEnabled="False" Click="OnShowLicensesClick"
+                                AutomationProperties.LabeledBy="{x:Bind LicensesLabel}" AutomationProperties.Name="{x:Bind h:L.T('about.show')}"
+                                Content="{x:Bind h:L.T('about.show')}" />
+                    </Grid>
+                </Border>
+
+                <Button x:Name="QuitButton" HorizontalAlignment="Center" FontSize="13" Click="OnQuitClick" Content="{x:Bind h:L.T('about.quit')}" />
             </StackPanel>
         </Grid>
     </ScrollViewer>

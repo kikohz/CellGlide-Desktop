@@ -78,6 +78,35 @@ public static partial class Show
     public static double Opacity(bool dim) => dim ? 0.5 : 1.0;
 
     /// <summary>
+    /// Puts <paramref name="text"/> on the clipboard; false when another program holds it right now (then
+    /// nothing was copied, and nothing should claim it was).
+    /// </summary>
+    public static bool Copy(string text)
+    {
+        var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+        package.SetText(text);
+        try
+        {
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+            Windows.ApplicationModel.DataTransfer.Clipboard.Flush();
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Has a screen reader say <paramref name="element"/> (it carries AutomationProperties.LiveSetting) now.</summary>
+    public static void Announce(UIElement element)
+    {
+        if ((FrameworkElementAutomationPeer.FromElement(element) ?? FrameworkElementAutomationPeer.CreatePeerForElement(element)) is { } peer)
+        {
+            peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+        }
+    }
+
+    /// <summary>
     /// Has a screen reader say <paramref name="line"/> again whenever its text changes to something
     /// (it carries AutomationProperties.LiveSetting; XAML does not raise LiveRegionChanged by itself).
     /// </summary>
