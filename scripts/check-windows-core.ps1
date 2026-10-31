@@ -6,12 +6,13 @@
 #   2. the committed NativeMethods.g.cs must be what the build wrote;
 #   3. dotnet build of windows/CellGlide.sln (warnings are errors), with locked package versions;
 #   4. dotnet test of windows/CellGlide.Tests against that DLL;
-#   5. scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
+#   5. scripts/tests/test-check-nuget-licenses.ps1 (the license script against fixtures), then
+#      scripts/check-nuget-licenses.ps1 -Check (packaging/licenses/nuget.txt is current and every
 #      license is allowed or reviewed).
 # -Release takes the DLL from target\release instead of target\debug.
 # -Publish then builds cg-ffi in release and publishes CellGlide.App (Native AOT, self-contained) for
-# this machine's architecture, and checks that the publish folder has CellGlide.exe and
-# cellglide_native.dll.
+# this machine's architecture, and checks that the publish folder (the project's PublishDir) has
+# CellGlide.exe and cellglide_native.dll and no onnxruntime*.dll or DirectML*.dll.
 # The dotnet steps run inside windows\ so that windows\global.json (SDK pin, test runner) applies.
 param(
     [switch]$Release,
@@ -68,6 +69,10 @@ try {
         Pop-Location
     }
 
+    Invoke-Step 'NuGet license script tests' {
+        powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests\test-check-nuget-licenses.ps1')
+    }
+
     Invoke-Step 'NuGet licenses' {
         powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'check-nuget-licenses.ps1') -Check
     }
@@ -75,12 +80,19 @@ try {
     if ($Publish) {
         $rid = 'win-x64'
         if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { $rid = 'win-arm64' }
-        $publishDir = Join-Path $root "windows\CellGlide.App\bin\Release\net10.0-windows10.0.26100.0\$rid\publish"
-        # An earlier publish must not satisfy the check below.
-        if (Test-Path $publishDir) { Remove-Item -Recurse -Force $publishDir }
         Invoke-Step 'cargo build -p cg-ffi --release' { cargo build -p cg-ffi --release --locked }
         Push-Location (Join-Path $root 'windows')
         try {
+            # The publish folder as the project defines it (its TFM is in the csproj, not here).
+            $publishDir = (dotnet msbuild CellGlide.App -nologo -getProperty:PublishDir -p:Configuration=Release "-p:RuntimeIdentifier=$rid" | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $publishDir) {
+                Write-Host "FAILED: could not read CellGlide.App's PublishDir for Release/$rid from the project (got '$publishDir')."
+                exit 1
+            }
+            if (-not [IO.Path]::IsPathRooted($publishDir)) { $publishDir = Join-Path (Join-Path $root 'windows\CellGlide.App') $publishDir }
+            $publishDir = [IO.Path]::GetFullPath($publishDir)
+            # An earlier publish must not satisfy the checks below.
+            if (Test-Path $publishDir) { Remove-Item -Recurse -Force $publishDir }
             Invoke-Step "dotnet publish CellGlide.App -r $rid" {
                 dotnet publish CellGlide.App -c Release -r $rid '-p:CellGlideNativeDir=..\target\release\'
             }
@@ -93,7 +105,14 @@ try {
                 exit 1
             }
         }
-        Write-Host "==> CellGlide.exe and cellglide_native.dll are in $publishDir"
+        # The Windows App SDK's AI and ML components are excluded in CellGlide.App.csproj (and
+        # nuget.txt says they are not shipped); a package update must not bring their files back.
+        $unwanted = @(Get-ChildItem -Path $publishDir -Recurse -File -Include 'onnxruntime*.dll', 'DirectML*.dll')
+        if ($unwanted.Count -gt 0) {
+            Write-Host "FAILED: the publish folder has excluded AI/ML files: $(($unwanted | ForEach-Object { $_.Name }) -join ', ')"
+            exit 1
+        }
+        Write-Host "==> CellGlide.exe and cellglide_native.dll are in $publishDir; no onnxruntime or DirectML"
     }
 } finally {
     Pop-Location

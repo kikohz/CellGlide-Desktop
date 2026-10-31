@@ -27,22 +27,23 @@ runtime.win-x64.Microsoft.DotNet.ILCompiler 10.0.14 MIT https://dot.net/
 System.Drawing.Common 10.0.0 MIT https://github.com/dotnet/winforms
 System.Numerics.Tensors 9.0.0 MIT https://dot.net/
 #
-# Reviewed (not a plain MIT, Apache-2.0 or BSD license expression in the .nuspec):
-#   Microsoft.Web.WebView2: its LICENSE.txt is the BSD 3-clause text; shipped (a dependency of the WinUI package)
-#   Microsoft.Windows.AI.MachineLearning: (its license file is the Windows ML Runtime terms) pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published
-#   Microsoft.Windows.SDK.BuildTools: build tools (Windows SDK metadata and tools), used only while building
-#   Microsoft.Windows.SDK.BuildTools.MSIX: MSIX build tools that make resources.pri, used only while building
-#   Microsoft.WindowsAppSDK: metapackage (no files of its own); the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.AI: pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published
-#   Microsoft.WindowsAppSDK.Base: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.DWrite: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.Foundation: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.InteractiveExperiences: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.ML: pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published
-#   Microsoft.WindowsAppSDK.Runtime: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.Search: pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published
-#   Microsoft.WindowsAppSDK.Widgets: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
-#   Microsoft.WindowsAppSDK.WinUI: the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+# Reviewed (not a plain MIT, Apache-2.0 or BSD license expression in the .nuspec), with what the
+# .nuspec declares (a license file by name and the first 16 hex digits of its SHA-256):
+#   Microsoft.Web.WebView2 1.0.3719.77: declares file LICENSE.txt sha256:0af8f1b807512aae; its LICENSE.txt is the BSD 3-clause text; shipped (a dependency of the WinUI package)
+#   Microsoft.Windows.AI.MachineLearning 2.4.89: declares file license.txt sha256:66395f8cb219087f; (its license file is the Windows ML Runtime terms) pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published (check-windows-core.ps1 -Publish checks)
+#   Microsoft.Windows.SDK.BuildTools 10.0.26100.4654: declares licenseUrl https://aka.ms/WinSDKLicenseURL; build tools (Windows SDK metadata and tools), used only while building
+#   Microsoft.Windows.SDK.BuildTools.MSIX 1.7.251221100: declares file sdk_license.txt sha256:a7a5c7e7ff998558; MSIX build tools that make resources.pri, used only while building
+#   Microsoft.WindowsAppSDK 2.6.4: declares file license.txt sha256:5b11e6347756e40f; metapackage (no files of its own); the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.AI 2.6.4: declares file license.txt sha256:5b11e6347756e40f; pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published (check-windows-core.ps1 -Publish checks)
+#   Microsoft.WindowsAppSDK.Base 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.DWrite 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.Foundation 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.InteractiveExperiences 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.ML 2.6.4: declares file license.txt sha256:656aab74c15aa9f9; (its license file adds the Windows ML terms) pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published (check-windows-core.ps1 -Publish checks)
+#   Microsoft.WindowsAppSDK.Runtime 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.Search 2.6.4: declares file license.txt sha256:5b11e6347756e40f; pulled in by the Microsoft.WindowsAppSDK metapackage; CellGlide.App references it with ExcludeAssets="all", so none of its files are built or published (check-windows-core.ps1 -Publish checks)
+#   Microsoft.WindowsAppSDK.Widgets 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
+#   Microsoft.WindowsAppSDK.WinUI 2.6.4: declares file license.txt sha256:5b11e6347756e40f; the WinUI 3 runtime the app is built on (spec 9.1); its files are carried in the self-contained publish folder, which section 3.a.i of its terms allows
 #
 # Note for W4 (packaging): the Windows App SDK files ship under the Microsoft Software License
 # Terms, not a permissive license. The zip and the installer must carry the Windows App SDK license
