@@ -1217,6 +1217,7 @@ async fn leak_cancel_stops_the_test() {
         |e| matches!(e, Event::LeakProgress { view } if view.running),
     )
     .await;
+    let asked = std::time::Instant::now();
     let id = rt.send(Command::LeakCancel);
     assert_eq!(reply_of(&events, id).await, ReplyResult::done());
     let stopped = wait_for(
@@ -1224,11 +1225,63 @@ async fn leak_cancel_stops_the_test() {
         |e| matches!(e, Event::LeakProgress { view } if !view.running),
     )
     .await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        asked.elapsed()
+    );
     let Event::LeakProgress { view } = stopped else {
         unreachable!()
     };
     assert!(view.result.is_none() && view.error.is_none());
     rt.shutdown();
+}
+
+#[test]
+fn shutdown_during_leak_test_is_clean() {
+    // The fake service lives on a runtime of the test's own; the DLL's `Runtime` is outside it.
+    let servers = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let svc = servers.block_on(FakeService::start(Replies::default()));
+    let (sink, events) = collect();
+    let rt = Runtime::start(
+        Config {
+            // As `system_resolve`: each lookup holds one of tokio's blocking threads, here
+            // for far longer than shutdown waits.
+            resolve: |_| {
+                Box::pin(async {
+                    let _ =
+                        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)))
+                            .await;
+                })
+            },
+            ..config(&svc, dir.path())
+        },
+        sink,
+    );
+    rt.send(Command::LeakStart);
+    servers.block_on(wait_for(
+        &events,
+        |e| matches!(e, Event::LeakProgress { view } if view.running),
+    ));
+    let t = std::time::Instant::now();
+    rt.shutdown();
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
+    let after = events.lock().unwrap().len();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        events.lock().unwrap().len(),
+        after,
+        "nothing after shutdown"
+    );
+    drop(svc);
 }
 
 #[tokio::test]
