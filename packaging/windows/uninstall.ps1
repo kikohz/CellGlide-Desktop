@@ -27,9 +27,12 @@ processes on purpose: an elevated process must never delete inside a tree a stan
 write to, or that user could swap a junction in and redirect the delete elsewhere.
 C:\ProgramData\CellGlide has an admin/SYSTEM-only ACL (set by install.ps1), which is verified
 first and the purge refuses it if a non-administrator can write there, so only the elevated
-part touches it. %LOCALAPPDATA%\CellGlide is under the user's own profile, so it is removed by
-the unelevated parent running as that user, after the elevated part finishes; a junction swap
-gains nothing, because the user can already delete whatever their own token can delete.
+part touches it. %LOCALAPPDATA%\CellGlide is under the user's own profile, so it is removed only
+by an unelevated top-level process running as that user, and only after the elevated part
+returned 0; a junction swap gains nothing, because the user can already delete whatever their
+own token can delete. Run from an administrator window (or iex in one), the script never deletes
+it and says so: delete the folder from a normal window, or rerun with -Purge from a normal
+window. (The Settings > Installed apps uninstall passes no -Purge, so it keeps all data.)
 
 Known limits: only the invoking user's %LOCALAPPDATA%\CellGlide is removed; other accounts keep
 their own %LOCALAPPDATA%\CellGlide, and a signed-in Microsoft/Entra ID user (SID S-1-12-1-*)
@@ -90,6 +93,9 @@ $RunValueName = 'CellGlide'
 $RunKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Run'
 $ProfileListKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
 $ServicesKey = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+# The Chinese line printed when an administrator window skips the user's own data ({0} = the
+# folder), as UTF-8 in base64 so this file stays ASCII.
+$UserDataSkippedZh = '5pyq5Yig6ZmkIHswfe+8mueuoeeQhuWRmOeql+WPo+S4jeS8muWIoOmZpOS9oOS4quS6uuebruW9lemHjOeahOWGheWuueOAguivt+WcqOaZrumAmu+8iOmdnueuoeeQhuWRmO+8ieeql+WPo+mHjOWIoOmZpOi/meS4quaWh+S7tuWkue+8jOaIluWcqOaZrumAmueql+WPo+mHjOmHjeaWsOi/kOihjOWNuOi9veW5tuWKoOS4iiAtUHVyZ2XjgII='
 
 # ---- Shared with install.ps1 (decision 3: kept identical; tests\Shared.Tests.ps1) ----
 
@@ -426,23 +432,82 @@ function Test-ProfileDataPath([string]$Path, [string]$ProfilesRoot) {
     return $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -and $full.Length -gt $root.Length + 1
 }
 
-function Test-DataDirAdminOnly([string]$Dir) {
-    # True when $Dir grants write-class rights only to SYSTEM, the service accounts and
-    # Administrators, so no standard user can plant a junction in it before the elevated purge.
-    # Any Allow ACE that lets some other principal create, write, delete or re-permission fails.
+function Test-AdminSid([string]$Sid) {
+    # SYSTEM, LocalService, NetworkService, Administrators, or a service SID (S-1-5-80-*): no
+    # standard user can act as any of these.
     $ErrorActionPreference = 'Stop'
-    $acl = Get-Acl -LiteralPath $Dir
-    $readOnly = [Security.AccessControl.FileSystemRights]'ReadAndExecute, ReadPermissions, Synchronize'
-    foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-        if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
-        $sid = $ace.IdentityReference.Value
-        # SYSTEM, LocalService, NetworkService, Administrators, and service SIDs (S-1-5-80-*): a
-        # standard user cannot assume any of these, nor set an ACE for one on a folder they do
-        # not control, so their write access is not a way in.
-        if ($sid -in 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544' -or $sid -like 'S-1-5-80-*') { continue }
-        if (([int]$ace.FileSystemRights -band -bnot [int]$readOnly) -ne 0) { return $false }
+    return ($Sid -in 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544' -or $Sid -like 'S-1-5-80-*')
+}
+
+function Test-DataDirAdminOnly([string]$Dir) {
+    # True when $Dir and everything in it are owned by SYSTEM, Administrators or a service SID
+    # and grant write-class rights to nobody else, so no standard user could have planted or can
+    # plant anything in it before the elevated purge. C:\ProgramData lets Users create folders,
+    # so the owner matters as much as the ACL: a user who pre-created ProgramData\CellGlide owns
+    # it, and an owner can always rewrite the ACL. A link anywhere fails too (never followed).
+    $ErrorActionPreference = 'Stop'
+    $readOnly = [int][Security.AccessControl.FileSystemRights]'ReadAndExecute, ReadPermissions, Synchronize'
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($Dir)
+    while ($pending.Count -gt 0) {
+        $path = $pending.Pop()
+        $item = Get-Item -LiteralPath $path -Force
+        if (Test-ReparsePoint $item) { return $false }
+        $acl = Get-Acl -LiteralPath $path
+        if (-not (Test-AdminSid $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value)) { return $false }
+        foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (Test-AdminSid $ace.IdentityReference.Value) { continue }
+            if (([int]$ace.FileSystemRights -band -bnot $readOnly) -ne 0) { return $false }
+        }
+        if ($item.PSIsContainer) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { $pending.Push($child.FullName) }
+        }
     }
     return $true
+}
+
+function Remove-OwnTempFile([string]$Path) {
+    # Deletes one of this run's own %TEMP% files through a handle opened on the name itself
+    # (FILE_FLAG_OPEN_REPARSE_POINT: a link is never followed), and only when that handle is a
+    # plain file with exactly one link. The delete is bound to the object that was checked, so a
+    # swap in between cannot redirect it. Anything else is left in place (it is harmless).
+    $ErrorActionPreference = 'Stop'
+    if (-not ('CellGlideUninstall.TempFile' -as [type])) {
+        Add-Type -Namespace CellGlideUninstall -Name TempFile -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct Info {
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+}
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path, uint access, uint share, System.IntPtr sec, uint disposition, uint flags, System.IntPtr template);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, out Info info);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, ref byte deleteFile, uint size);
+'@
+    }
+    # DELETE | FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT.
+    $handle = [CellGlideUninstall.TempFile]::CreateFileW($Path, 0x00010080, 7, [IntPtr]::Zero, 3, 0x00200000, [IntPtr]::Zero)
+    if ($handle.IsInvalid) { return $false }
+    try {
+        $info = New-Object CellGlideUninstall.TempFile+Info
+        if (-not [CellGlideUninstall.TempFile]::GetFileInformationByHandle($handle, [ref]$info)) { return $false }
+        $attributes = [IO.FileAttributes]$info.FileAttributes
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -or ($attributes -band [IO.FileAttributes]::Directory) -or $info.NumberOfLinks -ne 1) { return $false }
+        [byte]$delete = 1
+        # FileDispositionInfo = 4: the file goes when this handle closes.
+        return [CellGlideUninstall.TempFile]::SetFileInformationByHandle($handle, 4, [ref]$delete, 1)
+    } finally { $handle.Dispose() }
 }
 
 function Get-CanonicalPath([string]$Path) {
@@ -579,6 +644,29 @@ function Remove-OwnUserData([string]$Dir = '', [string]$ProfilesRoot = '') {
         throw "$Dir is not under the profiles folder $ProfilesRoot"
     }
     Remove-DataDir $Dir
+}
+
+function Remove-UserDataAsUser([int]$Code, [bool]$Elevated) {
+    # The -Purge step for the invoking user's own %LOCALAPPDATA%\CellGlide, run by the top-level
+    # process after the elevated part. Returns the exit code. Nothing is deleted when the elevated
+    # part did not return 0 (cancelled UAC prompt, a failed step, a changed script), and nothing
+    # is ever deleted by an elevated process (an administrator window, or iex in one): the user is
+    # told, in English and Chinese, to delete it from a normal window instead.
+    $ErrorActionPreference = 'Stop'
+    $dir = Join-Path $env:LOCALAPPDATA 'CellGlide'
+    if ($Code -ne 0) {
+        if (Test-Path -LiteralPath $dir) { Write-Host "Kept $dir because the uninstall did not finish." }
+        return $Code
+    }
+    if ($Elevated) {
+        if (Test-Path -LiteralPath $dir) {
+            Write-Host "Not removed: $dir (an administrator window never deletes inside your profile). Delete that folder from a normal (not administrator) window, or run the uninstall again with -Purge from a normal window."
+            Write-Host ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($UserDataSkippedZh)) -f $dir)
+        }
+        return $Code
+    }
+    try { Remove-OwnUserData; return $Code }
+    catch { Write-Host "user data failed: $($_.Exception.Message)"; return 1 }
 }
 
 function Remove-ServiceEntry {
@@ -742,7 +830,7 @@ function Invoke-UninstallChild {
         }
         return $code
     } finally {
-        Remove-Item -LiteralPath $scriptFile, $logFile -Force -ErrorAction SilentlyContinue
+        foreach ($own in $scriptFile, $logFile) { try { $null = Remove-OwnTempFile $own } catch { } }
     }
 }
 
@@ -772,11 +860,13 @@ function Invoke-CellGlideUninstall {
                 Remove-PathWithRetry $work
             }
         }
-        # The top-level process, running as the invoking user (elevated or not). The system
-        # changes are done elevated (relocated to an elevated child, or here when already an
-        # administrator outside the install folder). Then, with -Purge, this process removes the
-        # user's own %LOCALAPPDATA%\CellGlide as that user: the elevated part never does.
-        if (Test-NeedsRelocation $ScriptPath $InstallDir (Test-Elevated)) {
+        # The top-level process, running as the invoking user. The system changes are done
+        # elevated (relocated to an elevated child, or here when already an administrator outside
+        # the install folder). Then, with -Purge, an UNELEVATED top-level process removes the
+        # user's own %LOCALAPPDATA%\CellGlide as that user, and only when the elevated part
+        # succeeded. An elevated process never deletes it (see Remove-UserDataAsUser).
+        $elevated = Test-Elevated
+        if (Test-NeedsRelocation $ScriptPath $InstallDir $elevated) {
             if ($ScriptPath) {
                 # Run with -File: this process's own working folder must not hold the install
                 # folder open while the child deletes it.
@@ -788,12 +878,8 @@ function Invoke-CellGlideUninstall {
         } else {
             $code = Invoke-UninstallPart -Purge:$Purge
         }
-        if ($Purge) {
-            try { Remove-OwnUserData }
-            catch { Write-Host "user data failed: $($_.Exception.Message)"; if ($code -eq 0) { $code = 1 } }
-        } else {
-            Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history and preferences); run with -Purge to delete it."
-        }
+        if ($Purge) { $code = Remove-UserDataAsUser $code $elevated }
+        else { Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history and preferences); run with -Purge to delete it." }
         return $code
     } catch {
         Write-Host "Uninstall failed: $($_.Exception.Message)"

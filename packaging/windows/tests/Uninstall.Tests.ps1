@@ -127,26 +127,59 @@ Describe 'uninstall.ps1' {
         finally { Remove-Item -LiteralPath (Join-Path $dir 'slink') -Force -ErrorAction SilentlyContinue }
         (Get-Item $target).Length | Should -BeGreaterThan 0
     }
-    It 'the ProgramData purge is refused when a non-administrator can write there' {
-        $dir = Join-Path $TestDrive 'pd\CellGlide'; New-Item -ItemType Directory $dir | Out-Null
-        $acl = New-Object Security.AccessControl.DirectorySecurity
-        $acl.SetAccessRuleProtection($true, $false)
-        $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
-            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', $inherit, 'None', 'Allow')))
+    Context 'the ProgramData purge checks owners and ACLs of the whole tree' -Tag 'Elevated' {
+        BeforeAll {
+            # Gives $Path a protected ACL: SYSTEM and Administrators full control, plus $Extra
+            # (sid = rights), owned by $Owner. Setting Administrators or oneself as owner needs no
+            # privilege beyond an elevated token.
+            $script:SetSecurity = { param([string]$Path, [string]$Owner, [hashtable]$Extra = @{})
+                $isDir = (Get-Item -LiteralPath $Path -Force).PSIsContainer
+                $sec = if ($isDir) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
+                $sec.SetAccessRuleProtection($true, $false)
+                $inherit = if ($isDir) { [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+                $grants = @{ 'S-1-5-18' = 'FullControl'; 'S-1-5-32-544' = 'FullControl' } + $Extra
+                foreach ($sid in $grants.Keys) {
+                    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), $grants[$sid], $inherit, 'None', 'Allow')))
+                }
+                $sec.SetOwner((New-Object Security.Principal.SecurityIdentifier($Owner)))
+                Set-Acl -LiteralPath $Path -AclObject $sec }
+            $script:Me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $script:NewTree = { $d = Join-Path $TestDrive ('pd-' + [guid]::NewGuid().ToString('N') + '\CellGlide')
+                $null = New-Item -ItemType Directory (Join-Path $d 'health'); Set-Content (Join-Path $d 'settings.json') '{}'; Set-Content (Join-Path $d 'health\a.jsonl') '{}'
+                foreach ($p in $d, (Join-Path $d 'health'), (Join-Path $d 'settings.json'), (Join-Path $d 'health\a.jsonl')) { & $script:SetSecurity $p 'S-1-5-32-544' }
+                $d }
         }
-        Set-Acl -LiteralPath $dir -AclObject $acl
-        Test-DataDirAdminOnly $dir | Should -BeTrue
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Modify', $inherit, 'None', 'Allow')))
-        Set-Acl -LiteralPath $dir -AclObject $acl
-        Test-DataDirAdminOnly $dir | Should -BeFalse
-        # Read-only for Users is fine (the GUI reads health\).
-        $acl2 = New-Object Security.AccessControl.DirectorySecurity
-        $acl2.SetAccessRuleProtection($true, $false)
-        $acl2.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-18')), 'FullControl', $inherit, 'None', 'Allow')))
-        $acl2.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'ReadAndExecute', $inherit, 'None', 'Allow')))
-        Set-Acl -LiteralPath $dir -AclObject $acl2
-        Test-DataDirAdminOnly $dir | Should -BeTrue
+        It 'an admin-owned tree with admin-only write access may be purged; read-only Users is fine' {
+            $d = & $script:NewTree
+            Test-DataDirAdminOnly $d | Should -BeTrue
+            & $script:SetSecurity (Join-Path $d 'health') 'S-1-5-32-544' @{ 'S-1-5-32-545' = 'ReadAndExecute' }
+            Test-DataDirAdminOnly $d | Should -BeTrue
+        }
+        It 'Users with write access anywhere refuses it' {
+            $d = & $script:NewTree
+            & $script:SetSecurity $d 'S-1-5-32-544' @{ 'S-1-5-32-545' = 'Modify' }
+            Test-DataDirAdminOnly $d | Should -BeFalse
+            $d = & $script:NewTree
+            & $script:SetSecurity (Join-Path $d 'health\a.jsonl') 'S-1-5-32-544' @{ 'S-1-5-32-545' = 'Write' }
+            Test-DataDirAdminOnly $d | Should -BeFalse
+        }
+        It 'a root owned by a standard user refuses it, even with an admin-only ACL' {
+            $d = & $script:NewTree
+            & $script:SetSecurity $d $script:Me
+            Test-DataDirAdminOnly $d | Should -BeFalse
+        }
+        It 'a descendant owned by a standard user refuses it' {
+            $d = & $script:NewTree
+            & $script:SetSecurity (Join-Path $d 'health\a.jsonl') $script:Me
+            Test-DataDirAdminOnly $d | Should -BeFalse
+        }
+        It 'a link anywhere in the tree refuses it' {
+            $d = & $script:NewTree
+            $outside = Join-Path $TestDrive ('o-' + [guid]::NewGuid().ToString('N')); $null = New-Item -ItemType Directory $outside
+            $null = New-Item -ItemType Junction -Path (Join-Path $d 'health\j') -Target $outside
+            try { Test-DataDirAdminOnly $d | Should -BeFalse }
+            finally { [IO.Directory]::Delete((Join-Path $d 'health\j')) }
+        }
     }
     It 'never loads another user''s registry hive' {
         $calls = $script:Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.Extent.Text }
@@ -268,13 +301,44 @@ Describe 'uninstall.ps1' {
         }
         It 'an ordinary window hands the work to an elevated child, then removes the user''s own data with -Purge' {
             Mock Test-Elevated { $false }
-            Mock Invoke-UninstallChild { $script:child = @{ Text = $ScriptText; Args = $Arguments }; 4 }
+            Mock Invoke-UninstallChild { $script:child = @{ Text = $ScriptText; Args = $Arguments }; 0 }
             $CellGlideUninstallText = '# own'
-            Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 4
+            Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
             $script:child.Text | Should -Be '# own'
             $script:child.Args | Should -Be @('-Purge')
             $script:part | Should -BeNullOrEmpty                 # the elevated part runs in the child, not here
-            $script:ownData | Should -BeTrue                     # the parent removes the invoking user's own data
+            $script:ownData | Should -BeTrue                     # the unelevated parent removes the user's own data
+        }
+        It 'a failed elevated part keeps the user''s data' {
+            Mock Test-Elevated { $false }
+            Mock Invoke-UninstallChild { 4 }
+            Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 4
+            $script:ownData | Should -BeFalse
+        }
+        Context 'the real elevation path, with the UAC prompt replaced' {
+            BeforeEach { Mock Test-Elevated { $false } }
+            It 'a declined UAC prompt deletes nothing of the user''s' {
+                Mock Start-Process { throw 'The operation was canceled by the user.' }
+                Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 1
+                Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'Uninstall cancelled.' }
+                $script:ownData | Should -BeFalse
+            }
+            It 'an elevated child that fails deletes nothing of the user''s' {
+                Mock Start-Process { & $script:FakeProcess 2 }
+                Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 2
+                $script:ownData | Should -BeFalse
+            }
+            It 'a changed script (exit 3) deletes nothing of the user''s' {
+                Mock Start-Process { & $script:FakeProcess 3 }
+                Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 1
+                Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Uninstall failed: the copy of the uninstaller in %TEMP% changed*' }
+                $script:ownData | Should -BeFalse
+            }
+            It 'a successful elevated child is followed by the user''s own data' {
+                Mock Start-Process { & $script:FakeProcess 0 }
+                Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
+                $script:ownData | Should -BeTrue
+            }
         }
         It 'without -Purge the user data is kept, said so, and not removed' {
             Mock Test-Elevated { $false }
@@ -290,12 +354,23 @@ Describe 'uninstall.ps1' {
             Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 1
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'user data failed:*' }
         }
-        It 'an administrator window outside the install folder uninstalls in the same process' {
+        It 'an administrator window uninstalls in the same process but never deletes the user''s data, and says so in both languages' {
             Mock Test-Elevated { $true }
             Mock Invoke-UninstallChild { throw 'not reached' }
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq (Join-Path $env:LOCALAPPDATA 'CellGlide') }
             Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
-            $script:part.Purge | Should -BeTrue
-            $script:ownData | Should -BeTrue
+            $script:part.Purge | Should -BeTrue                  # ProgramData is still purged by the elevated part
+            $script:ownData | Should -BeFalse
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Not removed: *CellGlide (an administrator window never deletes*normal (not administrator) window*-Purge*' }
+            $zh = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($UserDataSkippedZh)) -f (Join-Path $env:LOCALAPPDATA 'CellGlide')
+            $zh | Should -Match '-Purge'
+            [int][char]$zh[0] | Should -Be 0x672A
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -ceq $zh }
+        }
+        It 'iex in an administrator window (no script path) never deletes the user''s data either' {
+            Mock Test-Elevated { $true }
+            Invoke-CellGlideUninstall -Purge | Should -Be 0
+            $script:ownData | Should -BeFalse
         }
         It 'the copy in the install folder relocates even in an administrator window' {
             Mock Test-Elevated { $true }
@@ -364,6 +439,23 @@ Describe 'uninstall.ps1' {
             Test-NeedsRelocation (Join-Path $link 'uninstall.ps1') $real $true | Should -BeTrue    # reached through the link
             Test-NeedsRelocation (Join-Path $real 'uninstall.ps1') $real $true | Should -BeTrue
         } finally { [IO.Directory]::Delete($link) }
+    }
+    It 'the parent''s %TEMP% cleanup deletes only a plain single-link file, never through a link' {
+        $plain = Join-Path $TestDrive 'cellglide-uninstall-plain.log'; Set-Content $plain 'x'
+        Remove-OwnTempFile $plain | Should -BeTrue
+        Test-Path $plain | Should -BeFalse
+        $victim = Join-Path $TestDrive 'victim-hard.txt'; Set-Content $victim 'keep'
+        $hard = Join-Path $TestDrive 'cellglide-uninstall-hard.log'; $null = New-Item -ItemType HardLink -Path $hard -Target $victim
+        Remove-OwnTempFile $hard | Should -BeFalse                      # two links: left alone
+        Test-Path $hard | Should -BeTrue
+        Remove-OwnTempFile (Join-Path $TestDrive 'missing.log') | Should -BeFalse
+    }
+    It 'the parent''s %TEMP% cleanup never deletes through a symbolic link' -Tag 'Elevated' {
+        $victim = Join-Path $TestDrive 'victim-sym.txt'; Set-Content $victim 'keep'
+        $link = Join-Path $TestDrive 'cellglide-uninstall-sym.log'; $null = New-Item -ItemType SymbolicLink -Path $link -Target $victim
+        Remove-OwnTempFile $link | Should -BeFalse
+        Get-Content $victim | Should -Be 'keep'
+        Remove-Item -LiteralPath $link -Force
     }
     It 'a cancelled UAC prompt is a cancelled uninstall, and unknown arguments are refused' {
         Mock Write-Host {}

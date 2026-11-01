@@ -637,7 +637,7 @@ $code = 7
         $capture = ($script:Ast.EndBlock.Statements | Where-Object { $_.Extent.Text -like '$CellGlideInstallText =*' }).Extent.Text
         $capture | Should -Not -BeNullOrEmpty
         $snippet = "$capture`n[Console]::Out.Write(`$CellGlideInstallText)"
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($snippet)))')))"))
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ProgressPreference = 'SilentlyContinue'`niex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($snippet)))')))"))
         # A native command's output comes back line by line; join the lines with LF as the snippet has them.
         (@(& powershell.exe -NoProfile -EncodedCommand $encoded) -join "`n").Trim() | Should -Be $snippet.Trim()
     }

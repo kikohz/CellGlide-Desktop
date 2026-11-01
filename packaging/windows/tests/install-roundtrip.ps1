@@ -10,7 +10,8 @@ Start menu shortcut and the Installed-apps entry (DisplayVersion = the zip's ver
 install again (Reinstalling, no CellGlide.new or .old left); snapshot B = A; the installed
 uninstall.ps1 -Purge; check that the service, the program folder, the shortcut, the entry,
 cellglide0's two interface keys, C:\ProgramData\CellGlide and the phantom wintun device with our
-GUID are all gone; Apple's service as at the start; snapshot C = A.
+GUID are all gone, while %LOCALAPPDATA%\CellGlide is kept with a message (this script runs elevated,
+and an elevated uninstall never deletes the user's own data); Apple's service as at the start; snapshot C = A.
 
 -Purge deletes C:\ProgramData\CellGlide and %LOCALAPPDATA%\CellGlide, so when either exists the
 script refuses to run without -BackupDir. With it, both are copied there first (robocopy /E
@@ -105,7 +106,7 @@ function Test-SameSnapshot([string]$Before, [string]$After, [string]$What) {
     Test-Check ($code -eq 0 -and ($out -contains 'identical')) $What
 }
 
-function Test-Gone {
+function Test-Gone([string[]]$UninstallLines, [bool]$UserDataBefore) {
     $workDirs = @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallDir) -Directory -Force -Filter 'CellGlide.*' -ErrorAction SilentlyContinue)
     Test-Check ((Get-ServiceState $ServiceName) -eq 'absent') 'the service is gone'
     Test-Check (-not (Test-Path -LiteralPath $InstallDir)) "$InstallDir is gone"
@@ -116,7 +117,14 @@ function Test-Gone {
         Test-Check (-not (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$stack\Parameters\Interfaces\$AdapterGuid")) "cellglide0's $stack interface key is gone"
     }
     Test-Check (-not (Test-Path -LiteralPath $DataDir)) "$DataDir is gone"
-    Test-Check (-not (Test-Path -LiteralPath $UserDataDir)) "$UserDataDir is gone"
+    # This script runs elevated, so the uninstall's top-level process is elevated: it must purge
+    # ProgramData but never delete the user's own %LOCALAPPDATA%\CellGlide, and must say so.
+    if ($UserDataBefore) {
+        Test-Check (Test-Path -LiteralPath $UserDataDir) "$UserDataDir is kept by an elevated uninstall"
+        Test-Check (@($UninstallLines | Where-Object { $_ -like "*Not removed: $UserDataDir (an administrator window never deletes*" }).Count -eq 1) 'the elevated uninstall says the user data was not removed and how to remove it'
+    } else {
+        Test-Check (-not (Test-Path -LiteralPath $UserDataDir)) "$UserDataDir is absent"
+    }
     $device = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -eq $AdapterInstanceId })
     Test-Check ($device.Count -eq 0) "no device $AdapterInstanceId"
 }
@@ -187,9 +195,10 @@ try {
     $b = Save-Snapshot 'B'
     Test-SameSnapshot $a $b 'snapshot B (installed) is identical to A'
 
+    $userDataBefore = Test-Path -LiteralPath $UserDataDir
     $r = Invoke-Script "$InstallDir\uninstall.ps1" @('-Purge')
     Test-Check ($r.Code -eq 0) 'uninstall.ps1 -Purge exits 0'
-    Test-Gone
+    Test-Gone $r.Lines $userDataBefore
     $appleAfter = Get-ServiceState $AppleService
     Test-Check ($appleAfter -eq $appleBefore) "$AppleService is $appleAfter, as at the start"
     $c = Save-Snapshot 'C'
