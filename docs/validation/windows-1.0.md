@@ -504,6 +504,21 @@ Speed test finished
 
   - **还原**：`install-dev.ps1 -Uninstall` → 删快捷方式和卸载项 → `install-dev.ps1 -Release`。卸载后、重装后各拍快照，与 A 比较都是 identical。最终状态与本轮开始时的记录逐行相同，包括安装目录文件的哈希、服务配置、数据目录 ACL，并且没有卸载项、没有快捷方式，Program Files 下只有 `CellGlide`。我们 GUID 的接口键又被 `-Uninstall` 删掉了，下次隧道建立时会重新生成。
 
+- **修复轮 2**（复评审确认的注入问题与三条 Minor）：
+  - **引导脚本**：路径、哈希和参数先写成一段 JSON，再整体 base64，在子进程里解码。生成的代码里只有三个固定的字符串字面量（`Stop`、`x2` 和那段 base64），外部传入的值都不会出现在代码里。
+  - **测试**：Pester 109/109；`check-windows-core.ps1` exit 0。
+    - 新增的实测：把 `%TEMP%` 和 `-ZipPath` 设成含四种 Unicode 单引号（U+2018–U+201B）、ASCII 单引号、双引号、反引号、`$( )` 和 `;` 的路径与值，用 `-EncodedCommand` 真实运行，没有任何注入代码执行，值原样到达。
+    - 变异验证：
+      - 把脚本路径改回直接写进单引号字面量：上面这条和静态检查都失败。
+      - 去掉工作目录清理的「超过一小时」条件：清理测试失败。
+      - 去掉日志的最终路径检查：两条日志测试失败。
+  - **实装**：
+    - 哈希改一位：exit 1，服务 PID 和文件都不变。
+    - 从开发安装装 1.0.0：`Installing 1.0.0`，exit 0。
+    - 经真实引导脚本子进程升级到 1.0.1：`Upgrading 1.0.0 -> 1.0.1`，exit 0，日志经父进程事先建好的空文件显示出来。
+    - 每次快照与当天基线 A 比较都是 identical。
+  - **还原**：`install-dev.ps1 -Uninstall` → 删快捷方式和卸载项 → `install-dev.ps1 -Release`，前后快照都是 identical。最终状态与本轮开始时的记录相同，只多了服务在新的一天（11-01）写的日志文件。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

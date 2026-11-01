@@ -435,13 +435,17 @@ Describe 'install.ps1' {
     It 'The elevated part''s log is printed by the parent' {
         Mock Write-Host {}
         $start = { param($EncodedCommand, $Info)
+            $script:logExisted = (Test-Path $Info.LogPath) -and (Get-Item $Info.LogPath).Length -eq 0
             Set-Content $Info.LogPath "line from child`nsecond line"
             $script:ranText = [IO.File]::ReadAllText($Info.ScriptPath); $script:bootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($EncodedCommand))
             [pscustomobject]@{ ExitCode = 2 } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { } -PassThru }
         Invoke-ElevatedChild "# the running script`n" @{ Arch = 'x64' } $start | Should -Be 2
         $script:ranText | Should -Be "# the running script`n"          # the child runs the parent's own text, not a download
-        $script:bootstrap | Should -BeLike '*ElevatedPart = $true*'
-        $script:bootstrap | Should -BeLike "*Arch = 'x64'*"
+        $script:logExisted | Should -BeTrue                              # the parent made the empty log file first
+        $blob = [regex]::Match($script:bootstrap, "FromBase64String\('([A-Za-z0-9+/=]+)'\)").Groups[1].Value
+        $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($blob)) | ConvertFrom-Json
+        $config.Parameters.ElevatedPart | Should -BeTrue
+        $config.Parameters.Arch | Should -BeExactly 'x64'
         Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'line from child' }
         Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'second line' }
     }
@@ -464,12 +468,34 @@ Describe 'install.ps1' {
     It 'refuses to start the child without the script text' {
         { Invoke-ElevatedChild '' @{} { throw 'not reached' } } | Should -Throw "*Cannot find the running script's text*"
     }
+    It 'no outside value appears in the bootstrap''s code' {
+        $q = [string][char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B
+        $nasty = "C:\x$q`"``'`$(Write-Host pwned);`n\y"
+        $code = New-ChildBootstrap "C:\t$q';`$(1)\s.ps1" ('AB' * 32) @{ ZipPath = $nasty; BaseUrl = "a'$q"; AllowLoopback = $true; Unattended = [switch]$true }
+        $errors = $null; $tokens = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($code, [ref]$tokens, [ref]$errors)
+        @($errors).Count | Should -Be 0
+        # Every string literal in the generated code is ours: two fixed words and one base64 blob.
+        $literals = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -ne 'BareWord' }, $true) | ForEach-Object { $_.Value })
+        foreach ($l in $literals) { $l | Should -Match '\A(Stop|x2|[A-Za-z0-9+/=]{40,})\z' }
+        @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.ExpandableStringExpressionAst] }, $true)).Count | Should -Be 0
+        foreach ($ch in $q.ToCharArray()) { $code.Contains([string]$ch) | Should -BeFalse }
+        $code | Should -Not -BeLike '*pwned*'
+        # The blob carries every value exactly; switches arrive as booleans.
+        $blob = [regex]::Match($code, "FromBase64String\('([A-Za-z0-9+/=]+)'\)").Groups[1].Value
+        $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($blob)) | ConvertFrom-Json
+        $config.ScriptPath | Should -BeExactly "C:\t$q';`$(1)\s.ps1"
+        $config.Sha256 | Should -BeExactly ('ab' * 32)
+        $config.Parameters.ZipPath | Should -BeExactly $nasty
+        $config.Parameters.AllowLoopback | Should -BeOfType [bool]
+        $config.Parameters.Unattended | Should -BeOfType [bool]
+    }
     Context 'the bootstrap run for real in a separate (unelevated) PowerShell' {
         BeforeAll {
             # A stand-in for install.ps1: the same parameters; it writes what it got to the log.
             $script:childText = @'
 param([string]$BaseUrl = '', [string]$ZipPath = '', [switch]$Unattended, [switch]$ElevatedPart, [string]$Arch = '', [string]$LogPath = '', [switch]$AllowLoopback)
-[IO.File]::WriteAllText($LogPath, "got $ElevatedPart|$BaseUrl|$Arch|$ZipPath|$AllowLoopback")
+[IO.File]::WriteAllText($LogPath, "got $ElevatedPart|$BaseUrl|$Arch|$ZipPath|$AllowLoopback", [Text.Encoding]::UTF8)
 $code = 7
 '@
             $script:runReal = { param($EncodedCommand, $Info)
@@ -483,6 +509,27 @@ $code = 7
             $zip = "C:\it's here\a b.zip"
             Invoke-ElevatedChild $script:childText @{ BaseUrl = 'http://127.0.0.1:8770'; Arch = 'x64'; ZipPath = $zip; AllowLoopback = $true } $script:runReal | Should -Be 7
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq "got True|http://127.0.0.1:8770|x64|$zip|True" }
+        }
+        It 'paths and values with any quote or PowerShell syntax run no injected code and arrive unchanged' {
+            # %TEMP% (where the parent writes the script and the log) and -ZipPath carry each of
+            # the four Unicode single quotes, an ASCII quote, a backtick, $( ) and ; - with the
+            # old literal quoting, the first quote ended the string and "ni <marker>" ran.
+            $q = [string][char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B
+            $work = Join-Path $TestDrive ('i' + [guid]::NewGuid().ToString('N').Substring(0, 6)); $null = New-Item -ItemType Directory $work
+            $marker = 'pwned-' + [guid]::NewGuid().ToString('N').Substring(0, 8)          # short: the whole path stays under MAX_PATH
+            $tmp = Join-Path $work ([string][char]0x2018 + ";ni $marker;" + [char]0x2019 + "'``x`$(ni $marker)" + [char]0x201A + [char]0x201B)
+            $null = [IO.Directory]::CreateDirectory($tmp)
+            $zip = "C:\z" + $q + "`"'``;`$(ni $marker);" + [char]0x2018 + ";ni $marker;" + [char]0x2019 + "\a b.zip"
+            $savedTmp = $env:TMP; $savedTemp = $env:TEMP
+            Push-Location $work
+            try {
+                $env:TMP = $tmp; $env:TEMP = $tmp
+                [IO.Path]::GetTempPath().StartsWith($tmp) | Should -BeTrue
+                Invoke-ElevatedChild $script:childText @{ BaseUrl = 'http://127.0.0.1:8770'; Arch = 'x64'; ZipPath = $zip; AllowLoopback = $true } $script:runReal | Should -Be 7
+            } finally { $env:TMP = $savedTmp; $env:TEMP = $savedTemp; Pop-Location }
+            @(Get-ChildItem -LiteralPath $work -Recurse -Force -Filter 'pwned-*').Count | Should -Be 0
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -ceq "got True|http://127.0.0.1:8770|x64|$zip|True" }
+            @(Get-ChildItem -LiteralPath $tmp -Force).Count | Should -Be 0          # script and log removed
         }
         It 'a script changed after the parent wrote it is not run' {
             $script:tamper = $true
@@ -498,40 +545,77 @@ $code = 7
             $footer = ($stmts | Select-Object -Last 2 | ForEach-Object { $_.Extent.Text }) -join "`n"
             $text = $script:Ast.ParamBlock.Extent.Text + "`n" + $capture + "`n" + $guard + "`n" +
                 'function Invoke-CellGlideInstall { param($BaseUrl, $ZipPath, [switch]$Unattended, [switch]$ElevatedPart, $Arch, $LogPath, [switch]$AllowLoopback) [IO.File]::WriteAllText($LogPath, "main $ElevatedPart $Arch"); 5 }' + "`n" + $footer
-            Invoke-ElevatedChild $text @{ Arch = 'arm64' } $script:runReal | Should -Be 5
+            Invoke-ElevatedChild $text @{ BaseUrl = 'https://pkg.cellglide.com'; Arch = 'arm64' } $script:runReal | Should -Be 5
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'main True arm64' }
         }
     }
-    It 'iex leaves no functions or variables behind' {
+    It 'iex leaves no functions or variables behind, and the caller''s own variables keep their values' {
         # install.ps1's param block, capture and guard, then a body that defines things.
         $stmts = $script:Ast.EndBlock.Statements
         $guard = ($stmts | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] } | Select-Object -First 1).Extent.Text
         $capture = ($stmts | Where-Object { $_.Extent.Text -like '$CellGlideInstallText =*' }).Extent.Text
         $text = $script:Ast.ParamBlock.Extent.Text + "`n" + $capture + "`n" + $guard + "`n" +
             "function CgLeak { }`n`$cgLeak = 1`n[Console]::Out.WriteLine('body ran')"
-        $probe = "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))')))`n" +
-            "[Console]::Out.WriteLine('left: ' + (@('CgLeak', 'Invoke-CellGlideInstall') | Where-Object { Get-Command `$_ -ErrorAction SilentlyContinue }) + '|' + (@('cgLeak', 'CellGlideInstallText', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback') | Where-Object { Get-Variable `$_ -ErrorAction SilentlyContinue }))"
-        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))))
+        $iex = "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))')))"
+        $names = "'cgLeak', 'CellGlideInstallText', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback', '__CellGlideCallerVars', 'keep', 'name', 's', 'v', 'a', 'Saved', 'Names'"
+        $report = "[Console]::Out.WriteLine('left: ' + (@('CgLeak', 'Invoke-CellGlideInstall') | Where-Object { Get-Command `$_ -ErrorAction SilentlyContinue }) + '|' + (@($names) | Where-Object { Get-Variable `$_ -ErrorAction SilentlyContinue }))"
+        # Nothing of the caller's: nothing is left.
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$iex`n$report"))))
         $out | Should -Contain 'body ran'
         $out | Should -Contain 'left: |'
+        # The caller's own variables of the same names come back with their values and options.
+        $pre = "`$BaseUrl = 'mine'; `$Arch = 42; `$CellGlideInstallText = 'own text'; `$__CellGlideCallerVars = 'h'; `$ZipPath = 'zp'"
+        $check = "[Console]::Out.WriteLine('vals: ' + `$BaseUrl + '|' + `$Arch + '|' + `$Arch.GetType().Name + '|' + `$CellGlideInstallText + '|' + `$__CellGlideCallerVars + '|' + `$ZipPath + '|' + (Get-Variable ZipPath).Options + '|' + [bool](Get-Variable Unattended -ErrorAction SilentlyContinue) + '|' + [bool](Get-Variable cgLeak -ErrorAction SilentlyContinue))"
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$pre`n$iex`n$check"))) 2>&1 | ForEach-Object { "$_" })
+        $out | Should -Contain 'body ran'
+        $out | Should -Contain 'vals: mine|42|Int32|own text|h|zp|None|False|False'
     }
-    It 'bootstrap literals survive quotes' {
-        foreach ($v in "plain", "it's", "''", 'C:\a b\', '$(evil)', '`n') {
-            (& ([scriptblock]::Create((ConvertTo-PSLiteral $v)))) | Should -BeExactly $v
-        }
-        ConvertTo-PSLiteral $true | Should -Be '$true'; ConvertTo-PSLiteral $false | Should -Be '$false'
-    }
-    It 'the log copy for the parent is a new file only' {
+    It 'the log for the parent goes only into the empty file the parent made' {
         $src = Join-Path $TestDrive 'install.log'
         Set-Content $src @('**********************', 'Windows PowerShell transcript start', 'x', '**********************', 'Installing 1.0.0', '**********************', 'Windows PowerShell transcript end', 'y', '**********************')
-        $dest = Join-Path $TestDrive ('cellglide-install-' + [guid]::NewGuid().ToString('N') + '.log')
+        $name = { 'cellglide-install-' + [guid]::NewGuid().ToString('N') + '.log' }
+        $dest = Join-Path $TestDrive (& $name); [IO.File]::WriteAllBytes($dest, @())
         Copy-LogToParent $src $dest
         @(Get-Content $dest) | Should -Be @('Installing 1.0.0')
-        { Copy-LogToParent $src $dest } | Should -Throw                     # exists: never overwritten
+        { Copy-LogToParent $src $dest } | Should -Throw '*not the empty file*'          # written once: never again
+        { Copy-LogToParent $src (Join-Path $TestDrive (& $name)) } | Should -Throw    # missing: the child never creates it
         { Copy-LogToParent $src (Join-Path $TestDrive 'other.log') } | Should -Throw '*unexpected log path*'
-        $link = Join-Path $TestDrive 'linkdir'; $null = New-Item -ItemType Junction -Path $link -Target $TestDrive
-        try { { Copy-LogToParent $src (Join-Path $link ('cellglide-install-' + ('0' * 32) + '.log')) } | Should -Throw '*junction*' }
+        # A hard link to another file has two links.
+        $victim = Join-Path $TestDrive 'victim.txt'; [IO.File]::WriteAllBytes($victim, @())
+        $hard = Join-Path $TestDrive (& $name); $null = New-Item -ItemType HardLink -Path $hard -Target $victim
+        { Copy-LogToParent $src $hard } | Should -Throw '*2 links*'
+        (Get-Item $victim).Length | Should -Be 0
+        # Through a junction, the final path is somewhere else.
+        $real = Join-Path $TestDrive 'realdir'; $null = New-Item -ItemType Directory $real
+        $leaf = & $name; [IO.File]::WriteAllBytes((Join-Path $real $leaf), @())
+        $link = Join-Path $TestDrive 'linkdir'; $null = New-Item -ItemType Junction -Path $link -Target $real
+        try { { Copy-LogToParent $src (Join-Path $link $leaf) } | Should -Throw '*leads to*' }
         finally { [IO.Directory]::Delete($link) }
+        (Get-Item (Join-Path $real $leaf)).Length | Should -Be 0
+    }
+    It 'the log for the parent is never written through a symbolic link' -Tag 'Elevated' {
+        $src = Join-Path $TestDrive 'install2.log'; Set-Content $src 'Installing 1.0.0'
+        $victim = Join-Path $TestDrive 'victim2.txt'; [IO.File]::WriteAllBytes($victim, @())
+        $dest = Join-Path $TestDrive ('cellglide-install-' + [guid]::NewGuid().ToString('N') + '.log')
+        $null = New-Item -ItemType SymbolicLink -Path $dest -Target $victim
+        { Copy-LogToParent $src $dest } | Should -Throw '*leads to*'
+        (Get-Item $victim).Length | Should -Be 0
+    }
+    It 'only old work folders of killed installs are removed, never a running one''s' {
+        $root = Join-Path $TestDrive ('stale-' + [guid]::NewGuid().ToString('N')); $null = New-Item -ItemType Directory $root
+        $mk = { param($n, $minutes) $d = Join-Path $root $n; $null = New-Item -ItemType Directory $d; Set-Content (Join-Path $d 'f') 'x'; (Get-Item $d).CreationTimeUtc = (Get-Date).ToUniversalTime().AddMinutes(-$minutes); $d }
+        $old = & $mk 'CellGlide.work-old' 120
+        $recent = & $mk 'CellGlide.work-recent' 5
+        $mine = & $mk 'CellGlide.work-mine' 300
+        $other = & $mk 'Other.work-old' 300
+        $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N')); $null = New-Item -ItemType Directory $outside; Set-Content (Join-Path $outside 'keep.txt') 'x'
+        $linked = & $mk 'CellGlide.work-linked' 300; $null = New-Item -ItemType Junction -Path (Join-Path $linked 'j') -Target $outside
+        try {
+            Remove-StaleWorkDirs $mine $root
+            Test-Path $old | Should -BeFalse
+            foreach ($d in $recent, $mine, $other, $linked) { Test-Path $d | Should -BeTrue -Because $d }
+            Test-Path (Join-Path $outside 'keep.txt') | Should -BeTrue
+        } finally { [IO.Directory]::Delete((Join-Path $linked 'j')) }
     }
     It 'a mapped network drive becomes its UNC path' {
         ConvertTo-UncPath 'Z:\pkgs\a.zip' 'Network' '\\server\share' | Should -Be '\\server\share\pkgs\a.zip'

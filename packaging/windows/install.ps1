@@ -18,15 +18,22 @@ only to a loopback test source (http://127.0.0.1:<port> or http://localhost:<por
 with -AllowLoopback; there is no environment variable, so "irm | iex" always uses production.
 -ZipPath installs a local package (a mapped network drive is turned into its UNC path, which the
 elevated child can see) and prints its SHA-256 to compare with the published SHA256SUMS.
--Unattended asks nothing and does not start the app. Run through iex, the script runs in a child
-scope and leaves no functions or variables in the session.
+-Unattended asks nothing and does not start the app. Run through iex, the script runs again in a
+child scope; the caller's own variables that share a name with a parameter keep their values
+(PowerShell itself drops a type constraint on such a variable), and nothing else is left in the
+session.
 
 Only CellGlide's own service, files, shortcut, uninstall entry and data directory are touched;
 no other adapter, DNS setting or route is changed. Exit codes: 0 installed, 1 failed or
 cancelled, 2 this PC does not meet the requirements.
 #>
 param(
-    [string]$BaseUrl = '',
+    # Under iex the param block binds into the caller's own scope. This default runs first,
+    # before any parameter is set, and keeps copies of the caller's variables with these names
+    # so the iex guard below can put them back.
+    [string]$BaseUrl = $(Set-Variable -Name __CellGlideCallerVars -Value @(
+        Get-Variable -Name '__CellGlideCallerVars', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback', 'CellGlideInstallText' -Scope 0 -ErrorAction SilentlyContinue |
+            ForEach-Object { New-Object Management.Automation.PSVariable -ArgumentList $_.Name, $_.Value, $_.Options, (New-Object 'Collections.ObjectModel.Collection[Attribute]' (, [Attribute[]]@($_.Attributes))) }); ''),
     [string]$ZipPath = '',
     [switch]$Unattended,
     [switch]$ElevatedPart,
@@ -39,10 +46,27 @@ param(
 # bootstrap: the elevated child runs exactly this text (decision 4), never a second download.
 $CellGlideInstallText = { }.Ast.Extent.StartScriptPosition.GetFullScript()
 if (-not ($MyInvocation.MyCommand.ScriptBlock -and $MyInvocation.MyCommand.ScriptBlock.ToString() -ceq $CellGlideInstallText)) {
-    # Run through iex, in the caller's own scope: run the same text again in a child scope and
-    # remove what the param block and the line above defined here.
+    # Run through iex, in the caller's own scope: run the same text again in a child scope, then
+    # (from a child scope, so nothing new is defined here) remove what the param block and the
+    # line above created and give the caller's own variables of those names their values back.
     $null = & ([scriptblock]::Create($CellGlideInstallText))
-    Remove-Variable -Name CellGlideInstallText, BaseUrl, ZipPath, Unattended, ElevatedPart, Arch, LogPath, AllowLoopback -ErrorAction SilentlyContinue
+    & {
+        param([object[]]$Saved, [string[]]$Names)
+        $Saved = @($Saved | Where-Object { $_ -is [Management.Automation.PSVariable] })
+        $keep = @($Saved | ForEach-Object { $_.Name })
+        foreach ($name in $Names) {
+            if ($name -notin $keep) { Remove-Variable -Name $name -Scope 1 -Force -ErrorAction SilentlyContinue }
+        }
+        foreach ($s in $Saved) {
+            $v = Get-Variable -Name $s.Name -Scope 1 -ErrorAction SilentlyContinue
+            if (-not $v) { New-Variable -Name $s.Name -Scope 1; $v = Get-Variable -Name $s.Name -Scope 1 }
+            if ($v.Options -band [Management.Automation.ScopedItemOptions]::ReadOnly) { $v.Options = $v.Options -bxor [Management.Automation.ScopedItemOptions]::ReadOnly }
+            $v.Attributes.Clear()
+            $v.Value = $s.Value
+            foreach ($a in $s.Attributes) { $v.Attributes.Add($a) }
+            if ($v.Options -ne $s.Options) { $v.Options = $s.Options }
+        }
+    } @($__CellGlideCallerVars) @('__CellGlideCallerVars', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback', 'CellGlideInstallText')
     return
 }
 
@@ -363,46 +387,104 @@ function Get-TranscriptBody([string[]]$Lines) {
     return $body.ToArray()
 }
 
-function ConvertTo-PSLiteral($Value) {
-    # A PowerShell literal for a string or a bool, for the bootstrap's text.
-    $ErrorActionPreference = 'Stop'
-    if ($Value -is [bool] -or $Value -is [switch]) { if ($Value) { return '$true' } else { return '$false' } }
-    return "'" + ([string]$Value).Replace("'", "''") + "'"
-}
-
 function New-ChildBootstrap([string]$ScriptPath, [string]$Sha256, [hashtable]$Parameters) {
     # The elevated child's whole program: read the script once, check its hash, run the bytes
     # that were checked from memory (dot-sourced, so the script's $code is ours), exit with it.
-    # Exit 3 means the file was not the text the parent wrote.
+    # Exit 3 means the file was not the text the parent wrote. No value from outside ever
+    # appears in the code: the path, the hash and the parameters travel as one base64 blob of
+    # JSON (base64 has no quote of any kind), decoded inside.
     $ErrorActionPreference = 'Stop'
-    $pairs = foreach ($key in @($Parameters.Keys | Sort-Object)) { "$key = $(ConvertTo-PSLiteral $Parameters[$key])" }
+    $values = @{}
+    foreach ($key in @($Parameters.Keys)) {
+        $value = $Parameters[$key]
+        if ($value -is [switch]) { $value = [bool]$value }
+        elseif ($value -isnot [bool]) { $value = [string]$value }
+        $values[[string]$key] = $value
+    }
+    $config = New-Object PSObject -Property @{ ScriptPath = $ScriptPath; Sha256 = $Sha256.ToLowerInvariant(); Parameters = $values }
+    $blob = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes(($config | ConvertTo-Json -Compress -Depth 4)))
     return @(
         "`$ErrorActionPreference = 'Stop'"
-        "`$bytes = [IO.File]::ReadAllBytes($(ConvertTo-PSLiteral $ScriptPath))"
+        "`$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$blob')) | ConvertFrom-Json"
+        "`$bytes = [IO.File]::ReadAllBytes([string]`$config.ScriptPath)"
         "`$sha = [Security.Cryptography.SHA256]::Create()"
         "`$hash = -join (`$sha.ComputeHash(`$bytes) | ForEach-Object { `$_.ToString('x2') })"
-        "if (`$hash -cne $(ConvertTo-PSLiteral $Sha256.ToLowerInvariant())) { exit 3 }"
+        "if (`$hash -cne [string]`$config.Sha256) { exit 3 }"
         "`$sb = [scriptblock]::Create([Text.Encoding]::UTF8.GetString(`$bytes))"
-        "`$p = @{ $($pairs -join '; ') }"
+        "`$p = @{}"
+        "foreach (`$property in `$config.Parameters.PSObject.Properties) { `$p[`$property.Name] = `$property.Value }"
         "`$code = 1"
         ". `$sb @p"
         "exit `$code"
     ) -join "`n"
 }
 
+function Get-FileIdentity([string]$Path) {
+    # Opens an existing file for writing and returns the stream with what the handle really is:
+    # its final path (links and junctions resolved), its attributes, size and number of links.
+    $ErrorActionPreference = 'Stop'
+    if (-not ('CellGlideInstall.FileHandle' -as [type])) {
+        Add-Type -Namespace CellGlideInstall -Name FileHandle -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct Info {
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+}
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, out Info info);
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern uint GetFinalPathNameByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, System.Text.StringBuilder path, uint size, uint flags);
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint size);
+'@
+    }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $info = New-Object CellGlideInstall.FileHandle+Info
+        if (-not [CellGlideInstall.FileHandle]::GetFileInformationByHandle($stream.SafeFileHandle, [ref]$info)) { throw "cannot read what $Path is" }
+        $buffer = New-Object Text.StringBuilder 1024
+        if ([CellGlideInstall.FileHandle]::GetFinalPathNameByHandle($stream.SafeFileHandle, $buffer, 1024, 0) -eq 0) { throw "cannot read the final path of $Path" }
+        $final = $buffer.ToString()
+        if ($final.StartsWith('\\?\UNC\')) { $final = '\\' + $final.Substring(8) }
+        elseif ($final.StartsWith('\\?\')) { $final = $final.Substring(4) }
+        $long = New-Object Text.StringBuilder 1024
+        $expected = [IO.Path]::GetFullPath($Path)
+        if ([CellGlideInstall.FileHandle]::GetLongPathName($expected, $long, 1024) -gt 0) { $expected = $long.ToString() }
+        return [pscustomobject]@{
+            Stream = $stream; FinalPath = $final; ExpectedPath = $expected; Attributes = [IO.FileAttributes]$info.FileAttributes
+            Size = ([long]$info.FileSizeHigh -shl 32) -bor $info.FileSizeLow; Links = $info.NumberOfLinks
+        }
+    } catch {
+        $stream.Dispose()
+        throw
+    }
+}
+
 function Copy-LogToParent([string]$Source, [string]$Dest) {
-    # The elevated child's log, without the transcript banners, written for the parent as a new
-    # file (never over an existing file or link) at the path the parent chose in its %TEMP%.
+    # The elevated child's log, without the transcript banners, written into the empty file the
+    # parent created in its %TEMP%. Nothing else is written to: the file must already exist,
+    # be empty, have one link, not be a link, and its handle's final path must be the very path
+    # the parent named (so no junction or symbolic link anywhere on the way).
     $ErrorActionPreference = 'Stop'
     if ((Split-Path -Leaf $Dest) -notmatch '\Acellglide-install-[0-9a-f]{32}\.log\z') { throw "unexpected log path $Dest" }
-    $parent = Get-Item -LiteralPath (Split-Path -Parent $Dest) -Force
-    if (Test-ReparsePoint $parent) { throw "$($parent.FullName) is a junction or symbolic link" }
-    $text = (Get-TranscriptBody @(Get-Content -LiteralPath $Source)) -join "`r`n"
-    $stream = [IO.File]::Open($Dest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $file = Get-FileIdentity $Dest
     try {
+        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$Dest is a link" }
+        if ($file.FinalPath -ine $file.ExpectedPath) { throw "$Dest leads to $($file.FinalPath)" }
+        if ($file.Links -ne 1) { throw "$Dest has $($file.Links) links" }
+        if ($file.Size -ne 0) { throw "$Dest is not the empty file the parent created" }
+        $text = (Get-TranscriptBody @(Get-Content -LiteralPath $Source)) -join "`r`n"
         $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($text + "`r`n")
-        $stream.Write($bytes, 0, $bytes.Length)
-    } finally { $stream.Dispose() }
+        $file.Stream.Write($bytes, 0, $bytes.Length)
+    } finally { $file.Stream.Dispose() }
 }
 
 function ConvertTo-UncPath([string]$Path, [string]$DriveType, [string]$ProviderName) {
@@ -596,12 +678,15 @@ function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
     return $dir
 }
 
-function Remove-StaleWorkDirs([string]$Keep) {
-    # Work folders left by an install that was killed; never through a link.
+function Remove-StaleWorkDirs([string]$Keep, [string]$Root = (Split-Path -Parent $InstallDir), [int]$MinAgeMinutes = 60) {
+    # Work folders left by an install that was killed: only those created more than an hour ago
+    # (an install takes seconds, so a concurrent install's folder is never touched), never the
+    # current one, never through a link.
     $ErrorActionPreference = 'Stop'
-    $root = Split-Path -Parent $InstallDir
-    foreach ($stale in @(Get-ChildItem -LiteralPath $root -Directory -Force -Filter 'CellGlide.work-*' -ErrorAction SilentlyContinue)) {
-        if ($stale.FullName -eq $Keep -or (Test-ReparsePoint $stale) -or @(Get-ReparsePoints $stale.FullName).Count -gt 0) { continue }
+    $cutoff = (Get-Date).ToUniversalTime().AddMinutes(-$MinAgeMinutes)
+    foreach ($stale in @(Get-ChildItem -LiteralPath $Root -Directory -Force -Filter 'CellGlide.work-*' -ErrorAction SilentlyContinue)) {
+        if ($stale.FullName -eq $Keep -or $stale.CreationTimeUtc -gt $cutoff) { continue }
+        if ((Test-ReparsePoint $stale) -or @(Get-ReparsePoints $stale.FullName).Count -gt 0) { continue }
         Remove-PathWithRetry $stale.FullName
     }
 }
@@ -773,6 +858,8 @@ function Invoke-ElevatedChild {
     $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
     [IO.File]::WriteAllBytes($scriptFile, $bytes)
     try {
+        # The empty file the child writes its log into; it never creates a file of its own here.
+        [IO.File]::Open($logFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
         $childParams = @{}
         if ($Parameters) { foreach ($key in @($Parameters.Keys)) { $childParams[$key] = $Parameters[$key] } }
         $childParams['ElevatedPart'] = $true
@@ -788,7 +875,7 @@ function Invoke-ElevatedChild {
         }
         $proc.WaitForExit()
         $code = [int]$proc.ExitCode
-        $hadLog = Test-Path -LiteralPath $logFile
+        $hadLog = (Test-Path -LiteralPath $logFile) -and (Get-Item -LiteralPath $logFile).Length -gt 0
         if ($hadLog) {
             foreach ($line in @(Get-Content -LiteralPath $logFile)) { Write-Host $line }
         }
