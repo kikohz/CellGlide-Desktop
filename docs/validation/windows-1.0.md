@@ -578,6 +578,27 @@ Speed test finished
 - **更正 Task 6 的已知限制写法**：被跳过的只是工作或学校账户（Entra ID，SID `S-1-12-1-*`）；个人 Microsoft 账户的 SID 是 `S-1-5-21-*`，照常处理。README 和 uninstall.ps1 头注释已改。
 - README：zip 链接改为 `https://cellglide.com/download/#windows`（随官网更新上线）；文件位置补上 `wintun-LICENSE.txt`。删除了 Task 5 留下的 `dist\windows\local\`。
 - 测试：Python 33/33（Windows 22、Linux 11），Pester `PublishWindows` 33 个。
+### Task 8：诊断服务端接受 Windows（CellProxy，只提交，未部署）（2026-10-31）
+
+- **便携 Node**（不装进系统）：`node-v22.23.4-win-x64.zip`，SHA-256 `cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20`，与 `https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt` 对应行相同后才解压到 `%LOCALAPPDATA%\CellGlide-dev\node\node-v22.23.4-win-x64\`。`node --version` v22.23.4，`npx --version` 10.9.9。
+- **克隆**：`gh repo clone kikohz/CellProxy C:\Users\iloss\CellProxy -- --filter=blob:none`（完整克隆约 175 MB、60 KB/s，改为不带历史文件内容的克隆；工作区完整，旧版本的文件按需取回）。远端分支只有 `main`（`9be3466`）。
+- **Linux 部分核对（决定 21）**：`origin/main` 三条都成立，直接从它切出 `windows-1.0`（并取消了上游跟踪，避免误推到 `main`）：
+  - `Diagnostics/worker/src/index.js:4` `const AGENT = /^CellGlide-(Mac|iOS|Linux)\/[\w.() ~+-]+$/;`，`:63` `['mac', 'ios', 'linux'].includes(report?.platform)`；
+  - `Website/build.py:13` `def load_linux_release(path):`（`:30` 读 `release-linux.json`），`:1219` `linux_section` 返回 `<section class="linux-download" id="linux">`，下载页 `downloadpage`（`:1236`）在 `:1240` 调用它；
+  - `Website/release-linux.json` 存在，`"version": "1.0.0"`（`date` 2026-10-21）。
+- `Diagnostics/worker` 里 `npm ci` 完成（exit 0）后才用 npx；项目自带 wrangler 4.149.0。`npm audit` 报 undici（wrangler 的依赖）几条 high，只影响本地开发工具，未处理。
+- **改动**（CellProxy `windows-1.0` 分支，提交 `030f1a6`，**未推送、未部署**）：`AGENT` 改为 `/^CellGlide-(Mac|iOS|Linux|Windows)\/[\w.() ~+-]+$/`，平台白名单改为 `['mac', 'ios', 'linux', 'windows']`，其余不变。测试新增 `accepts a Windows report`（`CellGlide-Windows/1.0.0` + `platform: "windows"` → 200、code 形如 `CG-XXXXX`、存进 `reports/<code>.json`、元数据 `platform: windows`）、`still rejects an unknown client`（`CellGlide-Android/1.0`、小写 `CellGlide-windows/…`、没有版本号 → 403）、`rejects an unknown platform`（`android`、大写 `Windows` → 400）。原有测试里两句「Windows 被拒」的断言（`platform: windows` + Linux UA → 400，`CellGlide-Windows/1.0` → 403）与新行为相反，改为用 Android（`platform: android` → 400，`CellGlide-Android/1.0` → 403）。
+- **测试**：改动前 `npm test` 13/15，`accepts a Windows report` 得到 403（`rejects an unknown platform` 也因 UA 被拒得到 403）；改动后 **15/15**。
+- **本地端到端**（`npm run dev` = `wrangler dev --port 8771`；启动横幅 `env.REPORTS (cellglide-diagnostics) R2 Bucket local`、`env.UPLOADS Rate Limit local`，两项都是本地模拟，没有 `--remote`）：
+  1. 先用 PowerShell 直接发：`CellGlide-Windows/1.0.0` + windows → 200 `CG-X6PUV`；`CellGlide-Android/1.0` → 403；Windows UA + `android` → 400。
+  2. **App（Debug 构建，HEAD 时的 `target\debug\cellglide_native.dll`，含 `CELLGLIDE_DIAG_TARGET`）**，会话 1 临时交互计划任务 `CGT8W`（用完已删）跑 UI Automation 驱动（只用 SelectionItem / Invoke / Value 模式，没有发送键盘鼠标输入），`CELLGLIDE_LANG=en`：
+     - A：`CELLGLIDE_DIAG_TARGET=http://127.0.0.1:8771/v1/reports`：`Diagnostics` → `View what will be sent…` → 预览 52045 字符 / 52045 字节、`52 KB in total` → `Send` → 页面 `Sent`、**`CG-8CWUR`**、`Just send us this code.`；wrangler 日志 `POST /v1/reports 200 OK (13ms)`；本地 R2 里 `reports/CG-8CWUR.json` 52045 字节（= 预览），`format 1`、`platform windows`、`app 1.0.0`。
+     - B：为了看到 UA（worker 不打印请求头，本地 trace 也不记），在 8772 放了一个只听 loopback 的转发小程序（记下请求头后原样转给 8771），`CELLGLIDE_DIAG_TARGET=http://127.0.0.1:8772/v1/reports`：页面 `Sent`、**`CG-XHR48`**；转发日志 `POST /v1/reports ua="CellGlide-Windows/1.0.0" bytes=51823 -> 200 {"code":"CG-XHR48"}`；wrangler `POST /v1/reports 200 OK (19ms)`。
+  3. 结束：App 进程、转发程序、wrangler dev 都已停止，8771/8772 没有监听；本地 R2 的 3 个对象用 `npx wrangler r2 object delete "cellglide-diagnostics/reports/<CODE>.json" --local` 删除（顺带验证了删除命令的路径写法），随后删掉了 `Diagnostics\worker\.wrangler\`。**没有访问 `diag.cellglide.com`，没有部署，没有推送 CellProxy。**
+- **DNS 泄漏服务**（只核对，不改）：`leakcheck.cellglide.com` 的服务端是 `Scripts/dnsleak-server.py`。HTTPS 结果接口 `https_client`（`:329`–`:352`）只看限流（`:341`，按 `CF-Connecting-IP`）、方法是否 GET 与路径是否匹配 `RESULT_PATH`（`:342`），CORS 只影响浏览器的 `Origin`（`:346`–`:347`）；**不看 User-Agent，也没有平台字段**。DNS 部分（`:310`、`:320`）只按来源地址限流。与实测一致：W2 Task 13 `CellGlide.Probe -- leak` 和 W3 清单 h 从 Windows 发出都成功。
+- **给 Task 12 Step 5 的删除命令**（来自克隆的 `wrangler.jsonc` `r2_buckets[0].bucket_name = "cellglide-diagnostics"`、`src/index.js:72` 的键 `` `reports/${code}.json` ``；`account_id` 已写在 `wrangler.jsonc`，没有 jurisdiction）：先 `npm ci` 等它完成，然后在 `C:\Users\iloss\CellProxy\Diagnostics\worker` 里
+  `npx wrangler r2 object delete "cellglide-diagnostics/reports/<CODE>.json" --remote`
+  （删除 R2 对象属对外动作，执行前须经用户同意。）
 
 ## 已知问题（W1 实测发现，未修）
 
