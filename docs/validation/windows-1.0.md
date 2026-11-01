@@ -614,6 +614,36 @@ Speed test finished
 - **Linux 未变**：改动前后的 `dist/` 对比：三种语言的 Linux 下载区、更新日志的 Linux 部分逐字节相同，所有页面上指向 Linux 的链接也相同。提交前重新核对了决定 21 的三条：`load_linux_release`（`build.py:13`）、`linux_section` 仍返回 `id="linux"` 且下载页仍在调用它、`release-linux.json` 1.0.0。
 - **本地预览**：`python -m http.server --bind 127.0.0.1` 打开 `dist`，用无界面 Chrome（临时 profile）截了三种语言的 `#windows`，存在 CellProxy 的 `build.noindex/scratch/windows-download-{en,zh,es}.png`。用完已停掉服务器。
 
+### Task 9 Fix round 1（2026-10-31）
+
+- **提交**：CellProxy `windows-1.0` 分支 `7c1978f` Website: Windows zip install, ARM64 wording from data, release gate。**未推送、未部署**。
+- **用 zip 安装**：照 README「Install from the zip」补齐，三种语言都有：
+  - install.ps1 的链接，地址取自 `release-windows.json` 的 `install`；
+  - 一个 `<pre>`，包含 `Unblock-File .\install.ps1, .\CellGlide-<v>-windows-x64.zip` 和 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\…zip`；
+  - 「安装脚本会在安装前显示 zip 的 SHA-256，它必须与这里显示的一致」；
+  - `windows_download_section` 对以上三项都有断言。
+  - 原有的禁用词检查会命中 `Bypass`，所以只把 `powershell -ExecutionPolicy Bypass -File ` 这一串排除在外。
+- **ARM64 文案跟数据走**：
+  - FAQ 和 Windows 卡片里的「ARM64 为测试版」由 `test_build` 决定；
+  - 卡片上写明「ARM64 需 24H2+」；
+  - 更新日志里 ARM64 那一条必须与 `test_build` 一致，`windows_arm64_label` 会检查；
+  - 在副本里把 `test_build` 改成 false 重建后，表格行、FAQ、卡片里的测试版字样都消失。
+- **智能应用控制**：改为强制模式（设为「开」，而不是「评估」）时会拦下，与 README 的说法一致。
+- **升级**：FAQ 和「正在做的」两处说明：Windows 版再运行一次一行安装命令即可升级。
+- **发布前把关（给 Task 12）**：在 CellProxy `Website/` 里运行 `python3 check.py --windows-release`（即 `npm run check:windows-release`）。`npm run deploy` 已经包含这一步。以下情况会失败：
+  - 版本号不是 X.Y.Z，或不等于最新一条 Windows 更新日志；
+  - 日期与更新日志不同、格式不对，或在今天之后；
+  - 一行命令或 zip 地址不是正式地址；
+  - 更新日志里 ARM64 那一条与 `test_build` 不一致；
+  - 与 pkg.cellglide.com 上实际提供的 `windows/latest.json`、`windows/<v>/SHA256SUMS` 和两个 zip（HEAD 200，大小相同）不完全一致。
+  - zip 里没有构建号，所以「同一次构建」只能用「同一次上传」来判断：本地的或来自别的构建的 zip，都对不上服务器上的数据。
+  - 正常运行 `check.py` 时，会用一个假的 pkg 做离线自测，覆盖 12 种失败情形。
+  - 对当前的开发数据运行这个把关：失败，exit 1，原因是 `HTTP Error 404`（pkg 上还没有 Windows 文件）。
+- **测试**：
+  - 用包装脚本跑 `build.py` 和 `check.py`：21 行 PASS，exit 0，其中 `linux_section_unchanged` 仍然通过；
+  - `node --test language.test.cjs` 10/10；
+  - 新加的断言都做了变异验证，每次都会失败：去掉 zip 命令、去掉 install.ps1 链接、FAQ 或卡片写死测试版、改掉哈希那句话、删掉一条西语更新日志。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
