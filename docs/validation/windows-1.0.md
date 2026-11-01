@@ -600,6 +600,20 @@ Speed test finished
   `npx wrangler r2 object delete "cellglide-diagnostics/reports/<CODE>.json" --remote`
   （删除 R2 对象属对外动作，执行前须经用户同意。）
 
+### Task 9：官网 Windows 下载区（CellProxy，只提交，未部署）（2026-10-31）
+
+- **提交**：CellProxy `windows-1.0` 分支 `c212b8c` Website: Windows download section and changelog（在 Task 8 的 `030f1a6` 之上；作者 `kikohz <1294534+kikohz@users.noreply.github.com>`）。**未推送，未部署**，没有运行 wrangler。
+- **开发数据**：`python -I scripts/release-windows-json.py --dist dist\windows\1.0.0 --version 1.0.0 --date 2026-10-31`（正式 base），exit 0。x64 `b7b9c82f…89fc7`（37,895,100 B），arm64 `ddc7e601…b3f5`（37,058,972 B，`test_build: true`）。复制为 `Website/release-windows.json`（SHA-256 `641cdddacc49…5e29`，与生成的文件相同）。pkg.cellglide.com 上还没有这些链接；Task 12 用 CI 产物重新生成。
+- **改动**：
+  - `build.py`：`load_windows_release` 与 Linux 规则相同（缺字段、`files` 不是恰好 x64/arm64 两个 zip、`test_build` 不是布尔值，都会以 `release-windows.json: …` 退出）；`PLATFORM_STATUS['windows'] = 'live'`；Windows 卡片链接到 `/download/#windows`。下载页在 Linux 之前加了 `id="windows"` 一节，三种语言，沿用 Linux 的样式类，不加 CSS 也不加脚本。更新日志页加了 Windows 标题。FAQ 和平台文案改为已支持。
+  - `changelog.json`：Windows 1.0.0，三种语言各 7 条。
+  - `check.py`：新增 `windows_download_section`、`windows_status_live`、`windows_arm64_label`（在临时副本里改成 `false` 后完整重建一次）、`windows_data_required`，以及 `linux_section_unchanged`（三种语言的 Linux 下载区和 Linux 卡片与 030f1a6 构建结果的 SHA-256 逐字节相同）。
+  - `make-og-images.py`：四个平台都标为已支持；浏览器可以用 `CHROME` 换，并用临时 profile。三张分享图在本机用 Chrome 重新生成。
+- **本机构建**：`build.py` 需要 macOS 的 `ffprobe`，而且 Python 要用 UTF-8。所以在本机通过 scratchpad 里的一个包装脚本运行：它读取 mp4 的视频样本条目回答 `ffprobe`，并加上 `-I -X utf8`。网站的文件都没有为此修改。另外，系统 Git 设了 `core.autocrlf=true`，工作区默认是 CRLF，会让 CSP 哈希检查失败，所以 `Website/` 和 `Docs/Web/` 改用 LF 检出。提交里的文件都是 LF。
+- **测试**：`check.py` 先在 `windows_download_section` 失败，改动后全部 PASS，包括原有的 `linux_download_section`、`linux_status_live`、`linux_data_required`、`linux_release_final` 和 `appcast_mac_only`。`node --test language.test.cjs` 10/10。新检查各做了一次变异，每次都失败；变异全部还原。
+- **Linux 未变**：改动前后的 `dist/` 对比：三种语言的 Linux 下载区、更新日志的 Linux 部分逐字节相同，所有页面上指向 Linux 的链接也相同。提交前重新核对了决定 21 的三条：`load_linux_release`（`build.py:13`）、`linux_section` 仍返回 `id="linux"` 且下载页仍在调用它、`release-linux.json` 1.0.0。
+- **本地预览**：`python -m http.server --bind 127.0.0.1` 打开 `dist`，用无界面 Chrome（临时 profile）截了三种语言的 `#windows`，存在 CellProxy 的 `build.noindex/scratch/windows-download-{en,zh,es}.png`。用完已停掉服务器。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
