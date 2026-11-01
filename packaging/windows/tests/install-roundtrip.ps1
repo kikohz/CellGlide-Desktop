@@ -130,9 +130,19 @@ if ($existing.Count -gt 0 -and -not $BackupDir) {
     Write-Host "$($existing -join ' and ') exist; uninstall.ps1 -Purge would delete them. Run again with -BackupDir <new folder> to have them copied there first and put back afterwards."
     exit 1
 }
-if ($BackupDir -and (Test-Path -LiteralPath $BackupDir) -and @(Get-ChildItem -LiteralPath $BackupDir -Force).Count -gt 0) {
-    Write-Host "$BackupDir is not empty; give a new folder."
-    exit 1
+if ($BackupDir) {
+    $backupFull = [IO.Path]::GetFullPath($BackupDir)
+    foreach ($tree in $DataDir, $UserDataDir) {
+        $treeFull = [IO.Path]::GetFullPath($tree).TrimEnd('\')
+        if ($backupFull -eq $treeFull -or $backupFull.StartsWith($treeFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host "$BackupDir is inside $tree, which -Purge deletes; give a folder outside the data directories."
+            exit 1
+        }
+    }
+    if ((Test-Path -LiteralPath $BackupDir) -and @(Get-ChildItem -LiteralPath $BackupDir -Force).Count -gt 0) {
+        Write-Host "$BackupDir is not empty; give a new folder."
+        exit 1
+    }
 }
 
 $script:Work = if ($BackupDir) { $BackupDir } else { Join-Path ([IO.Path]::GetTempPath()) ('cellglide-roundtrip-' + [guid]::NewGuid().ToString('N')) }
@@ -145,8 +155,10 @@ if ($BackupDir) {
     foreach ($pair in @(@($DataDir, 'ProgramData'), @($UserDataDir, 'LocalAppData'))) {
         if (-not (Test-Path -LiteralPath $pair[0])) { continue }
         $copy = Join-Path $BackupDir $pair[1]
-        Invoke-Robocopy $pair[0] $copy
+        # Record from the source before the copy, so the service writing a log line during the
+        # copy does not look like a lost file afterwards.
         $record = Get-DirRecord $pair[0]
+        Invoke-Robocopy $pair[0] $copy
         $backups += [pscustomobject]@{ Dir = $pair[0]; Copy = $copy; Record = $record }
         Write-Host "Backed up $($pair[0]) ($($record.Count) entries) to $copy"
     }
@@ -189,7 +201,10 @@ try {
         try {
             Invoke-Robocopy $backup.Copy $backup.Dir
             $now = Get-DirRecord $backup.Dir
-            Test-Check ($now.Count -eq $backup.Record.Count) "$($backup.Dir) is back with $($backup.Record.Count) entries (now $($now.Count))"
+            # The restored tree must match the backup copy; the checked files must still have the
+            # SHA-256 they had at the source, before the copy.
+            $copyRecord = Get-DirRecord $backup.Copy
+            Test-Check ($now.Count -eq $copyRecord.Count) "$($backup.Dir) is back with $($copyRecord.Count) entries (now $($now.Count))"
             foreach ($name in $backup.Record.Hashes.Keys) {
                 Test-Check ($now.Hashes[$name] -ceq $backup.Record.Hashes[$name]) "$($backup.Dir)\$name has its SHA-256 back"
             }

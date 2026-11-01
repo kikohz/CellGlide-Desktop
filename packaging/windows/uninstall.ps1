@@ -19,10 +19,23 @@ signed-in user that starts our app (HKCU and the user hives Windows already has 
 other hive is loaded) is removed, then the Start menu shortcut, the Installed-apps entry,
 C:\Program Files\CellGlide (and a leftover CellGlide.new, CellGlide.old or CellGlide.work-*),
 cellglide0's Tcpip and Tcpip6 interface keys (only its fixed GUID, after the service is gone)
-and a phantom cellglide0 device node. C:\ProgramData\CellGlide and each user's
-%LOCALAPPDATA%\CellGlide are deleted only with -Purge, and never through a junction or
-symbolic link. Nothing else is touched: no other adapter, DNS setting, route, service or
-device. Exit codes: 0 uninstalled, 1 a step failed or the uninstall was cancelled.
+and a phantom cellglide0 device node.
+
+With -Purge, C:\ProgramData\CellGlide and the invoking user's own %LOCALAPPDATA%\CellGlide are
+deleted too, and never through a junction or symbolic link. The two are removed by different
+processes on purpose: an elevated process must never delete inside a tree a standard user can
+write to, or that user could swap a junction in and redirect the delete elsewhere.
+C:\ProgramData\CellGlide has an admin/SYSTEM-only ACL (set by install.ps1), which is verified
+first and the purge refuses it if a non-administrator can write there, so only the elevated
+part touches it. %LOCALAPPDATA%\CellGlide is under the user's own profile, so it is removed by
+the unelevated parent running as that user, after the elevated part finishes; a junction swap
+gains nothing, because the user can already delete whatever their own token can delete.
+
+Known limits: only the invoking user's %LOCALAPPDATA%\CellGlide is removed; other accounts keep
+their own %LOCALAPPDATA%\CellGlide, and a signed-in Microsoft/Entra ID user (SID S-1-12-1-*)
+keeps both their startup entry and their %LOCALAPPDATA%\CellGlide (only classic local accounts,
+SID S-1-5-21-*, are handled). Nothing else is touched: no other adapter, DNS setting, route,
+service or device. Exit codes: 0 uninstalled, 1 a step failed or the uninstall was cancelled.
 #>
 param(
     # Under iex the param block binds into the caller's own scope. This default runs before any
@@ -356,9 +369,11 @@ function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
 }
 
 function Remove-StaleWorkDirs([string]$Keep, [string]$Root = (Split-Path -Parent $InstallDir), [int]$MinAgeMinutes = 60) {
-    # Work folders left by an install that was killed: only those created more than an hour ago
-    # (an install takes seconds, so a concurrent install's folder is never touched), never the
-    # current one, never through a link.
+    # Work folders left by an install that was killed: only those created at least $MinAgeMinutes
+    # ago, never the current one ($Keep), never through a link. install.ps1 passes the default 60
+    # (an install takes seconds, so a concurrent install's folder is not touched); uninstall.ps1
+    # passes 0 to clear every work folder, which can remove a concurrent install's (acceptable:
+    # the two only collide when an administrator runs install and uninstall at the same time).
     $ErrorActionPreference = 'Stop'
     $cutoff = (Get-Date).ToUniversalTime().AddMinutes(-$MinAgeMinutes)
     foreach ($stale in @(Get-ChildItem -LiteralPath $Root -Directory -Force -Filter 'CellGlide.work-*' -ErrorAction SilentlyContinue)) {
@@ -411,13 +426,73 @@ function Test-ProfileDataPath([string]$Path, [string]$ProfilesRoot) {
     return $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -and $full.Length -gt $root.Length + 1
 }
 
+function Test-DataDirAdminOnly([string]$Dir) {
+    # True when $Dir grants write-class rights only to SYSTEM, the service accounts and
+    # Administrators, so no standard user can plant a junction in it before the elevated purge.
+    # Any Allow ACE that lets some other principal create, write, delete or re-permission fails.
+    $ErrorActionPreference = 'Stop'
+    $acl = Get-Acl -LiteralPath $Dir
+    $readOnly = [Security.AccessControl.FileSystemRights]'ReadAndExecute, ReadPermissions, Synchronize'
+    foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $ace.IdentityReference.Value
+        # SYSTEM, LocalService, NetworkService, Administrators, and service SIDs (S-1-5-80-*): a
+        # standard user cannot assume any of these, nor set an ACE for one on a folder they do
+        # not control, so their write access is not a way in.
+        if ($sid -in 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544' -or $sid -like 'S-1-5-80-*') { continue }
+        if (([int]$ace.FileSystemRights -band -bnot [int]$readOnly) -ne 0) { return $false }
+    }
+    return $true
+}
+
+function Get-CanonicalPath([string]$Path) {
+    # $Path with 8.3 short names expanded and links resolved, so a prefix comparison is not
+    # fooled by C:\PROGRA~1 or a symbolic link pointing into the install folder. A path that
+    # exists is resolved by its handle's final path; one that does not is expanded as far as
+    # GetLongPathName can take it.
+    $ErrorActionPreference = 'Stop'
+    if (-not $Path) { return '' }
+    if (-not ('CellGlideUninstall.PathApi' -as [type])) {
+        Add-Type -Namespace CellGlideUninstall -Name PathApi -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern uint GetLongPathName(string path, System.Text.StringBuilder buffer, uint size);
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern System.IntPtr CreateFileW(string path, uint access, uint share, System.IntPtr sec, uint disposition, uint flags, System.IntPtr template);
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern uint GetFinalPathNameByHandleW(System.IntPtr handle, System.Text.StringBuilder buffer, uint size, uint flags);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool CloseHandle(System.IntPtr handle);
+'@
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $full) {
+        $handle = [CellGlideUninstall.PathApi]::CreateFileW($full, 0, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero)
+        if ($handle -ne [IntPtr](-1)) {
+            try {
+                $buffer = New-Object Text.StringBuilder 1024
+                if ([CellGlideUninstall.PathApi]::GetFinalPathNameByHandleW($handle, $buffer, 1024, 0) -gt 0) {
+                    $final = $buffer.ToString()
+                    if ($final.StartsWith('\\?\UNC\')) { return '\\' + $final.Substring(8) }
+                    if ($final.StartsWith('\\?\')) { return $final.Substring(4) }
+                    return $final
+                }
+            } finally { [void][CellGlideUninstall.PathApi]::CloseHandle($handle) }
+        }
+    }
+    $buffer = New-Object Text.StringBuilder 1024
+    if ([CellGlideUninstall.PathApi]::GetLongPathName($full, $buffer, 1024) -gt 0) { return $buffer.ToString() }
+    return $full
+}
+
 function Test-NeedsRelocation([string]$ScriptPath, [string]$InstallDir, [bool]$Elevated) {
-    # The work must run elevated, and never from the copy in the folder it deletes.
+    # The work must run elevated, and never from the copy in the folder it deletes. Both paths
+    # are canonicalized first, so a short (8.3) path or a link into the install folder is caught.
     $ErrorActionPreference = 'Stop'
     if (-not $Elevated) { return $true }
     if (-not $ScriptPath) { return $false }
-    $full = [IO.Path]::GetFullPath($ScriptPath)
-    return $full.StartsWith($InstallDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+    $script = Get-CanonicalPath $ScriptPath
+    $dir = (Get-CanonicalPath $InstallDir).TrimEnd('\') + '\'
+    return $script.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)
 }
 
 # ---- Steps with side effects ----
@@ -488,32 +563,22 @@ function Remove-DataDir([string]$Dir) {
     Remove-TreeNoFollow $Dir
 }
 
-function Remove-UserData([string]$ProfileList = $ProfileListKey) {
-    # Each user's %LOCALAPPDATA%\CellGlide (-Purge only): ordinary user profiles (S-1-5-21-*)
-    # whose folder lies under ProfilesDirectory, reached through no junction or symbolic link.
-    # A profile that fails is reported at the end; the others are still done.
+function Remove-OwnUserData([string]$Dir = '', [string]$ProfilesRoot = '') {
+    # The invoking user's own %LOCALAPPDATA%\CellGlide (-Purge only). This runs in the parent
+    # process, as that user (unelevated when the user is), so it only ever deletes what the
+    # user's own token can delete: a junction swap by them, or by anyone who can already write
+    # their profile, gains no privilege. Other accounts' per-user data is left alone (the parent
+    # is not them, and an elevated process must not reach into their writable profile).
     $ErrorActionPreference = 'Stop'
-    $root = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $ProfileList -Name ProfilesDirectory).ProfilesDirectory)
-    $failed = @()
-    foreach ($key in @(Get-ChildItem -LiteralPath $ProfileList)) {
-        if ($key.PSChildName -notmatch '\AS-1-5-21-[0-9-]+\z') { continue }
-        $image = [Environment]::ExpandEnvironmentVariables([string]$key.GetValue('ProfileImagePath', ''))
-        $dir = $image.TrimEnd('\') + '\AppData\Local\CellGlide'
-        if (-not (Test-ProfileDataPath $dir $root)) {
-            Write-Host "Skipped $dir (not under the profiles folder $root)"
-            continue
-        }
-        try {
-            foreach ($step in @($image, "$image\AppData", "$image\AppData\Local")) {
-                if ((Test-Path -LiteralPath $step) -and (Test-ReparsePoint (Get-Item -LiteralPath $step -Force))) { Refuse-ReparsePoint $step }
-            }
-            Remove-DataDir $dir
-        } catch {
-            Write-Host "Could not remove ${dir}: $($_.Exception.Message)"
-            $failed += $dir
-        }
+    if (-not $Dir) { $Dir = Join-Path $env:LOCALAPPDATA 'CellGlide' }
+    if (-not (Test-Path -LiteralPath $Dir)) { return }
+    if (-not $ProfilesRoot) {
+        try { $ProfilesRoot = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $ProfileListKey -Name ProfilesDirectory).ProfilesDirectory) } catch { $ProfilesRoot = '' }
     }
-    if ($failed.Count -gt 0) { throw "could not remove $($failed -join ', ')" }
+    if ($ProfilesRoot -and -not (Test-ProfileDataPath $Dir $ProfilesRoot)) {
+        throw "$Dir is not under the profiles folder $ProfilesRoot"
+    }
+    Remove-DataDir $Dir
 }
 
 function Remove-ServiceEntry {
@@ -592,8 +657,14 @@ function Invoke-UninstallPart([switch]$Purge, [string]$Keep = '') {
         @('interface keys', { Remove-InterfaceKeys }),
         @('phantom device', { Remove-PhantomDevice }))
     if ($Purge) {
-        $steps += , @('data directory', { Remove-DataDir $DataDir })
-        $steps += , @('user data', { Remove-UserData })
+        # ProgramData only: it has an admin/SYSTEM-only ACL, so no standard user can plant a
+        # junction here. The invoking user's own %LOCALAPPDATA% is removed by the parent, not
+        # here, so this elevated part never deletes inside a user-writable tree.
+        $steps += , @('data directory', {
+            if ((Test-Path -LiteralPath $DataDir) -and -not (Test-DataDirAdminOnly $DataDir)) {
+                throw "$DataDir can be written by a non-administrator; it was not purged"
+            }
+            Remove-DataDir $DataDir })
     }
     foreach ($step in $steps) {
         try { & $step[1] }
@@ -602,9 +673,8 @@ function Invoke-UninstallPart([switch]$Purge, [string]$Keep = '') {
             $failures.Add($step[0])
         }
     }
-    if (-not $Purge) {
-        if (Test-Path -LiteralPath $DataDir) { Write-Host "Kept $DataDir (settings and logs); run with -Purge to delete it." }
-        Write-Host "Kept each user's %LOCALAPPDATA%\CellGlide (speed test history and preferences); run with -Purge to delete it."
+    if (-not $Purge -and (Test-Path -LiteralPath $DataDir)) {
+        Write-Host "Kept $DataDir (settings and logs); run with -Purge to delete it."
     }
     if ($failures.Count -gt 0) {
         Write-Host "Uninstall finished with failures: $($failures -join ', ')"
@@ -702,6 +772,10 @@ function Invoke-CellGlideUninstall {
                 Remove-PathWithRetry $work
             }
         }
+        # The top-level process, running as the invoking user (elevated or not). The system
+        # changes are done elevated (relocated to an elevated child, or here when already an
+        # administrator outside the install folder). Then, with -Purge, this process removes the
+        # user's own %LOCALAPPDATA%\CellGlide as that user: the elevated part never does.
         if (Test-NeedsRelocation $ScriptPath $InstallDir (Test-Elevated)) {
             if ($ScriptPath) {
                 # Run with -File: this process's own working folder must not hold the install
@@ -710,9 +784,17 @@ function Invoke-CellGlideUninstall {
             }
             $childArgs = @()
             if ($Purge) { $childArgs += '-Purge' }
-            return (Invoke-UninstallChild $CellGlideUninstallText $childArgs)
+            $code = Invoke-UninstallChild $CellGlideUninstallText $childArgs
+        } else {
+            $code = Invoke-UninstallPart -Purge:$Purge
         }
-        return (Invoke-UninstallPart -Purge:$Purge)
+        if ($Purge) {
+            try { Remove-OwnUserData }
+            catch { Write-Host "user data failed: $($_.Exception.Message)"; if ($code -eq 0) { $code = 1 } }
+        } else {
+            Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history and preferences); run with -Purge to delete it."
+        }
+        return $code
     } catch {
         Write-Host "Uninstall failed: $($_.Exception.Message)"
         return 1

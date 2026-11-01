@@ -537,6 +537,14 @@ Speed test finished
 - **装回开发安装**：快照 D → `scripts\install-dev.ps1`（包装：`build-windows.ps1 -Arch x64` 再 `install.ps1 -ZipPath … -Unattended`），exit 0，`Installing 1.0.0`，服务 Running，doctor 除「没插 iPhone」外全 ✓ → 快照 E。D 与 E、A 与 E 都是 identical。
 - **最终状态与开始时的记录**：服务 Running，`sc qc` 路径带引号，`qfailure` / `qsidtype` / `qprivs` 相同；`settings.json`（自动连接 true、严格 DNS true）和 `speedtests.json` 哈希相同；HKCU Run 仍然没有值；ProgramData 的 ACL 是 `Set-DataDirAcl` 设的那一套。与开始时不同的地方：开发安装现在是正式布局（多了 `app\`、`uninstall.ps1`、`version.txt`、许可文件、快捷方式和卸载项，exe 按当前 HEAD 重新编译）；我们 GUID 的接口键被卸载删掉，下次隧道建立时重新生成。
 - 没有用手机流量（iPhone 未接），没有动其他网卡、DNS 或路由，没有发送键盘鼠标输入，没有切换主题。
+### Task 6 Fix round 1（2026-10-31）
+
+- **`-Purge` 父子分工**：提权子进程只删 `C:\ProgramData\CellGlide`（删前用 `Test-DataDirAdminOnly` 核对其 ACL 只有 SYSTEM / 服务账户 / Administrators 可写，否则拒绝）；调用者自己的 `%LOCALAPPDATA%\CellGlide` 由未提权父进程以该用户身份在提权部分之后删除。提权进程不再碰任何用户可写的目录树。
+- **已知限制**：只删调用者自己的 `%LOCALAPPDATA%\CellGlide`；其他账户保留各自的；Microsoft/Entra ID 用户（SID `S-1-12-1-*`）的 Run 值和 `%LOCALAPPDATA%` 不处理（只认本地账户 `S-1-5-21-*`）。
+- **测试**：Pester 151/151（Uninstall 41、Shared 2），`check-windows-core.ps1` exit 0，输出无 CLIXML 噪声。`Test-NeedsRelocation` 改为比较规范化长路径（`Get-CanonicalPath`）；往返脚本拒绝落在数据目录内的 `-BackupDir`，并在复制前从源取文件记录。
+- **本机往返**（基线 safety 备份 `safety-20261031-180818`，往返 `backup-20261031-180829`）：`install-roundtrip.ps1` exit 0，全部检查 ok；卸载走安装目录里的 `uninstall.ps1 -Purge`（提权子进程删 ProgramData，父进程删 `C:\Users\iloss\AppData\Local\CellGlide`）；快照 B、C 与 A identical；两个数据目录从备份拷回，数量与被核对文件哈希一致（恢复后与 safety 清单 0 处不符）。
+- **装回开发安装**：快照 D → `install-dev.ps1` → 快照 E，D 与 E、A 与 E 都 identical；服务 Running，doctor 除「没插 iPhone」外全 ✓；`settings.json`（自动连接、严格 DNS）、`speedtests.json` 与往返前一致，HKCU Run 仍为空。
+- 没有用手机流量，没有动其他网卡、DNS、路由，没有发送输入，没有切换主题。
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

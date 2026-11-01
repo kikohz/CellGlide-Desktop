@@ -559,14 +559,15 @@ $code = 7
         $iex = "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))')))"
         $names = "'cgLeak', 'CellGlideInstallText', 'BaseUrl', 'ZipPath', 'Unattended', 'ElevatedPart', 'Arch', 'LogPath', 'AllowLoopback', '__CellGlideCallerVars', 'keep', 'name', 's', 'v', 'a', 'Saved', 'Names'"
         $report = "[Console]::Out.WriteLine('left: ' + (@('CgLeak', 'Invoke-CellGlideInstall') | Where-Object { Get-Command `$_ -ErrorAction SilentlyContinue }) + '|' + (@($names) | Where-Object { Get-Variable `$_ -ErrorAction SilentlyContinue }))"
+        $quiet = "`$ProgressPreference = 'SilentlyContinue'`n"       # no "Preparing modules for first use" CLIXML on stderr
         # Nothing of the caller's: nothing is left.
-        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$iex`n$report"))))
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$quiet$iex`n$report"))))
         $out | Should -Contain 'body ran'
         $out | Should -Contain 'left: |'
         # The caller's own variables of the same names come back with their values and options.
         $pre = "`$BaseUrl = 'mine'; `$Arch = 42; `$CellGlideInstallText = 'own text'; `$__CellGlideCallerVars = 'h'; `$ZipPath = 'zp'"
         $check = "[Console]::Out.WriteLine('vals: ' + `$BaseUrl + '|' + `$Arch + '|' + `$Arch.GetType().Name + '|' + `$CellGlideInstallText + '|' + `$__CellGlideCallerVars + '|' + `$ZipPath + '|' + (Get-Variable ZipPath).Options + '|' + [bool](Get-Variable Unattended -ErrorAction SilentlyContinue) + '|' + [bool](Get-Variable cgLeak -ErrorAction SilentlyContinue))"
-        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$pre`n$iex`n$check"))) 2>&1 | ForEach-Object { "$_" })
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$quiet$pre`n$iex`n$check"))) 2>&1 | ForEach-Object { "$_" })
         $out | Should -Contain 'body ran'
         $out | Should -Contain 'vals: mine|42|Int32|own text|h|zp|None|False|False'
     }

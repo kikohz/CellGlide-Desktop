@@ -682,9 +682,11 @@ function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
 }
 
 function Remove-StaleWorkDirs([string]$Keep, [string]$Root = (Split-Path -Parent $InstallDir), [int]$MinAgeMinutes = 60) {
-    # Work folders left by an install that was killed: only those created more than an hour ago
-    # (an install takes seconds, so a concurrent install's folder is never touched), never the
-    # current one, never through a link.
+    # Work folders left by an install that was killed: only those created at least $MinAgeMinutes
+    # ago, never the current one ($Keep), never through a link. install.ps1 passes the default 60
+    # (an install takes seconds, so a concurrent install's folder is not touched); uninstall.ps1
+    # passes 0 to clear every work folder, which can remove a concurrent install's (acceptable:
+    # the two only collide when an administrator runs install and uninstall at the same time).
     $ErrorActionPreference = 'Stop'
     $cutoff = (Get-Date).ToUniversalTime().AddMinutes(-$MinAgeMinutes)
     foreach ($stale in @(Get-ChildItem -LiteralPath $Root -Directory -Force -Filter 'CellGlide.work-*' -ErrorAction SilentlyContinue)) {

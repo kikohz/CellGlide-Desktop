@@ -83,45 +83,70 @@ Describe 'uninstall.ps1' {
         Test-ProfileDataPath 'C:\Users' 'C:\Users' | Should -BeFalse
         Test-ProfileDataPath 'C:\Users\' 'C:\Users\' | Should -BeFalse
     }
-    It 'Remove-UserData purges only S-1-5-21 profiles under ProfilesDirectory' {
+    It 'Remove-OwnUserData removes only a folder under the profiles root, and a missing one is fine' {
         Mock Write-Host {}
-        $key = & $script:NewTempKey
-        try {
-            $users = Join-Path $TestDrive 'Users'
-            $mk = { param($sid, $image) $k = Join-Path $key $sid; $null = New-Item -Path $k
-                $null = New-ItemProperty -LiteralPath $k -Name ProfileImagePath -Value $image -PropertyType ExpandString
-                $d = Join-Path $image 'AppData\Local\CellGlide'; $null = New-Item -ItemType Directory $d; Set-Content (Join-Path $d 'speedtests.json') '[]'; $d }
-            $null = New-ItemProperty -LiteralPath $key -Name ProfilesDirectory -Value $users -PropertyType ExpandString
-            $alice = & $mk 'S-1-5-21-1-2-3-1001' (Join-Path $users 'alice')
-            $eve = & $mk 'S-1-5-21-1-2-3-1002' (Join-Path $TestDrive 'Elsewhere\eve')
-            $system = & $mk 'S-1-5-18' (Join-Path $users 'systemlike')
-            Remove-UserData $key
-            Test-Path $alice | Should -BeFalse
-            Test-Path $eve | Should -BeTrue
-            Test-Path $system | Should -BeTrue
-            Should -Invoke Write-Host -ParameterFilter { "$Object" -like "Skipped $eve*" }
-        } finally { Remove-Item -LiteralPath $key -Recurse -Force }
+        $root = Join-Path $TestDrive 'Users'
+        $dir = Join-Path $root 'me\AppData\Local\CellGlide'; New-Item -ItemType Directory (Join-Path $dir 'x') | Out-Null
+        Set-Content (Join-Path $dir 'speedtests.json') '[]'
+        Remove-OwnUserData $dir $root
+        Test-Path $dir | Should -BeFalse
+        Test-Path (Join-Path $root 'me\AppData\Local') | Should -BeTrue
+        { Remove-OwnUserData (Join-Path $root 'gone\AppData\Local\CellGlide') $root } | Should -Not -Throw
     }
-    It 'Remove-UserData goes on past a refused profile and then reports it' {
+    It 'Remove-OwnUserData refuses a folder outside the profiles root and never follows a junction' {
         Mock Write-Host {}
-        $key = & $script:NewTempKey
-        try {
-            $users = Join-Path $TestDrive 'Users2'
-            $null = New-ItemProperty -LiteralPath $key -Name ProfilesDirectory -Value $users -PropertyType String
-            $victim = Join-Path $TestDrive 'victim3'; $null = New-Item -ItemType Directory $victim; Set-Content (Join-Path $victim 'keep.txt') 'x'
-            # bob's AppData\Local is a junction to somewhere else: the CellGlide folder there is not his.
-            $bob = Join-Path $users 'bob'; $null = New-Item -ItemType Directory (Join-Path $bob 'AppData')
-            $null = New-Item -ItemType Directory (Join-Path $victim 'CellGlide')
-            $null = New-Item -ItemType Junction -Path (Join-Path $bob 'AppData\Local') -Target $victim
-            $carol = Join-Path $users 'carol\AppData\Local\CellGlide'; $null = New-Item -ItemType Directory $carol
-            foreach ($p in @(@('S-1-5-21-9-9-9-1001', $bob), @('S-1-5-21-9-9-9-1002', (Join-Path $users 'carol')))) {
-                $k = Join-Path $key $p[0]; $null = New-Item -Path $k; $null = New-ItemProperty -LiteralPath $k -Name ProfileImagePath -Value $p[1]
-            }
-            try { { Remove-UserData $key } | Should -Throw '*bob*' }
-            finally { [IO.Directory]::Delete((Join-Path $bob 'AppData\Local')) }
-            Test-Path (Join-Path $victim 'CellGlide') | Should -BeTrue
-            Test-Path $carol | Should -BeFalse
-        } finally { Remove-Item -LiteralPath $key -Recurse -Force }
+        $root = Join-Path $TestDrive 'Users3'; $null = New-Item -ItemType Directory $root
+        $outside = Join-Path $TestDrive 'Elsewhere\CellGlide'; New-Item -ItemType Directory $outside | Out-Null; Set-Content (Join-Path $outside 'k.txt') 'x'
+        { Remove-OwnUserData $outside $root } | Should -Throw '*not under the profiles folder*'
+        Test-Path (Join-Path $outside 'k.txt') | Should -BeTrue
+        $victim = Join-Path $TestDrive 'victim5'; New-Item -ItemType Directory $victim | Out-Null; Set-Content (Join-Path $victim 'keep.txt') 'x'
+        $dir = Join-Path $root 'me2\AppData\Local\CellGlide'; New-Item -ItemType Directory $dir | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $dir 'j') -Target $victim | Out-Null
+        try { { Remove-OwnUserData $dir $root } | Should -Throw '*junction or symbolic link*' }
+        finally { [IO.Directory]::Delete((Join-Path $dir 'j')) }
+        Test-Path (Join-Path $victim 'keep.txt') | Should -BeTrue
+    }
+    It 'Remove-TreeNoFollow refuses a junction swapped in mid-tree and deletes nothing beyond it' {
+        # Reaches Remove-TreeNoFollow's own per-item check directly (not Remove-DataDir's up-front scan).
+        $victim = Join-Path $TestDrive 'victim6'; New-Item -ItemType Directory $victim | Out-Null; Set-Content (Join-Path $victim 'keep.txt') 'x'
+        $dir = Join-Path $TestDrive 'tree\CellGlide'; New-Item -ItemType Directory (Join-Path $dir 'logs') | Out-Null
+        Set-Content (Join-Path $dir 'logs\a.log') 'x'
+        New-Item -ItemType Junction -Path (Join-Path $dir 'logs\link') -Target $victim | Out-Null
+        try { { Remove-TreeNoFollow $dir } | Should -Throw '*logs\link is a junction or symbolic link*' }
+        finally { [IO.Directory]::Delete((Join-Path $dir 'logs\link')) }
+        Test-Path (Join-Path $victim 'keep.txt') | Should -BeTrue
+    }
+    It 'Remove-TreeNoFollow refuses a file symbolic link in the tree (its per-item check)' -Tag 'Elevated' {
+        # A file symlink has PSIsContainer false, so only Remove-TreeNoFollow's own per-entry
+        # check (not the recursion's top check) can stop it before [IO.File]::Delete.
+        $target = Join-Path $TestDrive 'target.txt'; Set-Content $target 'secret'
+        $dir = Join-Path $TestDrive 'tree2\CellGlide'; New-Item -ItemType Directory $dir | Out-Null
+        Set-Content (Join-Path $dir 'settings.json') '{}'
+        New-Item -ItemType SymbolicLink -Path (Join-Path $dir 'slink') -Target $target | Out-Null
+        try { { Remove-TreeNoFollow $dir } | Should -Throw '*slink is a junction or symbolic link*' }
+        finally { Remove-Item -LiteralPath (Join-Path $dir 'slink') -Force -ErrorAction SilentlyContinue }
+        (Get-Item $target).Length | Should -BeGreaterThan 0
+    }
+    It 'the ProgramData purge is refused when a non-administrator can write there' {
+        $dir = Join-Path $TestDrive 'pd\CellGlide'; New-Item -ItemType Directory $dir | Out-Null
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', $inherit, 'None', 'Allow')))
+        }
+        Set-Acl -LiteralPath $dir -AclObject $acl
+        Test-DataDirAdminOnly $dir | Should -BeTrue
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Modify', $inherit, 'None', 'Allow')))
+        Set-Acl -LiteralPath $dir -AclObject $acl
+        Test-DataDirAdminOnly $dir | Should -BeFalse
+        # Read-only for Users is fine (the GUI reads health\).
+        $acl2 = New-Object Security.AccessControl.DirectorySecurity
+        $acl2.SetAccessRuleProtection($true, $false)
+        $acl2.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-18')), 'FullControl', $inherit, 'None', 'Allow')))
+        $acl2.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'ReadAndExecute', $inherit, 'None', 'Allow')))
+        Set-Acl -LiteralPath $dir -AclObject $acl2
+        Test-DataDirAdminOnly $dir | Should -BeTrue
     }
     It 'never loads another user''s registry hive' {
         $calls = $script:Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.Extent.Text }
@@ -194,52 +219,83 @@ Describe 'uninstall.ps1' {
         BeforeEach {
             Mock Write-Host {}
             $script:calls = New-Object System.Collections.Generic.List[string]
-            foreach ($n in 'Stop-CellGlideProcesses', 'Remove-ServiceEntry', 'Remove-Shortcut', 'Remove-UninstallEntry', 'Remove-InterfaceKeys', 'Remove-PhantomDevice', 'Remove-UserData') {
+            foreach ($n in 'Stop-CellGlideProcesses', 'Remove-ServiceEntry', 'Remove-Shortcut', 'Remove-UninstallEntry', 'Remove-InterfaceKeys', 'Remove-PhantomDevice') {
                 Mock $n ([scriptblock]::Create("`$script:calls.Add('$n')"))
             }
             Mock Stop-OurService { $script:calls.Add('Stop-OurService'); $true }
             Mock Remove-RunValues { $script:calls.Add("Remove-RunValues $ExePath") }
             Mock Remove-ProgramDirs { $script:calls.Add("Remove-ProgramDirs $Keep") }
             Mock Remove-DataDir { $script:calls.Add("Remove-DataDir $Dir") }
+            Mock Test-DataDirAdminOnly { $true }
+            Mock Remove-OwnUserData { $script:calls.Add('Remove-OwnUserData') }   # never called from the elevated part
         }
-        It 'runs in order: processes, service, Run values, entries, files, then the interface keys, the device and the data' {
+        It 'the elevated part purges ProgramData only, after the interface keys and the device, and never the user data' {
             Invoke-UninstallPart -Purge -Keep 'C:\Program Files\CellGlide.work-x' | Should -Be 0
             $script:calls | Should -Be @('Stop-CellGlideProcesses', 'Stop-OurService', 'Remove-ServiceEntry',
                 "Remove-RunValues $script:Exe", 'Remove-Shortcut', 'Remove-UninstallEntry', 'Remove-ProgramDirs C:\Program Files\CellGlide.work-x',
-                'Remove-InterfaceKeys', 'Remove-PhantomDevice', "Remove-DataDir $env:ProgramData\CellGlide", 'Remove-UserData')
+                'Remove-InterfaceKeys', 'Remove-PhantomDevice', "Remove-DataDir $env:ProgramData\CellGlide")
+            $script:calls | Should -Not -Contain 'Remove-OwnUserData'
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'CellGlide uninstalled.' }
         }
-        It 'without -Purge the data is kept and said so' {
+        It 'the ProgramData purge is refused when its ACL lets a non-administrator write' {
+            Mock Test-DataDirAdminOnly { $false }
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq "$env:ProgramData\CellGlide" }
+            Invoke-UninstallPart -Purge | Should -Be 1
+            ($script:calls | Where-Object { $_ -like 'Remove-DataDir*' }) | Should -BeNullOrEmpty
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'data directory failed:*non-administrator*' }
+        }
+        It 'without -Purge the ProgramData folder is kept and said so, and nothing is purged' {
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq "$env:ProgramData\CellGlide" }
             Invoke-UninstallPart | Should -Be 0
-            ($script:calls | Where-Object { $_ -like 'Remove-DataDir*' -or $_ -eq 'Remove-UserData' }) | Should -BeNullOrEmpty
+            ($script:calls | Where-Object { $_ -like 'Remove-DataDir*' }) | Should -BeNullOrEmpty
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like "Kept $env:ProgramData\CellGlide*-Purge*" }
-            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'Kept each user''s %LOCALAPPDATA%\CellGlide*-Purge*' }
         }
         It 'a failed step is reported, the rest still runs, and the result is 1' {
             Mock Remove-ProgramDirs { $script:calls.Add('Remove-ProgramDirs'); throw 'locked' }
             Mock Stop-OurService { $script:calls.Add('Stop-OurService'); $false }
             Invoke-UninstallPart -Purge | Should -Be 1
             $script:calls | Should -Contain 'Remove-InterfaceKeys'
-            $script:calls | Should -Contain 'Remove-UserData'
+            $script:calls | Should -Contain "Remove-DataDir $env:ProgramData\CellGlide"
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'Uninstall finished with failures: stop service, program files' }
         }
     }
     Context 'where the uninstall runs' {
-        BeforeEach { Mock Write-Host {}; Mock Invoke-UninstallPart { $script:part = @{ Purge = [bool]$Purge; Keep = $Keep }; 0 }; $script:part = $null }
-        It 'an ordinary window hands the work to an elevated child, with -Purge' {
+        BeforeEach {
+            Mock Write-Host {}
+            Mock Invoke-UninstallPart { $script:part = @{ Purge = [bool]$Purge; Keep = $Keep }; 0 }
+            Mock Remove-OwnUserData { $script:ownData = $true }
+            $script:part = $null; $script:ownData = $false
+        }
+        It 'an ordinary window hands the work to an elevated child, then removes the user''s own data with -Purge' {
             Mock Test-Elevated { $false }
             Mock Invoke-UninstallChild { $script:child = @{ Text = $ScriptText; Args = $Arguments }; 4 }
             $CellGlideUninstallText = '# own'
             Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 4
             $script:child.Text | Should -Be '# own'
             $script:child.Args | Should -Be @('-Purge')
-            $script:part | Should -BeNullOrEmpty
+            $script:part | Should -BeNullOrEmpty                 # the elevated part runs in the child, not here
+            $script:ownData | Should -BeTrue                     # the parent removes the invoking user's own data
+        }
+        It 'without -Purge the user data is kept, said so, and not removed' {
+            Mock Test-Elevated { $false }
+            Mock Invoke-UninstallChild { 0 }
+            Invoke-CellGlideUninstall -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
+            $script:ownData | Should -BeFalse
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like "Kept $env:LOCALAPPDATA\CellGlide*-Purge*" }
+        }
+        It 'a user-data failure after a clean elevated part makes the result 1' {
+            Mock Test-Elevated { $false }
+            Mock Invoke-UninstallChild { 0 }
+            Mock Remove-OwnUserData { throw 'locked' }
+            Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 1
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'user data failed:*' }
         }
         It 'an administrator window outside the install folder uninstalls in the same process' {
             Mock Test-Elevated { $true }
             Mock Invoke-UninstallChild { throw 'not reached' }
-            Invoke-CellGlideUninstall -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
-            $script:part.Purge | Should -BeFalse
+            Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
+            $script:part.Purge | Should -BeTrue
+            $script:ownData | Should -BeTrue
         }
         It 'the copy in the install folder relocates even in an administrator window' {
             Mock Test-Elevated { $true }
@@ -292,6 +348,23 @@ Describe 'uninstall.ps1' {
         $config.Parameters.ElevatedPart | Should -BeTrue
         $config.Parameters.LogPath | Should -Match '\\cellglide-uninstall-[0-9a-f]{32}\.log$'
     }
+    It 'Get-CanonicalPath resolves a junction and keeps a missing path' {
+        $real = Join-Path $TestDrive 'Canon Target'; New-Item -ItemType Directory $real | Out-Null
+        $link = Join-Path $TestDrive 'canonlink'; New-Item -ItemType Junction -Path $link -Target $real | Out-Null
+        try { Get-CanonicalPath $link | Should -Be (Get-CanonicalPath $real) }
+        finally { [IO.Directory]::Delete($link) }
+        Get-CanonicalPath (Join-Path $TestDrive 'does-not-exist-xyz') | Should -Be (Join-Path $TestDrive 'does-not-exist-xyz')
+        Get-CanonicalPath '' | Should -Be ''
+    }
+    It 'Test-NeedsRelocation follows a link into the install folder, not just the text' {
+        $real = Join-Path $TestDrive 'realinstall'; New-Item -ItemType Directory $real | Out-Null
+        Set-Content (Join-Path $real 'uninstall.ps1') '# x'
+        $link = Join-Path $TestDrive 'linkinstall'; New-Item -ItemType Junction -Path $link -Target $real | Out-Null
+        try {
+            Test-NeedsRelocation (Join-Path $link 'uninstall.ps1') $real $true | Should -BeTrue    # reached through the link
+            Test-NeedsRelocation (Join-Path $real 'uninstall.ps1') $real $true | Should -BeTrue
+        } finally { [IO.Directory]::Delete($link) }
+    }
     It 'a cancelled UAC prompt is a cancelled uninstall, and unknown arguments are refused' {
         Mock Write-Host {}
         Invoke-UninstallChild "# x`n" @() { param($EncodedCommand, $Info) throw 'The operation was canceled by the user.' } | Should -Be 1
@@ -334,13 +407,14 @@ Describe 'uninstall.ps1' {
             "function CgLeak { }`n`$cgLeak = 1`n[Console]::Out.WriteLine('body ran')"
         $iex = "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))')))"
         $names = "'cgLeak', 'CellGlideUninstallText', 'Purge', 'ElevatedPart', 'LogPath', '__CellGlideCallerVars', 'keep', 'name', 's', 'v', 'a', 'Saved', 'Names'"
+        $quiet = "`$ProgressPreference = 'SilentlyContinue'`n"       # no "Preparing modules for first use" CLIXML on stderr
         $report = "[Console]::Out.WriteLine('left: ' + (@('CgLeak') | Where-Object { Get-Command `$_ -ErrorAction SilentlyContinue }) + '|' + (@($names) | Where-Object { Get-Variable `$_ -ErrorAction SilentlyContinue }))"
-        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$iex`n$report"))))
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$quiet$iex`n$report"))))
         $out | Should -Contain 'body ran'
         $out | Should -Contain 'left: |'
         $pre = "`$Purge = 'mine'; `$LogPath = 42; `$CellGlideUninstallText = 'own text'; `$ElevatedPart = 'ep'"
         $check = "[Console]::Out.WriteLine('vals: ' + `$Purge + '|' + `$LogPath + '|' + `$LogPath.GetType().Name + '|' + `$CellGlideUninstallText + '|' + `$ElevatedPart + '|' + [bool](Get-Variable __CellGlideCallerVars -ErrorAction SilentlyContinue) + '|' + [bool](Get-Variable cgLeak -ErrorAction SilentlyContinue))"
-        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$pre`n$iex`n$check"))) 2>&1 | ForEach-Object { "$_" })
+        $out = @(& powershell.exe -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$quiet$pre`n$iex`n$check"))) 2>&1 | ForEach-Object { "$_" })
         $out | Should -Contain 'body ran'
         $out | Should -Contain 'vals: mine|42|Int32|own text|ep|False|False'
     }
