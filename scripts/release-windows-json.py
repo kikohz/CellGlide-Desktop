@@ -14,8 +14,9 @@ nothing else. The output (plan decision 14):
 ARM64 is marked test_build until --arm64-tested is given (spec 14.1); x64 never is. --base defaults
 to https://pkg.cellglide.com; the only other values allowed are loopback test sources
 (http://127.0.0.1:<port>, http://localhost:<port>), the same rule install.ps1 applies, for local
-rehearsals only: scripts/publish-windows.ps1 refuses to upload such data. On any error nothing is
-written and the exit code is 1.
+rehearsals only: scripts/publish-windows.ps1 refuses to upload such data. On a data error nothing
+is written; if writing itself fails part way, the old files are put back as they were (see
+write_all), so the folder never holds a mixed set. Either way the exit code is 1.
 """
 import argparse
 import datetime
@@ -125,20 +126,51 @@ def build(dist: Path, version: str, date: str, base: str, arm64_test_build: bool
 
 
 def write_all(dist: Path, outputs: dict) -> None:
-    """Writes every file to <name>.tmp first, then renames them into place (LF, UTF-8)."""
+    """Writes the set of files so that it is never left mixed (LF, UTF-8).
+
+    1. Every new file is written to <name>.tmp; nothing else is touched until all are written.
+    2. Existing files of these names are moved aside to <name>.bak.
+    3. The .tmp files are renamed into place, in order.
+    If step 2 or 3 fails, the new files already in place are removed and the .bak files are moved
+    back, so the folder ends with either the complete new set or the old files exactly as they
+    were. The .tmp and .bak files are removed in every case (best effort).
+    """
     temps = []
+    backups = []
+    placed = []
     try:
         for name, text in outputs.items():
             tmp = dist / f"{name}.tmp"
+            temps.append((tmp, dist / name))
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(text)
-            temps.append((tmp, dist / name))
+        for _, final in temps:
+            if final.exists():
+                bak = final.with_name(final.name + ".bak")
+                os.replace(final, bak)
+                backups.append((bak, final))
         for tmp, final in temps:
             os.replace(tmp, final)
+            placed.append(final)
+    except BaseException:
+        for final in placed:
+            try:
+                final.unlink()
+            except OSError:
+                pass
+        for bak, final in backups:
+            try:
+                os.replace(bak, final)
+            except OSError:
+                pass
+        raise
     finally:
-        for tmp, _ in temps:
-            if tmp.exists():
-                tmp.unlink()
+        for path in [t for t, _ in temps] + [b for b, _ in backups]:
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
 
 
 def main() -> int:

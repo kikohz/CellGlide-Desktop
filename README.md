@@ -66,7 +66,7 @@ Windows asks once for administrator rights (UAC). The installer downloads the pa
 
 ### Install from the zip
 
-1. From the CellGlide website (<https://cellglide.com>), download `CellGlide-<version>-windows-x64.zip` (or `-arm64.zip`) and `install.ps1` into one folder, and compare the zip's SHA-256 with the one the website shows.
+1. From the Windows section of the download page (<https://cellglide.com/download/#windows>; it goes live with the website update for this release), download `CellGlide-<version>-windows-x64.zip` (or `-arm64.zip`) and `install.ps1` into one folder, and compare the zip's SHA-256 with the one the website shows.
 2. In PowerShell, in that folder, clear the "downloaded from the internet" mark on both files, then run the installer:
 
 ```powershell
@@ -92,14 +92,14 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
 
 This deletes `C:\ProgramData\CellGlide` and your own `%LOCALAPPDATA%\CellGlide`. Other accounts on the PC keep their own `%LOCALAPPDATA%\CellGlide`. Run from an administrator window, the script never deletes `%LOCALAPPDATA%\CellGlide` and says so; delete that folder yourself, or rerun with `-Purge` from an ordinary window.
 
-- Uninstalling removes the "start at sign-in" entry of every user who is signed in. A user who is not signed in at that moment (and a Microsoft / Entra ID account, even when signed in) keeps an entry that points to the deleted program. It does nothing; remove it in **Settings › Apps › Startup** if you like.
+- Uninstalling removes the "start at sign-in" entry of every user who is signed in. A user who is not signed in at that moment (and a work or school (Entra ID) account, even when signed in; personal Microsoft accounts are handled) keeps an entry that points to the deleted program. It does nothing; remove it in **Settings › Apps › Startup** if you like.
 - Apple Devices is not touched.
 
 ### Where things are
 
 ```
 C:\Program Files\CellGlide\    cellglide-service.exe, cellglide.exe (command line), wintun.dll,
-                               THIRD-PARTY-LICENSES.txt, uninstall.ps1, app\ (the CellGlide app)
+                               wintun-LICENSE.txt, THIRD-PARTY-LICENSES.txt, uninstall.ps1, app\ (the CellGlide app)
 C:\ProgramData\CellGlide\      settings.json, health\, logs\
 %LOCALAPPDATA%\CellGlide\      app preferences, speed test history
 ```
@@ -264,7 +264,7 @@ Windows 会弹一次管理员权限确认（UAC）。安装脚本按本机架构
 
 ### 直接下载 zip 安装
 
-1. 从 CellGlide 官网（<https://cellglide.com>）把 `CellGlide-<版本>-windows-x64.zip`（ARM64 是 `-arm64.zip`）和 `install.ps1` 下载到同一个文件夹，并把 zip 的 SHA-256 与官网上写的核对。
+1. 从官网下载页的 Windows 部分（<https://cellglide.com/download/#windows>，随官网更新一起上线）把 `CellGlide-<版本>-windows-x64.zip`（ARM64 是 `-arm64.zip`）和 `install.ps1` 下载到同一个文件夹，并把 zip 的 SHA-256 与官网上写的核对。
 2. 在这个文件夹里打开 PowerShell，先去掉两个文件的「来自互联网」标记，再运行安装脚本：
 
 ```powershell
@@ -290,14 +290,14 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
 
 这会删除 `C:\ProgramData\CellGlide` 和你自己的 `%LOCALAPPDATA%\CellGlide`；这台电脑上其他账户各自的 `%LOCALAPPDATA%\CellGlide` 保留。在管理员窗口里运行时，脚本不会删除 `%LOCALAPPDATA%\CellGlide`，并会提示：请自己删掉这个文件夹，或在普通窗口里带 `-Purge` 再运行一次。
 
-- 卸载会删除每个已登录用户的「登录时启动」项。卸载时没有登录的用户（以及 Microsoft / Entra ID 账户，即使已登录）会留下一个指向已删除程序的启动项，它不起任何作用，可以在「设置 › 应用 › 启动」里删掉。
+- 卸载会删除每个已登录用户的「登录时启动」项。卸载时没有登录的用户（以及工作或学校账户（Entra ID），即使已登录；个人 Microsoft 账户不受影响）会留下一个指向已删除程序的启动项，它不起任何作用，可以在「设置 › 应用 › 启动」里删掉。
 - 不会动「Apple 设备」。
 
 ### 文件位置
 
 ```
 C:\Program Files\CellGlide\    cellglide-service.exe、cellglide.exe（命令行）、wintun.dll、
-                               THIRD-PARTY-LICENSES.txt、uninstall.ps1、app\（CellGlide 程序）
+                               wintun-LICENSE.txt、THIRD-PARTY-LICENSES.txt、uninstall.ps1、app\（CellGlide 程序）
 C:\ProgramData\CellGlide\      settings.json、health\、logs\
 %LOCALAPPDATA%\CellGlide\      界面偏好、测速历史
 ```

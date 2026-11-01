@@ -569,6 +569,16 @@ Speed test finished
   5. 装回开发安装：快照 D（与 A identical）→ `scripts\install-dev.ps1`（exit 0，服务 Running，doctor 除「没插 iPhone」外全 ✓）→ 快照 E。D 与 E、A 与 E 都 identical。`settings.json`、`speedtests.json` 的哈希与开始时相同（只有服务追加的当天 health 文件变了）；卸载项、快捷方式在，HKCU Run 仍为空；没有留下 `CellGlide.new` / `.old` / `.work-*` 或 `%TEMP%\cellglide-*`。
 - 预演数据（`--base` 为本地）不用于发布：publish-windows.ps1 会拒绝上传它，Task 12 用正式地址重新生成。预演结束后已删除 `dist\windows\rehearsal\` 和 `dist\windows\1.0.0\` 里生成的三个文件与复制进去的两个脚本（install-dev 重新出了 x64 zip，那份 `latest.json` 已经过时）；HTTP 服务器已停止。
 - 没有用手机流量（iPhone 未插），没有动其他网卡、DNS、路由，没有发送键盘鼠标输入，没有切换主题。
+### Task 7 Fix round 1（2026-10-31）
+
+- **上传失败不再被当作成功**：wrangler 的输出单独捕获（`2>&1` 存进变量），只看退出码，返回一个 `[bool]`；失败时打印 wrangler 的输出。主流程只认「正好一个 `$true`」为成功，第一个失败就停，后面的 `latest.json` 和脚本都不会上去。
+- **不可变的键先与桶核对**：`-Upload` 时，第一次 put 之前把 `windows/<v>/` 下三个键经公开地址读回（带一次性查询参数，CDN 不用缓存，直接问 R2）。404 = 不存在，上传；200 = 与本地逐字节比较，相同就跳过、不再 put，不同就整次拒绝；其他状态或网络、TLS、DNS 错误一律停止（fail closed，不当作「不存在」）。全部核对完才开始 put，可变的键（`latest.json`、两个脚本）最后上传。dry run 不读桶。读回函数 `Invoke-PublicFetch` 对本机 loopback 服务器实测：存在 → 200 且内容相同，不存在 → 404，端口关闭 → 抛 WebException。没有访问 pkg.cellglide.com。
+- 版本号必须是 `X.Y.Z`；`-Dist` 路径含 `% ^ ! " < > | &` 时拒绝（npx 是 npx.cmd，参数要经 cmd.exe）。
+- `release-windows-json.py` 的 `write_all`：新文件先全部写成 `.tmp`，旧文件改名为 `.bak`，再依次改名就位；任何一步失败就删掉已就位的新文件、把 `.bak` 改回，结果要么是完整的新的一套，要么是原样的旧文件。
+- **更正 Task 6 的已知限制写法**：被跳过的只是工作或学校账户（Entra ID，SID `S-1-12-1-*`）；个人 Microsoft 账户的 SID 是 `S-1-5-21-*`，照常处理。README 和 uninstall.ps1 头注释已改。
+- README：zip 链接改为 `https://cellglide.com/download/#windows`（随官网更新上线）；文件位置补上 `wintun-LICENSE.txt`。删除了 Task 5 留下的 `dist\windows\local\`。
+- 测试：Python 33/33（Windows 22、Linux 11），Pester `PublishWindows` 33 个。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。

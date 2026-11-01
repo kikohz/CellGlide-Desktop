@@ -22,11 +22,22 @@
 # Upload order (Get-UploadPlan): the versioned files, then the latest.json pointer, then the two
 # scripts, so at no moment does the one-line command point at a file that is not there yet.
 #
-# With -Upload (needs npx; wrangler must be logged in to the Cloudflare account): each file is put
-# with "npx --yes wrangler@4.31.0 r2 object put cellglide-pkg/<key> ... --remote", stopping at the
-# first failure; then every public URL must answer a HEAD with 200 and the file's Content-Length;
-# then the version's three lines are appended to packaging\windows\published.sha256 (commit it),
-# and the path of release-windows.json (for CellProxy Website/release-windows.json) is printed.
+# <v> must be X.Y.Z (it names bucket keys), and the -Dist path may not contain % ^ ! " < > | &
+# (npx is npx.cmd, so cmd.exe parses the --file argument).
+#
+# With -Upload (needs npx; wrangler must be logged in to the Cloudflare account):
+#   1. Before anything is put, each immutable key (windows/<v>/...) is read back from the bucket
+#      through its public URL (a cache-busting query, so the CDN asks R2): 404 = absent; 200 = the
+#      bytes must equal the local file, else the whole run is refused (published bytes never
+#      change); any other answer or error stops the run (fail closed, never "absent").
+#   2. Absent immutable keys are put; ones already there with the same bytes are skipped, never
+#      put again. Then the mutable keys: windows/latest.json, uninstall.ps1, install.ps1.
+#      Each put is "npx --yes wrangler@4.31.0 r2 object put cellglide-pkg/<key> ... --remote";
+#      success is wrangler's exit code alone (its output is printed on failure), and the first
+#      failure stops the run, so nothing after it goes live.
+#   3. Every public URL must answer a HEAD with 200 and the file's Content-Length.
+#   4. The version's three lines are appended to packaging\windows\published.sha256 (commit it),
+#      and the path of release-windows.json (for CellProxy Website/release-windows.json) is printed.
 # Exit code 0 when everything passed, 1 otherwise.
 param(
     [string]$Dist = '',
@@ -204,19 +215,88 @@ function Get-WranglerArgs($Item, [string]$Dist) {
         '--content-type', $Item.ContentType, '--cache-control', $Item.CacheControl, '--remote')
 }
 
+function Invoke-WranglerPut($Item, [string]$Dist) {
+    # Puts one plan item with wrangler. Returns exactly one [bool]: wrangler's exit code decides.
+    # Its output is captured (never part of the return value) and printed when it fails.
+    $ErrorActionPreference = 'Continue'   # native stderr through 2>&1 must not throw
+    $npxArgs = Get-WranglerArgs $Item $Dist
+    $out = & npx @npxArgs 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        foreach ($line in @($out)) { Write-Host "  wrangler: $line" }
+        Write-Host "  wrangler exit code: $code"
+    }
+    return [bool]($code -eq 0)
+}
+
+function Test-PutResult($Result) {
+    # A put succeeded only when it returned exactly one [bool] that is $true; anything else (stray
+    # output, nothing, a non-bool) counts as a failure.
+    $r = @($Result)
+    return [bool]($r.Count -eq 1 -and $r[0] -is [bool] -and $r[0])
+}
+
+function Test-ImmutableKey([string]$Key, [string]$Version) {
+    return $Key.StartsWith("windows/$Version/", [StringComparison]::Ordinal)
+}
+
+function Get-RemoteState {
+    # Whether an immutable key is already in the bucket: 'absent', 'same' (identical bytes) or
+    # 'different'. Throws when it cannot tell, so callers fail closed.
+    # $Fetch: param($Url, $OutFile) -> 200 (body written to $OutFile) or 404; throws otherwise.
+    param($Item, [string]$Dist, [scriptblock]$Fetch)
+    $ErrorActionPreference = 'Stop'
+    $tmpDir = Join-Path ([IO.Path]::GetTempPath()) ('cellglide-publish-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $tmpDir
+    try {
+        $tmp = Join-Path $tmpDir 'object'
+        $answer = @(& $Fetch "$PublicBase/$($Item.Key)" $tmp)
+        if ($answer.Count -ne 1) { throw "reading $($Item.Key) back gave no clear answer" }
+        if ($answer[0] -is [int] -and $answer[0] -eq 404) { return 'absent' }
+        if (-not ($answer[0] -is [int] -and $answer[0] -eq 200) -or -not (Test-Path -LiteralPath $tmp -PathType Leaf)) {
+            throw "reading $($Item.Key) back answered '$($answer[0])'"
+        }
+        $remote = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
+        $local = (Get-FileHash -LiteralPath (Join-Path $Dist $Item.File) -Algorithm SHA256).Hash
+        if ($remote -eq $local) { return 'same' }
+        return 'different'
+    } finally {
+        Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-PublicFetch([string]$Url, [string]$OutFile) {
+    # The default $Fetch: GET the public URL with a unique query, so the CDN does not answer from
+    # its cache but asks R2. 200 -> body in $OutFile; 404 -> 404; anything else throws.
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $protocols = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri ($Url + '?cellglide-verify=' + [guid]::NewGuid().ToString('N')) -OutFile $OutFile -Headers @{ 'Cache-Control' = 'no-cache' }
+            return 200
+        } catch [System.Net.WebException] {
+            $response = $_.Exception.Response
+            if ($response -and [int]$response.StatusCode -eq 404) { return 404 }
+            throw
+        }
+    } finally {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols
+    }
+}
+
 function Invoke-PublishWindows {
-    # The whole run; returns the exit code. -Root, -HasNpx, -Put and -Head exist for the tests
-    # (a temporary repository and a fake bucket); the defaults are the real repository, npx and
-    # pkg.cellglide.com.
+    # The whole run; returns the exit code. -Root, -HasNpx, -Put, -Fetch and -Head exist for the
+    # tests (a temporary repository and a fake bucket); the defaults are the real repository, npx
+    # and pkg.cellglide.com.
     param(
         [string]$Dist = '',
         [switch]$Upload,
         [string]$Root = (Split-Path -Parent $PSScriptRoot),
         [scriptblock]$HasNpx = { [bool](Get-Command npx -ErrorAction SilentlyContinue) },
-        [scriptblock]$Put = { param($Item, $Dist)
-            $npxArgs = Get-WranglerArgs $Item $Dist
-            & npx @npxArgs
-            return ($LASTEXITCODE -eq 0) },
+        [scriptblock]$Put = { param($Item, $Dist) Invoke-WranglerPut $Item $Dist },
+        [scriptblock]$Fetch = { param($Url, $OutFile) Invoke-PublicFetch $Url $OutFile },
         [scriptblock]$Head = { param($Url)
             $protocols = [Net.ServicePointManager]::SecurityProtocol
             try {
@@ -228,9 +308,17 @@ function Invoke-PublishWindows {
     $ErrorActionPreference = 'Stop'
     try {
         $Version = Get-WorkspaceVersion (Join-Path $Root 'Cargo.toml')
+        if ($Version -notmatch '\A\d+\.\d+\.\d+\z') {
+            Write-Host "error: the workspace version '$Version' is not X.Y.Z; it would name bucket keys"
+            return 1
+        }
         if (-not $Dist) { $Dist = Join-Path $Root "dist\windows\$Version" }
         if (-not [IO.Path]::IsPathRooted($Dist)) { $Dist = Join-Path (Get-Location).Path $Dist }
         $Dist = [IO.Path]::GetFullPath($Dist)
+        if ($Dist -match '[%^!"<>|&]') {
+            Write-Host "error: the -Dist path '$Dist' contains one of % ^ ! `" < > | &, which cmd.exe (npx.cmd) would mangle; use another folder"
+            return 1
+        }
         $RecordPath = Join-Path $Root 'packaging\windows\published.sha256'
         Write-Host "CellGlide $Version for Windows, from $Dist"
 
@@ -287,7 +375,7 @@ function Invoke-PublishWindows {
             Write-Host ("  {0}  [{1}; {2}]  {3} bytes" -f $item.Key, $item.ContentType, $item.CacheControl, $size)
         }
         if ($alreadyPublished) {
-            Write-Host "$Version is already in published.sha256 with these exact bytes; uploading it again changes nothing under windows/$Version/."
+            Write-Host "$Version is already in published.sha256 with these exact bytes; an upload skips the windows/$Version/ objects the bucket already has."
         }
         if (-not $Upload) {
             if (-not $alreadyPublished) {
@@ -301,10 +389,33 @@ function Invoke-PublishWindows {
         # The upload.
         if (-not $production) { Write-Host "error: refusing to upload release data made for $($data.Base)"; return 1 }
         if (-not (& $HasNpx)) { Write-Host 'error: npx is not available (Node.js runs wrangler)'; return 1 }
+
+        # Immutable keys: what does the bucket already hold? Fail closed; nothing is put until
+        # every one of them is known to be absent or identical.
+        $skip = @{}
+        $different = 0
+        foreach ($item in @($plan | Where-Object { Test-ImmutableKey $_.Key $Version })) {
+            try {
+                $state = Get-RemoteState -Item $item -Dist $Dist -Fetch $Fetch
+            } catch {
+                Write-Host "error: cannot tell whether $($item.Key) is already published ($($_.Exception.Message)); nothing was uploaded"
+                return 1
+            }
+            switch ($state) {
+                'absent' { Write-Host "bucket: $($item.Key) is not there yet" }
+                'same' { Write-Host "bucket: $($item.Key) is already there with these bytes; it is not put again"; $skip[$item.Key] = $true }
+                default { Write-Host "error: bucket: $($item.Key) is already published with different bytes; published bytes never change"; $different++ }
+            }
+        }
+        if ($different -gt 0) { Write-Host 'error: refusing to upload; nothing was uploaded'; return 1 }
+
+        # Puts, in plan order (immutable keys first, then latest.json and the scripts); the first
+        # failure stops the run.
         foreach ($item in $plan) {
+            if ($skip.ContainsKey($item.Key)) { continue }
             Write-Host "put $Bucket/$($item.Key)"
             $ok = $false
-            try { $ok = [bool](& $Put $item $Dist) } catch { Write-Host "error: $($_.Exception.Message)" }
+            try { $ok = Test-PutResult (& $Put $item $Dist) } catch { Write-Host "error: $($_.Exception.Message)" }
             if (-not $ok) {
                 Write-Host "error: uploading $($item.Key) failed; stopped here (later files were not uploaded)"
                 return 1

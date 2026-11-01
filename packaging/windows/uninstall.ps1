@@ -35,9 +35,9 @@ it and says so: delete the folder from a normal window, or rerun with -Purge fro
 window. (The Settings > Installed apps uninstall passes no -Purge, so it keeps all data.)
 
 Known limits: only the invoking user's %LOCALAPPDATA%\CellGlide is removed; other accounts keep
-their own %LOCALAPPDATA%\CellGlide, and a signed-in Microsoft/Entra ID user (SID S-1-12-1-*)
-keeps both their startup entry and their %LOCALAPPDATA%\CellGlide (only classic local accounts,
-SID S-1-5-21-*, are handled). Nothing else is touched: no other adapter, DNS setting, route,
+their own %LOCALAPPDATA%\CellGlide, and a signed-in work or school (Entra ID) account (SID
+S-1-12-1-*) also keeps its startup entry. Only S-1-5-21-* accounts are handled: local accounts,
+Microsoft (consumer) accounts and domain accounts. Nothing else is touched: no other adapter, DNS setting, route,
 service or device. Exit codes: 0 uninstalled, 1 a step failed or the uninstall was cancelled.
 #>
 param(

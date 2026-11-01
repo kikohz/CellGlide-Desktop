@@ -1,6 +1,10 @@
 # Tests for scripts/release-windows-json.py (standard library only).
-# Run: python -I -m unittest scripts/tests/test_release_windows_json.py
+# Run: python -I -B -m unittest discover -s scripts/tests -p "test_release_*.py"
+#  or: python -I -B scripts/tests/test_release_windows_json.py
+# (python -I -m unittest scripts/tests/<file>.py does not work: -I keeps the current directory off
+# sys.path, so the dotted module name cannot be imported.)
 import hashlib, importlib.util, json, subprocess, sys, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "release-windows-json.py"
 spec = importlib.util.spec_from_file_location("release_windows_json", SCRIPT)
@@ -15,6 +19,8 @@ def make_dist(root: Path, arches=("x64", "arm64"), bad_sum_for=None) -> Path:
         digest = "0" * 64 if arch == bad_sum_for else hashlib.sha256(data).hexdigest()
         (root / f"SHA256SUMS.{arch}").write_text(f"{digest}  {name}\n", encoding="utf-8")
     return root
+
+OUTPUTS = {"SHA256SUMS": "a\n", "latest.json": "b\n", "release-windows.json": "c\n"}
 
 class ReleaseWindowsJson(unittest.TestCase):
     def setUp(self):
@@ -196,6 +202,37 @@ class ReleaseWindowsJson(unittest.TestCase):
         self.assertIn("arm64", run.stderr)
         self.assertEqual((self.dist / "latest.json").read_text(encoding="utf-8"), "old")
         self.assertFalse((self.dist / "SHA256SUMS").exists())
+
+    def test_failed_rename_leaves_no_mixed_set(self):
+        make_dist(self.dist)
+        for name in ("SHA256SUMS", "latest.json", "release-windows.json"):
+            (self.dist / name).write_text("old " + name, encoding="utf-8")
+        real_replace = rwj.os.replace
+        def flaky(src, dst):
+            if str(src).endswith(".tmp") and Path(dst).name == "latest.json":
+                raise OSError("disk full")
+            real_replace(src, dst)
+        with mock.patch.object(rwj.os, "replace", side_effect=flaky):
+            with self.assertRaises(OSError):
+                rwj.write_all(self.dist, OUTPUTS)
+        # SHA256SUMS was already replaced when latest.json failed: it is put back, as are the others.
+        for name in ("SHA256SUMS", "latest.json", "release-windows.json"):
+            self.assertEqual((self.dist / name).read_text(encoding="utf-8"), "old " + name, name)
+        self.assertEqual([p.name for p in self.dist.iterdir() if p.suffix in (".tmp", ".bak")], [])
+
+    def test_write_all_without_old_files_fails_clean(self):
+        make_dist(self.dist)
+        real_replace = rwj.os.replace
+        def flaky(src, dst):
+            if Path(dst).name == "release-windows.json":
+                raise OSError("disk full")
+            real_replace(src, dst)
+        with mock.patch.object(rwj.os, "replace", side_effect=flaky):
+            with self.assertRaises(OSError):
+                rwj.write_all(self.dist, OUTPUTS)
+        for name in ("SHA256SUMS", "latest.json", "release-windows.json"):
+            self.assertFalse((self.dist / name).exists(), name)
+        self.assertEqual([p.name for p in self.dist.iterdir() if p.suffix in (".tmp", ".bak")], [])
 
 if __name__ == "__main__":
     unittest.main()
