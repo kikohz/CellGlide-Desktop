@@ -1,0 +1,4 @@
+# Every Windows release file published under https://pkg.cellglide.com/windows/<version>/, one line
+# each: "<sha256>  windows/<version>/<file>". scripts\publish-windows.ps1 appends a version's lines
+# after a completed upload and refuses to publish different bytes for a version listed here.
+# Published bytes never change. Commit this file after every upload.

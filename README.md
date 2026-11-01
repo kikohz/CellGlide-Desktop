@@ -2,7 +2,7 @@
 
 English | [中文](#中文)
 
-The Linux client for CellGlide: plug in your iPhone and go online over its cellular connection. A shared Rust core with an iced interface.
+The Linux and Windows clients for CellGlide: plug in your iPhone and go online over its cellular connection. A shared Rust core, with an iced interface on Linux and a WinUI 3 interface on Windows.
 
 The iPhone app and the Mac client live elsewhere; the phone protocol follows the iPhone app.
 
@@ -46,12 +46,96 @@ If you installed a beta, upgrade through the repository: `sudo apt update && sud
 - rpm: `sudo dnf remove cellglide`. rpm has no purge, so `/var/lib/cellglide` stays; delete it by hand if you do not want the settings.
 - Both leave the `cellglide` system user and group in place.
 
+## Windows
+
+Supported: Windows 11 22H2 or newer on x64. ARM64 needs Windows 11 24H2 or newer and is a **test build, not yet tested on real hardware**.
+
+### Before installing
+
+Install Apple's **Apple Devices** app from the Microsoft Store: <https://apps.microsoft.com/detail/9NP83LWLPZ9K>. It brings the driver and the service CellGlide uses to talk to the iPhone. If it is missing, the installer explains why and offers to install it for you (through winget; you accept the Store terms there yourself).
+
+### Install
+
+Open an ordinary (not administrator) PowerShell window and run:
+
+```powershell
+irm https://pkg.cellglide.com/install.ps1 | iex
+```
+
+Windows asks once for administrator rights (UAC). The installer downloads the package for your PC's architecture, checks its SHA-256 against `SHA256SUMS`, installs the service and the app, starts CellGlide and prints the result of `cellglide doctor`. The window stays open whether it succeeds or fails.
+
+### Install from the zip
+
+1. From the CellGlide website (<https://cellglide.com>), download `CellGlide-<version>-windows-x64.zip` (or `-arm64.zip`) and `install.ps1` into one folder, and compare the zip's SHA-256 with the one the website shows.
+2. In PowerShell, in that folder, clear the "downloaded from the internet" mark on both files, then run the installer:
+
+```powershell
+Unblock-File .\install.ps1, .\CellGlide-<version>-windows-x64.zip
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-<version>-windows-x64.zip
+```
+
+The installer prints the zip's SHA-256 before installing; it must match the website's.
+
+### Upgrade
+
+Run the one-line command again. It replaces the program as a whole and keeps your settings; a failed upgrade puts the previous version back.
+
+### Uninstall
+
+- **Settings › Apps › Installed apps › CellGlide › Uninstall**, or in PowerShell: `irm https://pkg.cellglide.com/uninstall.ps1 | iex`. Both keep your settings and history.
+- To delete the data as well, download the script and run it with `-Purge`, from an ordinary (not administrator) window:
+
+```powershell
+irm https://pkg.cellglide.com/uninstall.ps1 -OutFile uninstall.ps1
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
+```
+
+This deletes `C:\ProgramData\CellGlide` and your own `%LOCALAPPDATA%\CellGlide`. Other accounts on the PC keep their own `%LOCALAPPDATA%\CellGlide`. Run from an administrator window, the script never deletes `%LOCALAPPDATA%\CellGlide` and says so; delete that folder yourself, or rerun with `-Purge` from an ordinary window.
+
+- Uninstalling removes the "start at sign-in" entry of every user who is signed in. A user who is not signed in at that moment (and a Microsoft / Entra ID account, even when signed in) keeps an entry that points to the deleted program. It does nothing; remove it in **Settings › Apps › Startup** if you like.
+- Apple Devices is not touched.
+
+### Where things are
+
+```
+C:\Program Files\CellGlide\    cellglide-service.exe, cellglide.exe (command line), wintun.dll,
+                               THIRD-PARTY-LICENSES.txt, uninstall.ps1, app\ (the CellGlide app)
+C:\ProgramData\CellGlide\      settings.json, health\, logs\
+%LOCALAPPDATA%\CellGlide\      app preferences, speed test history
+```
+
+The command line is not added to `PATH`: run it as `& "C:\Program Files\CellGlide\cellglide.exe" doctor`.
+
+### Unsigned builds
+
+CellGlide for Windows is not code-signed yet.
+
+- With **Smart App Control** in enforcement mode, Windows blocks unsigned programs, so CellGlide cannot be installed; the installer stops without changing anything and says so.
+- Files downloaded with a browser carry the "from the internet" mark; clear it with `Unblock-File` as shown above, or use the one-line command, which is not affected.
+- Microsoft Defender may report CellGlide as a false positive. Every release is submitted to Microsoft for analysis.
+
+### Strict DNS
+
+Strict DNS is on by default (Settings › Strict DNS). While connected, DNS queries can only go through the phone. Names only your router knows (such as `*.lan`) won't resolve, and a name that doesn't exist takes about 12 seconds to fail. Turn it off if you need those.
+
+### Microsoft components
+
+CellGlide includes Microsoft Windows App SDK and Windows SDK components that are licensed to you under the Microsoft Software License Terms reproduced in `THIRD-PARTY-LICENSES.txt` (the Windows App SDK terms and the Windows SDK terms); by installing or using CellGlide you agree to those terms for those components.
+
 ## Development
 
 - Fetch the submodule first (hev-sys builds hev-socks5-tunnel from it): `git submodule update --init --recursive`.
 - On macOS: `cargo test --workspace`; for the Linux-only parts, `scripts/linux-test.sh` (needs Docker / colima).
 - Tests that need root and systemd-resolved run only in CI (the `privileged` job).
 - Install a development build on a Linux machine with `scripts/install-dev.sh`; remove it with `scripts/install-dev.sh --uninstall`.
+
+### Windows
+
+Run these from the repository root in Windows PowerShell; start each session with `. scripts\dev-env.ps1`. The app itself (C#, WinUI 3) is in `windows\`.
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1`: builds `cellglide_native.dll`, builds and tests the C# side, checks the license lists and runs the Pester tests of the Windows scripts.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64` (or `arm64`): builds the release zip and `SHA256SUMS.<arch>` into `dist\windows\<version>\`.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-dev.ps1`: builds this PC's zip and installs it with the real installer; `-Uninstall` removes it. Take network snapshots (`scripts\network-snapshot.ps1`) before and after.
 
 ### Crates
 
@@ -61,8 +145,10 @@ If you installed a beta, upgrade through the repository: `sudo apt update && sud
 | `cg-ipc` | Messages between the service and its clients (one JSON object per line), and the user-facing state descriptions |
 | `cg-i18n` | User-facing text in Simplified Chinese and English (`locales/*.yml`) |
 | `cg-core` | Platform-neutral core: talks to usbmuxd and the phone, relays traffic, answers DNS, runs the connection state machine |
-| `cg-platform` | Platform tunnel backends (only Linux is implemented) |
+| `cg-platform` | Platform tunnel backends (Linux and Windows) |
 | `hev-sys` | FFI to and build of hev-socks5-tunnel (submodule) |
+| `cg-netstack` | The forwarding engine used on Windows in place of hev-socks5-tunnel, with the same settings |
+| `cg-ffi` | `cellglide_native.dll`: everything the Windows app needs except drawing, behind a small C interface |
 | `cg-tools` | Tools that run in the user's own processes: speed test, DNS leak test and more |
 | `cg-diag` | The diagnostics bundle: format, redaction and upload |
 | `cg-service` | The system service `cellglide-service`; also carries the deb / rpm packaging metadata |
@@ -73,11 +159,13 @@ If you installed a beta, upgrade through the repository: `sudo apt update && sud
 
 This project is released under the MIT License; see [LICENSE](LICENSE). Bundled third-party code (Rust dependencies, hev-socks5-tunnel and its C submodules) keeps its own licenses, listed in `crates/cg-gui/assets/third-party-licenses.txt` (installed as `THIRD-PARTY-LICENSES.txt`).
 
+On Windows, `THIRD-PARTY-LICENSES.txt` in the zip (and the About page) is put together from `packaging/licenses/windows-rust.txt` (Rust dependencies; no hev or C code on Windows) and `packaging/licenses/nuget-notices.txt` (the Microsoft terms notice, then .NET, Windows App SDK and the other shipped packages, each with its full text); Wintun's license is `wintun-LICENSE.txt` next to `wintun.dll`.
+
 ---
 
 ## 中文
 
-CellGlide 的 Linux 客户端：插上 iPhone，经手机的蜂窝网络上网。Rust 共用核心，界面用 iced。
+CellGlide 的 Linux 与 Windows 客户端：插上 iPhone，经手机的蜂窝网络上网。Rust 共用核心，Linux 界面用 iced，Windows 界面用 WinUI 3。
 
 iPhone App 与 Mac 客户端不在本仓库，手机协议以 iPhone App 为准。
 
@@ -156,6 +244,82 @@ Fedora 的 systemd-resolved 是单独的包，没装就不能接管 DNS：`sudo 
 - rpm：`sudo dnf remove cellglide`。rpm 没有 purge，`/var/lib/cellglide` 会保留，不需要设置了就手动 `sudo rm -rf /var/lib/cellglide`。
 - 两者都保留 `cellglide` 系统用户和组。
 
+## Windows
+
+支持 Windows 11 22H2 及以上的 x64 电脑。ARM64 要求 Windows 11 24H2 及以上，目前是**测试版，没有在真机上测过**。
+
+### 安装之前
+
+先从微软商店安装 Apple 的「Apple 设备」（Apple Devices）：<https://apps.microsoft.com/detail/9NP83LWLPZ9K>。CellGlide 靠它带来的驱动和服务与 iPhone 通信。没装的话，安装脚本会说明原因并询问是否替你安装（经 winget，商店的条款由你在 winget 里自己同意）。
+
+### 安装
+
+打开一个普通的（不是管理员的）PowerShell 窗口，运行：
+
+```powershell
+irm https://pkg.cellglide.com/install.ps1 | iex
+```
+
+Windows 会弹一次管理员权限确认（UAC）。安装脚本按本机架构下载安装包，用 `SHA256SUMS` 核对 SHA-256，装好服务和程序，启动 CellGlide，并打印 `cellglide doctor` 的结果。无论成功还是失败，窗口都不会被关掉。
+
+### 直接下载 zip 安装
+
+1. 从 CellGlide 官网（<https://cellglide.com>）把 `CellGlide-<版本>-windows-x64.zip`（ARM64 是 `-arm64.zip`）和 `install.ps1` 下载到同一个文件夹，并把 zip 的 SHA-256 与官网上写的核对。
+2. 在这个文件夹里打开 PowerShell，先去掉两个文件的「来自互联网」标记，再运行安装脚本：
+
+```powershell
+Unblock-File .\install.ps1, .\CellGlide-<版本>-windows-x64.zip
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-<版本>-windows-x64.zip
+```
+
+安装脚本在安装前会打印 zip 的 SHA-256，应与官网上的相同。
+
+### 升级
+
+再运行一次上面那行命令即可。程序整体替换，设置保留；升级中途失败时会恢复原来的版本。
+
+### 卸载
+
+- 在「设置 › 应用 › 已安装的应用」里找到 CellGlide 卸载，或在 PowerShell 里运行 `irm https://pkg.cellglide.com/uninstall.ps1 | iex`。两种方式都保留设置和历史记录。
+- 要连数据一起删除，先下载脚本，再在普通的（不是管理员的）窗口里带 `-Purge` 运行：
+
+```powershell
+irm https://pkg.cellglide.com/uninstall.ps1 -OutFile uninstall.ps1
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
+```
+
+这会删除 `C:\ProgramData\CellGlide` 和你自己的 `%LOCALAPPDATA%\CellGlide`；这台电脑上其他账户各自的 `%LOCALAPPDATA%\CellGlide` 保留。在管理员窗口里运行时，脚本不会删除 `%LOCALAPPDATA%\CellGlide`，并会提示：请自己删掉这个文件夹，或在普通窗口里带 `-Purge` 再运行一次。
+
+- 卸载会删除每个已登录用户的「登录时启动」项。卸载时没有登录的用户（以及 Microsoft / Entra ID 账户，即使已登录）会留下一个指向已删除程序的启动项，它不起任何作用，可以在「设置 › 应用 › 启动」里删掉。
+- 不会动「Apple 设备」。
+
+### 文件位置
+
+```
+C:\Program Files\CellGlide\    cellglide-service.exe、cellglide.exe（命令行）、wintun.dll、
+                               THIRD-PARTY-LICENSES.txt、uninstall.ps1、app\（CellGlide 程序）
+C:\ProgramData\CellGlide\      settings.json、health\、logs\
+%LOCALAPPDATA%\CellGlide\      界面偏好、测速历史
+```
+
+命令行没有加进 `PATH`，用完整路径运行，例如 `& "C:\Program Files\CellGlide\cellglide.exe" doctor`。
+
+### 没有代码签名
+
+Windows 版暂时没有代码签名。
+
+- 开着「智能应用控制」（Smart App Control）且处于强制模式时，Windows 会拦下未签名的程序，所以装不了 CellGlide；安装脚本会说明原因并停止，不改动任何东西。
+- 用浏览器下载的文件带有「来自互联网」标记，要像上面那样用 `Unblock-File` 去掉；用一行命令安装不受影响。
+- Microsoft Defender 可能误报。每个版本发布前都会提交给微软分析。
+
+### 严格 DNS
+
+严格 DNS 默认开启（设置 › 严格 DNS）。连接期间，DNS 查询只能经过手机。只有路由器认识的名字（例如 `*.lan`）解析不了，不存在的名字要约 12 秒才返回失败。需要时可以关掉。
+
+### 微软组件
+
+CellGlide 包含微软的 Windows App SDK 和 Windows SDK 组件，它们按 `THIRD-PARTY-LICENSES.txt` 中收录的 Microsoft 软件许可条款（Windows App SDK 条款与 Windows SDK 条款）授权给你；安装或使用 CellGlide，即表示你就这些组件同意这些条款。
+
 ## 开发
 
 - 先取子模块（hev-sys 要用它编译 hev-socks5-tunnel）：`git submodule update --init --recursive`。
@@ -170,6 +334,14 @@ scripts/install-dev.sh
 - 常用命令：`cellglide status`、`cellglide connect`、`cellglide disconnect`、`cellglide doctor`、`cellglide watch`、`cellglide-gui`。
 - 卸载：`scripts/install-dev.sh --uninstall`。
 
+### Windows
+
+在仓库根目录用 Windows PowerShell 运行，每个会话先 `. scripts\dev-env.ps1`。程序本身（C#、WinUI 3）在 `windows\`。
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1`：编译 `cellglide_native.dll`，编译并测试 C# 部分，检查许可清单，跑 Windows 脚本的 Pester 测试。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64`（或 `arm64`）：在 `dist\windows\<版本>\` 里生成正式的 zip 和 `SHA256SUMS.<架构>`。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-dev.ps1`：编出本机架构的 zip，用正式的安装脚本装上；`-Uninstall` 卸载。前后各拍一次网络快照（`scripts\network-snapshot.ps1`）。
+
 ### Crate 一览
 
 | Crate | 作用 |
@@ -178,8 +350,10 @@ scripts/install-dev.sh
 | `cg-ipc` | 服务与客户端之间的消息（每行一个 JSON），以及给用户看的状态描述 |
 | `cg-i18n` | 简体中文与英文的界面文字（`locales/*.yml`） |
 | `cg-core` | 平台无关的核心：usbmuxd 与手机通信、转发流量、应答 DNS、连接状态机 |
-| `cg-platform` | 平台隧道后端（只实现了 Linux） |
+| `cg-platform` | 平台隧道后端（Linux 与 Windows） |
 | `hev-sys` | hev-socks5-tunnel 的 FFI 与构建（子模块） |
+| `cg-netstack` | Windows 上代替 hev-socks5-tunnel 的转发引擎，设置与 hev 相同 |
+| `cg-ffi` | `cellglide_native.dll`：Windows 程序除了绘制界面以外需要的一切，经一个小的 C 接口提供 |
 | `cg-tools` | 在用户自己的进程里跑的工具：测速、DNS 泄漏检测等 |
 | `cg-diag` | 诊断包：格式、脱敏与上传 |
 | `cg-service` | 系统服务 `cellglide-service`，也挂着 deb / rpm 打包元数据 |
@@ -189,3 +363,5 @@ scripts/install-dev.sh
 ## 许可证
 
 本项目以 MIT 许可证发布，见 [LICENSE](LICENSE)。随附的第三方代码（Rust 依赖、hev-socks5-tunnel 及其 C 子模块）保留各自的许可证，清单见 `crates/cg-gui/assets/third-party-licenses.txt`（安装包里是 `THIRD-PARTY-LICENSES.txt`）。
+
+Windows 版 zip 里的 `THIRD-PARTY-LICENSES.txt`（以及关于页）由 `packaging/licenses/windows-rust.txt`（Rust 依赖；Windows 版没有 hev 和 C 代码）和 `packaging/licenses/nuget-notices.txt`（开头是微软条款声明，然后是 .NET、Windows App SDK 等随包分发的组件，各附许可全文）拼成；Wintun 的许可是 `wintun.dll` 旁边的 `wintun-LICENSE.txt`。

@@ -555,6 +555,20 @@ Speed test finished
 - **本机往返**（safety `safety-20261031-182802`，往返 `backup-20261031-182810`）：exit 0，全部 ok；提权的卸载清除了 ProgramData、保留了 `C:\Users\iloss\AppData\Local\CellGlide` 并打印中英文提示；快照 B、C 与 A identical；数据从备份拷回后与 safety 清单 0 处不符；`%TEMP%` 无残留。
 - **装回开发安装**：快照 D、E，D 与 E、A 与 E identical；服务 Running；设置与测速历史哈希不变，HKCU Run 为空。
 - 没有用手机流量，没有动其他网卡、DNS、路由，没有发送输入，没有切换主题。
+### Task 7：发布数据、上传脚本（只预演）、README（2026-10-31）
+
+- **`scripts/release-windows-json.py`**：由 `dist\windows\1.0.0\` 的两个 zip 和 `SHA256SUMS.<arch>` 写出合并的 `SHA256SUMS`（两行，按文件名排序）、`latest.json`、`release-windows.json`。`--base` 只接受正式地址和 loopback（与 install.ps1 同一规则）；出错 exit 1，什么都不写（先写 `.tmp` 再统一改名）。unittest 20 个（brief 的 8 个加 12 个）；`test_release_linux_json.py` 仍通过。
+- **`scripts/publish-windows.ps1`**：默认 dry run。检查五个文件、`SHA256SUMS` 与文件、`latest.json` / `release-windows.json` 与 `SHA256SUMS` 一致、两个脚本取自 `packaging/windows/` 且只含 ASCII、`published.sha256` 里已有的版本字节不变，然后打印计划。用 loopback `--base` 生成的数据（本地预演）dry run 时提示，`-Upload` 时拒绝。`-Upload` 的整条流程只在 Pester 里对假桶（临时文件夹）跑过：按计划顺序上传、第一个失败即停、HEAD 大小不符不记录、记录只追加一次。**没有运行过 wrangler，没有访问 pkg.cellglide.com 或 R2。**
+- **本地发布预演**（loopback 127.0.0.1:8770，会话 0 管理员 shell）：
+  1. `release-windows-json.py --dist dist\windows\1.0.0 --version 1.0.0 --date 2026-10-31 --base http://127.0.0.1:8770`：exit 0；`SHA256SUMS` x64 `8baaf925…25e7`、arm64 `ddc7e601…b3f5`。`publish-windows.ps1 -Dist dist\windows\1.0.0`：打印「local rehearsal」提示、六项计划和 `dry run: nothing uploaded`，exit 0。
+  2. 按 `Get-UploadPlan` 的键把文件排进 `dist\windows\rehearsal\`，`python -I -m http.server 8770 --bind 127.0.0.1`。从这个源下载的 `install.ps1` 与 `packaging\windows\install.ps1` 逐字相同。
+  3. 快照 A（当天新拍）。在**一个没有脚本文件的会话**里（`powershell -EncodedCommand`，与用户在窗口里敲命令一样，`$PSCommandPath` 为空），依次：
+     - 安装：`& ([scriptblock]::Create((irm http://127.0.0.1:8770/install.ps1))) -BaseUrl http://127.0.0.1:8770 -AllowLoopback -Unattended`。下载并核对 SHA-256，`Reinstalling 1.0.0`，服务 Running，doctor 除「没插 iPhone」外全 ✓。之后同一会话仍在运行，`$ErrorActionPreference` 仍是 `Continue`。快照 B 与 A identical。
+     - 卸载：原样的一行命令 `irm http://127.0.0.1:8770/uninstall.ps1 | iex`（走 iex 防护分支）。服务、安装目录、快捷方式、卸载项、我们 GUID 的两个接口键都删掉了，两个数据目录保留。会话仍在运行，`$ErrorActionPreference` 仍是 `Continue`，会话里没有留下脚本的变量或函数。快照 C 与 A identical。
+  4. **与面向用户的一行命令的差别**：用户的 `irm https://pkg.cellglide.com/install.ps1 | iex` 不能传参数，install.ps1 也没有环境变量可以改地址（Task 5 裁定），所以安装这一步不能原样指向 loopback。这里运行的是同一份脚本文本，只是从 scriptblock 调用，并显式加上 `-BaseUrl`、`-AllowLoopback`、`-Unattended`（会话 0 里不启动界面）。因此它走的是脚本的正常分支，不是 iex 防护分支；iex 分支由 Task 5 的测试 `iex hands the script its own text` 和泄漏测试覆盖，卸载这一步则原样走了 iex 分支。install.ps1 没有为预演做任何改动。
+  5. 装回开发安装：快照 D（与 A identical）→ `scripts\install-dev.ps1`（exit 0，服务 Running，doctor 除「没插 iPhone」外全 ✓）→ 快照 E。D 与 E、A 与 E 都 identical。`settings.json`、`speedtests.json` 的哈希与开始时相同（只有服务追加的当天 health 文件变了）；卸载项、快捷方式在，HKCU Run 仍为空；没有留下 `CellGlide.new` / `.old` / `.work-*` 或 `%TEMP%\cellglide-*`。
+- 预演数据（`--base` 为本地）不用于发布：publish-windows.ps1 会拒绝上传它，Task 12 用正式地址重新生成。预演结束后已删除 `dist\windows\rehearsal\` 和 `dist\windows\1.0.0\` 里生成的三个文件与复制进去的两个脚本（install-dev 重新出了 x64 zip，那份 `latest.json` 已经过时）；HTTP 服务器已停止。
+- 没有用手机流量（iPhone 未插），没有动其他网卡、DNS、路由，没有发送键盘鼠标输入，没有切换主题。
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
