@@ -90,6 +90,9 @@ $SidUsers = '*S-1-5-32-545'
 $EndUserNotice = 'CellGlide includes Microsoft Windows App SDK and Windows SDK components that are licensed to you under the Microsoft Software License Terms reproduced in this file (the Windows App SDK terms and the Windows SDK terms); by installing or using CellGlide you agree to those terms for those components.'
 
 # ---- Shared with uninstall.ps1 (decision 3: kept identical) ----
+# tests\Shared.Tests.ps1 also holds Stop-CellGlideProcesses, Get-TranscriptBody,
+# New-ChildBootstrap, Get-FileIdentity, Copy-LogToParent, New-PrivateWorkDir and
+# Remove-StaleWorkDirs (below) to the same rule.
 
 function Test-Elevated {
     $ErrorActionPreference = 'Stop'
@@ -474,7 +477,7 @@ function Copy-LogToParent([string]$Source, [string]$Dest) {
     # be empty, have one link, not be a link, and its handle's final path must be the very path
     # the parent named (so no junction or symbolic link anywhere on the way).
     $ErrorActionPreference = 'Stop'
-    if ((Split-Path -Leaf $Dest) -notmatch '\Acellglide-install-[0-9a-f]{32}\.log\z') { throw "unexpected log path $Dest" }
+    if ((Split-Path -Leaf $Dest) -notmatch '\Acellglide-(install|uninstall)-[0-9a-f]{32}\.log\z') { throw "unexpected log path $Dest" }
     $file = Get-FileIdentity $Dest
     try {
         if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$Dest is a link" }

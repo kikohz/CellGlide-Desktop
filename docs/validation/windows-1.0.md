@@ -519,6 +519,24 @@ Speed test finished
     - 每次快照与当天基线 A 比较都是 identical。
   - **还原**：`install-dev.ps1 -Uninstall` → 删快捷方式和卸载项 → `install-dev.ps1 -Release`，前后快照都是 identical。最终状态与本轮开始时的记录相同，只多了服务在新的一天（11-01）写的日志文件。
 
+### Task 6：uninstall.ps1、install-dev 包装与安装往返（2026-10-31）
+
+- **测试**：`scripts/test-windows-scripts.ps1` 143 个全过（新增 Uninstall 32、Shared 2）；`check-windows-core.ps1` exit 0。
+  - `Shared.Tests.ps1` 逐字比较两份脚本的 18 个共用函数（决定 3 的 11 个，加上 `Stop-CellGlideProcesses`、`Get-TranscriptBody`、`New-ChildBootstrap`、`Get-FileIdentity`、`Copy-LogToParent`、`New-PrivateWorkDir`、`Remove-StaleWorkDirs`），任一文件缺函数就失败；另有一条要求两份脚本里所有同名函数都逐字相同。
+  - 变异验证（改完都已还原）：删掉 uninstall.ps1 里的 `Wait-AdapterGone`、或改动其中一个数字，Shared 两条都失败；`Remove-DataDir` 去掉事先的链接检查，「深处有 junction 时什么都不删」失败；去掉 `Test-ProfileDataPath` 判断、接口键挪到删服务之前、Run 值不看指向、安装目录里的副本不再转移，各有对应的测试失败。
+- **出包**：`build-windows.ps1 -Arch x64`，zip 37,891,923 B，`6dfba988…773e`；zip 里的 `uninstall.ps1` 与仓库里的逐字节相同。
+- **备份**（-Purge 之前）：`C:\Program Files\CellGlide`、`C:\ProgramData\CellGlide`、`%LOCALAPPDATA%\CellGlide` 用 `robocopy /E /COPYALL` 复制到 `%LOCALAPPDATA%\CellGlide-dev\safety-20261031-173524\`，并按备份副本记下每个文件的 SHA-256（服务正在写的日志不能直接读，所以以副本为准）。
+- **往返**（`install-roundtrip.ps1 -BackupDir %LOCALAPPDATA%\CellGlide-dev\backup-20261031-173630`，会话 0 的管理员 shell）：exit 0，全部检查 ok。
+  - 首次安装 `Installing 1.0.0`，服务 Running、路径带引号、`app\CellGlide.exe`、快捷方式、卸载项 `DisplayVersion` 1.0.0；再装一次 `Reinstalling 1.0.0`，没有 `.new` / `.old`。
+  - 快照 B 与 A：identical。
+  - 卸载用的是安装目录里的 `uninstall.ps1 -Purge`：它把自己的全文写到 `%TEMP%`、经引导脚本起提权子进程（调用方已提权，没有 UAC 提示），子进程日志在父进程里打印出来，安装目录被删掉。服务、程序目录、快捷方式、卸载项、我们 GUID 的 Tcpip / Tcpip6 接口键、两个数据目录、`SWD\Wintun\{E490EEF2-…}` 设备都不在了；另一个 wintun 设备 `{37217669-…}`（别的软件的）没动；没有留下 `CellGlide.work-*` 或 `%TEMP%\cellglide-*`。
+  - `Apple Mobile Device Service`：前后都是 absent（这台机器装的是商店版 Apple Devices，没有这个名字的传统服务；doctor 认的是商店包）。
+  - 快照 C 与 A：identical。
+  - 两个数据目录从备份拷回，文件数（8、1）和 `settings.json`、`speedtests.json` 的 SHA-256 与备份前相同；再与 safety 备份的清单逐个核对，ProgramData 和 LocalAppData 的 7 个文件哈希全部相同。
+  - 第一次跑往返时脚本有个缺陷：快照脚本打印的 `snapshot written: …` 混进了 `Save-Snapshot` 的返回值，两次 `-Compare` 因参数错误报 FAIL（安装、卸载、恢复各项都是 ok）。手动比较那次的 A/B/C 都是 identical。修好（`| Out-Host`）后重跑，即上面这次。
+- **装回开发安装**：快照 D → `scripts\install-dev.ps1`（包装：`build-windows.ps1 -Arch x64` 再 `install.ps1 -ZipPath … -Unattended`），exit 0，`Installing 1.0.0`，服务 Running，doctor 除「没插 iPhone」外全 ✓ → 快照 E。D 与 E、A 与 E 都是 identical。
+- **最终状态与开始时的记录**：服务 Running，`sc qc` 路径带引号，`qfailure` / `qsidtype` / `qprivs` 相同；`settings.json`（自动连接 true、严格 DNS true）和 `speedtests.json` 哈希相同；HKCU Run 仍然没有值；ProgramData 的 ACL 是 `Set-DataDirAcl` 设的那一套。与开始时不同的地方：开发安装现在是正式布局（多了 `app\`、`uninstall.ps1`、`version.txt`、许可文件、快捷方式和卸载项，exe 按当前 HEAD 重新编译）；我们 GUID 的接口键被卸载删掉，下次隧道建立时重新生成。
+- 没有用手机流量（iPhone 未接），没有动其他网卡、DNS 或路由，没有发送键盘鼠标输入，没有切换主题。
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
