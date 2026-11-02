@@ -102,12 +102,16 @@ impl Sleep {
                 tracing::info!("power event: resumed");
                 self.wake(now)
             }
-            (Signal::StandbyExit { reason, .. }, true) => {
+            // The wake is dated by the 507 record itself, not by when it was delivered: the
+            // power button often writes 506, 507 and a second 506 within a few hundred ms,
+            // all delivered together, and the second 506 belongs to a new standby, not to
+            // the one this 507 ends (W4 Task 10 item f).
+            (Signal::StandbyExit { at, reason }, true) => {
                 tracing::info!(
                     "Modern Standby: exiting (Kernel-Power {STANDBY_EXIT}, reason {})",
                     describe(reason)
                 );
-                self.wake(now)
+                self.wake(at)
             }
             (Signal::ClockJump { .. }, true) => {
                 tracing::info!("the wall clock jumped: the computer was asleep and is awake");
@@ -603,6 +607,27 @@ mod tests {
         assert_eq!(sleep.on(enter(0), t(0)), [true]);
         assert_eq!(sleep.on(exit(850), t(850)), [false]);
         assert_eq!(sleep.on(jump(-4), t(854)), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn a_quick_exit_then_a_new_entry_delivered_together_is_a_second_standby() {
+        // Seen on Windows 11 26200 with the power button: 506 (reason 1), 507 238 ms later,
+        // 506 (reason 16777220) 2 ms after that, all three delivered about 0.8 s later;
+        // then the real 507 two minutes on.
+        let ms = |n: u64| t(0) + Duration::from_millis(n);
+        let enter_at = |n: u64| Signal::StandbyEnter {
+            at: ms(n),
+            reason: Some(1),
+        };
+        let exit_at = |n: u64| Signal::StandbyExit {
+            at: ms(n),
+            reason: Some(1),
+        };
+        let mut sleep = Sleep::default();
+        assert_eq!(sleep.on(enter_at(0), ms(1_026)), [true]);
+        assert_eq!(sleep.on(exit_at(238), ms(1_027)), [false]);
+        assert_eq!(sleep.on(enter_at(240), ms(1_027)), [true]);
+        assert_eq!(sleep.on(exit_at(121_420), ms(121_500)), [false]);
     }
 
     #[test]
