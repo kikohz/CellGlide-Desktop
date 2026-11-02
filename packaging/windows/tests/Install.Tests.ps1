@@ -37,6 +37,28 @@ Describe 'install.ps1' {
         Test-SmartAppControlBlocks 1 | Should -BeTrue
         Test-SmartAppControlBlocks 0 | Should -BeFalse; Test-SmartAppControlBlocks 2 | Should -BeFalse
     }
+    It 'doctor''s check marks survive an OEM console, and the console encoding is put back' {
+        # W4 Task 10 item a: in an ordinary window (code page 437) the check marks came out as
+        # three wrong characters. A stand-in cellglide.exe writes UTF-8 like the real one.
+        $dir = Join-Path $TestDrive 'doctor'; New-Item -ItemType Directory $dir | Out-Null
+        Add-Type -OutputAssembly (Join-Path $dir 'cellglide.exe') -OutputType ConsoleApplication -TypeDefinition @'
+public static class P { public static void Main() {
+  var b = System.Text.Encoding.UTF8.GetBytes((char)0x2713 + " The CellGlide service is running\n" + (char)0x2717 + " No iPhone is plugged in\n");
+  using (var o = System.Console.OpenStandardOutput()) { o.Write(b, 0, b.Length); } } }
+'@
+        $before = [Console]::OutputEncoding
+        try { [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437) } catch { Set-ItResult -Skipped -Because 'no console to switch'; return }
+        $savedDir = $InstallDir; $InstallDir = $dir
+        try {
+            Mock Write-Host {}
+            Invoke-Doctor
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -ceq ('  ' + [char]0x2713 + ' The CellGlide service is running') }
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -ceq ('  ' + [char]0x2717 + ' No iPhone is plugged in') }
+            [Console]::OutputEncoding.CodePage | Should -Be 437
+        } finally {
+            $InstallDir = $savedDir; [Console]::OutputEncoding = $before
+        }
+    }
     It 'Latest must name this version''s own file' {
         $ok = '{"version":"1.0.0","x64":{"url":"https://pkg.cellglide.com/windows/1.0.0/CellGlide-1.0.0-windows-x64.zip","sha256":"' + ('A' * 64) + '","size":1,"test_build":false},"arm64":{"url":"https://pkg.cellglide.com/windows/1.0.0/CellGlide-1.0.0-windows-arm64.zip","sha256":"' + ('b' * 64) + '","size":2,"test_build":true}}'
         $l = Read-Latest $ok 'x64' 'https://pkg.cellglide.com'

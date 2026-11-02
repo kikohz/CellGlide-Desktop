@@ -831,10 +831,27 @@ function Start-AppAsUser {
 }
 
 function Invoke-Doctor {
-    # Prints "cellglide doctor"; failed checks do not change the exit code.
+    # Prints "cellglide doctor"; failed checks do not change the exit code. cellglide.exe writes
+    # UTF-8 into a pipe, but PowerShell would decode a native program's output with the
+    # console's encoding, which in an ordinary window is the OEM code page (437 shows a check
+    # mark as three wrong characters). So the output is read here as UTF-8 directly, and the
+    # console's own settings are never touched.
     $ErrorActionPreference = 'Continue'
     Write-Host 'cellglide doctor:'
-    & (Join-Path $InstallDir 'cellglide.exe') doctor 2>&1 | ForEach-Object { Write-Host "  $_" }
+    try {
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        $psi = New-Object Diagnostics.ProcessStartInfo((Join-Path $InstallDir 'cellglide.exe'), 'doctor')
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = $utf8; $psi.StandardErrorEncoding = $utf8
+        $p = [Diagnostics.Process]::Start($psi)
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEnd()
+        $p.WaitForExit()
+        foreach ($line in (($out + $err.Result) -split "`r?`n")) { if ($line) { Write-Host "  $line" } }
+    } catch {
+        Write-Host "  (cellglide doctor could not run: $($_.Exception.Message))"
+    }
 }
 
 # ---- Elevation ----
