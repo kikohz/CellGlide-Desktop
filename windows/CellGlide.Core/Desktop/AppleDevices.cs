@@ -14,17 +14,27 @@ public interface IAppleDevicesLauncher
 /// Starts Apple Devices when the DLL says to (<c>OverviewView.StartAppleDevices</c>: Apple's device service
 /// isn't running, and the service's doctor says the Apple Devices app is installed), and opens its window when
 /// the user asks. The DLL decides when; this only keeps the pace: an episode lasts while the DLL keeps saying so,
-/// and in one episode there is at most one attempt per <see cref="Spacing"/> and at most
-/// <see cref="MaxAttempts"/> in all. Every attempt and its outcome is logged; no failure escapes.
+/// its first attempt comes once it has lasted <see cref="FirstAfter"/>, and in one episode there is at most one
+/// attempt per <see cref="Spacing"/> and at most <see cref="MaxAttempts"/> in all. Every attempt and its outcome
+/// is logged; no failure escapes.
+/// <para>
+/// Why the wait: an usbmuxd started within about 10 s of the last one ending (measured on this PC after ending
+/// Apple's processes: started 9-10 s after, it answered but never listed the iPhone that stayed plugged in; 18 s
+/// and later, it found it at once) can stay blind to the iPhone until it is restarted. Waiting also leaves Apple's
+/// own startup task its chance first at sign-in.
+/// </para>
 /// <para>Called on one thread (the UI's); the attempts themselves run where the launcher runs them.</para>
 /// </summary>
 public sealed class AppleDevicesStarter(IAppleDevicesLauncher launcher, Func<DateTimeOffset> now, Action<string> log)
 {
+    public static readonly TimeSpan FirstAfter = TimeSpan.FromSeconds(30);
+
     public static readonly TimeSpan Spacing = TimeSpan.FromSeconds(60);
 
     public const int MaxAttempts = 3;
 
     bool _episode;
+    DateTimeOffset _since;
     int _attempts;
     DateTimeOffset _last;
     bool _gaveUp;
@@ -54,9 +64,10 @@ public sealed class AppleDevicesStarter(IAppleDevicesLauncher launcher, Func<Dat
         if (!_episode)
         {
             _episode = true;
-            Log("Apple's device service isn't running and Apple Devices is installed");
+            _since = at;
+            Log($"Apple's device service isn't running and Apple Devices is installed; first attempt in {FirstAfter.TotalSeconds:0} s");
         }
-        if (!_attempt.IsCompleted || (_attempts > 0 && at - _last < Spacing))
+        if (!_attempt.IsCompleted || at - _since < FirstAfter || (_attempts > 0 && at - _last < Spacing))
         {
             return Task.CompletedTask;
         }

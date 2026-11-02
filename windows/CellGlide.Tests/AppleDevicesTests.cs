@@ -2,7 +2,10 @@ using CellGlide.Core.Desktop;
 
 namespace CellGlide.Tests;
 
-/// <summary>Starting Apple Devices: the pace (once a minute, three times an episode), the log, and failures kept in.</summary>
+/// <summary>
+/// Starting Apple Devices: the pace (the first attempt 30 s into an episode, then once a minute, three times in
+/// all), the log, and failures kept in.
+/// </summary>
 public class AppleDevicesTests
 {
     /// <summary>Counts the calls; each answers with what <see cref="Next"/> says.</summary>
@@ -43,6 +46,14 @@ public class AppleDevicesTests
         return (new AppleDevicesStarter(launcher, () => clock.Now, log.Add), launcher, clock, log);
     }
 
+    /// <summary>Starts an episode and waits out its first 30 s: the attempt this returns is the first.</summary>
+    static async Task Begin(AppleDevicesStarter starter, Clock clock)
+    {
+        await starter.Update(true);
+        clock.Add(30);
+        await starter.Update(true);
+    }
+
     [Fact]
     public async Task At_most_one_attempt_a_minute_and_three_an_episode()
     {
@@ -52,6 +63,14 @@ public class AppleDevicesTests
         Assert.Equal(0, launcher.Started);
         Assert.Empty(log);
 
+        // The first attempt waits until the episode has lasted 30 s.
+        await starter.Update(true);
+        Assert.Equal(0, launcher.Started);
+        Assert.Contains(log, l => l.Contains("first attempt in 30 s"));
+        clock.Add(29);
+        await starter.Update(true);
+        Assert.Equal(0, launcher.Started);
+        clock.Add(1);
         await starter.Update(true);
         Assert.Equal(1, launcher.Started);
         // Every few seconds the same word: no new attempt within the minute.
@@ -86,7 +105,7 @@ public class AppleDevicesTests
     public async Task A_new_episode_starts_counting_again()
     {
         var (starter, launcher, clock, log) = Make();
-        await starter.Update(true);
+        await Begin(starter, clock);
         clock.Add(60);
         await starter.Update(true);
         Assert.Equal(2, launcher.Started);
@@ -95,8 +114,11 @@ public class AppleDevicesTests
         await starter.Update(false);
         Assert.Equal(0, starter.Attempts);
         Assert.Contains(log, l => l.Contains("no longer needs starting (after 2 attempt(s))"));
-        // It stops again, a little later: a new episode, attempted at once.
+        // It stops again, a little later: a new episode, with its own wait and its own three attempts.
         clock.Add(5);
+        await starter.Update(true);
+        Assert.Equal(2, launcher.Started);
+        clock.Add(30);
         await starter.Update(true);
         Assert.Equal(3, launcher.Started);
         clock.Add(60);
@@ -119,7 +141,7 @@ public class AppleDevicesTests
         var (starter, launcher, clock, log) = Make();
         // Thrown at once, or a faulted task: the same.
         launcher.Next = () => throw new InvalidOperationException("class not registered");
-        await starter.Update(true);
+        await Begin(starter, clock);
         Assert.Contains(log, l => l.Contains("attempt 1/3: failed: InvalidOperationException") && l.Contains("class not registered"));
         launcher.Next = () => Task.FromException(new System.Runtime.InteropServices.COMException("denied", unchecked((int)0x80070005)));
         clock.Add(60);
@@ -133,7 +155,7 @@ public class AppleDevicesTests
         Assert.Contains(log, l => l.Contains("opening Apple Devices: failed"));
         // And a log that throws stops nothing.
         var throwing = new AppleDevicesStarter(new FakeLauncher(), () => clock.Now, _ => throw new IOException("disk full"));
-        await throwing.Update(true);
+        await Begin(throwing, clock);
         await throwing.OpenAsync();
         Assert.Equal(1, throwing.Attempts);
     }
@@ -144,6 +166,8 @@ public class AppleDevicesTests
         var (starter, launcher, clock, log) = Make();
         var hung = new TaskCompletionSource();
         launcher.Next = () => hung.Task;
+        await starter.Update(true);
+        clock.Add(30);
         var first = starter.Update(true);
         clock.Add(120);
         await starter.Update(true);

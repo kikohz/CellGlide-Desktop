@@ -12,7 +12,8 @@ namespace CellGlide.App.Hosting;
 /// with it AppleMobileDeviceProcess (usbmuxd, 127.0.0.1:27015), with no window. Measured on Windows 11 26200 with
 /// Apple Devices 1.1792.39682.0 (W4 Task 13): listening about 1.5 s after the call, no new top-level window.
 /// Activating the AMPDevicesAgent application itself (IApplicationActivationManager) returns S_OK but the agent
-/// exits at once and nothing listens, so it is not used.
+/// exits at once and nothing listens, so it is not used. Started within about 10 s of the previous usbmuxd
+/// ending, the new one may never list the iPhone; AppleDevicesStarter waits before its first attempt for that.
 /// </para>
 /// <para>The window: IApplicationActivationManager activates the package's App (AppleDevices.exe).</para>
 /// </summary>
