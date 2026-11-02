@@ -10,10 +10,10 @@ namespace CellGlide.App.Hosting;
 /// In the background: what the package's startup task does at sign-in, run AppleMobileDeviceLauncher.exe (which
 /// starts AppleMobileDeviceProcess, usbmuxd on 127.0.0.1:27015) inside the package, through Windows'
 /// Invoke-CommandInDesktopPackage in a PowerShell that has no window. Measured on Windows 11 26200 with Apple
-/// Devices 1.1792.39682.0 (W4 Task 13): listening about 4 s after the call, the iPhone found, no new top-level
+/// Devices 1.1792.39682.0 (W4 Task 13): listening 4-6 s after the call, the iPhone found, no new top-level
 /// window. Not used, from the same measurements: activating the package's AMPDevicesAgent application exits at
 /// once and starts nothing; creating its COM class (AMP.Devices.IDiscovery) starts the agent, the launcher and
-/// usbmuxd with no window, but that usbmuxd often never lists the iPhone that is plugged in (5 of 7 times).
+/// usbmuxd with no window, but that usbmuxd often never lists the iPhone that is plugged in (6 of 8 times).
 /// </para>
 /// <para>The window: IApplicationActivationManager activates the package's App (AppleDevices.exe), on its own COM thread.</para>
 /// </summary>

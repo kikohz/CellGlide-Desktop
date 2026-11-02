@@ -702,6 +702,20 @@ Speed test finished
 - **手机流量**：到 11:50 收尾为 **22.3 MB**（10-31 为 0；11-02 小测速约 15 MB、泄漏约 0.7 MB，其余是隧道连着时电脑的普通流量）。之后为 i 一直连着（11:50 → 14:27，含用户注销登录前后约 2.5 小时的正常使用），`This session` 到 14:27 断开前为 **372.3 MB**。这超过了本任务 100 MB 的上限，也超过了 W4 的 300 MB 预算；其中约 350 MB 是 i 期间用户自己用电脑的流量（测试本身约 22 MB）。W4 合计约 372 MB（此前各任务约 0）。
 - **为后面的用户步骤准备好的**（10-31 时的记录）：本地源在 127.0.0.1:8770 运行；j 用的第二个 zip 在 `dist\windows\t10b\1.0.0\`（`j-prep.ps1` 换进本地源并重新生成 `latest.json`）；开发目录的 `CellGlide.exe` 用 `--tray` 启动时，因为单实例（`AppInstance` 键 `CellGlide.Main`，`LaunchDecision`：不是第一个实例且 `--tray` → 直接退出）会立刻退出，所以 j 另放一个只会睡眠的同名替身 `dist\windows\t10\devdir\CellGlide.exe`，用来核对安装脚本不结束安装目录以外的同名进程。
 
+### Task 13：帮用户启动 Apple 设备（2026-11-02，x64，本机构建，Windows 11 26200，Apple Devices 1.1792.39682.0）
+
+- **静默启动实验**（会话 1 临时计划任务，`wscript //B` 隐藏运行，用完删除；每秒用 UIA 枚举顶层窗口，只读，没有发键盘鼠标输入）：
+  - `IApplicationActivationManager` 激活 `AppleInc.AppleDevices_nzyj5cx40ttqa!AMPDevicesAgent`：返回 S_OK 和一个 pid，但 agent 立刻退出，20 秒内 27015 没有监听。不可用。
+  - 创建包里 AMPDevicesAgent 的 COM 类 `{054AA48D-7681-4C3C-9554-AE093D8798DB}`（AMP.Devices.IDiscovery）：agent → `AppleMobileDeviceLauncher` → `AppleMobileDeviceProcess`，约 1.5 秒监听，没有新窗口。**但 8 次里有 6 次这个 usbmuxd 一直列不出插着的 iPhone**（App 三次，分别在结束 Apple 进程后 9、9、47 秒；手动三次，10、28、34 秒），隧道因此一直断着。只有在之前的 usbmuxd 正常、且间隔 18 秒以上时才找到 iPhone。原因不明。不用。
+  - 在包内运行启动任务的 `AppleMobileDeviceLauncher.exe`（`Invoke-CommandInDesktopPackage -AppId AMPDevicesAgent`）：4 到 6 秒监听，本任务 3 次都找到 iPhone（包括从上面那种「看不到 iPhone」的状态、结束后 8 秒启动；其中一次 App 的 COM 尝试同时进行，监听端口的是这个 launcher 启动的进程），进程形状与登录时一样（launcher + process），没有新窗口。**采用。**
+- **App 的做法**：service 报 NoUsbService 时，DLL 立即问一次 doctor，之后每 60 秒一次；doctor 的 AppleService 检查新增 `app=apple_devices`（usbmuxd 来自 Apple Devices 应用而不是 Windows 服务）。安装了但没在响应时，`OverviewView` 带 `apple_devices`（「Open Apple Devices」按钮和提示）和 `start_apple_devices`，doctor 的 Apple 行也带按钮。App 在一段持续期内等 30 秒后才第一次尝试，之后至少隔 60 秒，最多 3 次，每次写进 `%LOCALAPPDATA%\CellGlide\app.log`。后台启动用一个没有控制台（`CreateNoWindow`）的 PowerShell 运行上面的 `Invoke-CommandInDesktopPackage`；按钮激活 `...!App`。
+- **实机核对**（`install-dev.ps1` 安装 aca13a1，exit 0；会话 1 以 `--tray` 启动 App；结束 Apple 的全部进程）：
+  - 15:52:36 结束 → 15:52:44 `app.log`「isn't running and Apple Devices is installed; first attempt in 30 s」→ 15:53:22 attempt 1/3 → 15:53:23.9 done → 15:53:25 launcher、15:53:28 process，27015 监听 → 15:53:27 「no longer needs starting (after 1 attempt(s))」→ `cellglide watch`：No iPhone connected → Connecting… → Connected。
+  - 15:52:32–15:57:05 每秒枚举顶层窗口：没有新窗口。没有残留的计划任务。
+  - `network-snapshot.ps1 -Compare`（任务开始前 14:39 的快照对最后的快照）：identical。最后状态 Connected，严格 DNS 开；Apple 的进程是 launcher + process。
+- **没有在本机验证**：按钮打开 Apple Devices 窗口（会在用户屏幕上弹窗）；按钮在概览、面板、检查列表里的显示（由 DLL 视图测试和 C# 构建覆盖）。
+- **手机流量**：本任务期间 `This session` 377.3 → 381.2 MB（约 3.9 MB，隧道的后台流量和推送、CI），没有测速。
+
 ## 已知问题（W1 实测发现，未修）
 
 - **严格 DNS 下，查不到的名字要等约 12 秒**（1.0 接受，controller 裁定）。连接时查不存在的名字约 12 秒才返回 NXDOMAIN（Task 11c 实测 12.02–12.08 秒；W1 当时用 `Resolve-DnsName nx<随机>abc.com -DnsOnly` 测得 11.2–11.4 秒），断开后只要 0.02–0.39 秒；直接问 `198.18.0.1` 只要 0.15–0.8 秒。原因是 Windows DNS 客户端收到 cellglide0 的否定应答后，还会等物理网卡的 DNS 服务器（例如 Wi-Fi 的路由器），而这些 53 端口的包被 WFP 拦掉，只能等超时；用户态 WFP 没办法让 UDP 发送立即失败。能查到的名字不受影响（0.01–0.4 秒）。Task 11c 起严格 DNS 只拦物理网卡，Tailscale 等其他 VPN 不再被拦，MagicDNS 连接期间可用（W1 当时 `nohost.tail707c29.ts.net` 11.4 秒超时的问题已解决）。
