@@ -130,7 +130,7 @@ pub fn overview(
             .map(phone_card),
         chrome: chrome(some, None),
         settings: settings(snapshot),
-        // Starting it silently works (W4 Task 13: COM activation of Apple's agent), so it is
+        // Starting it silently works (W4 Task 13: Apple's launcher run inside its package), so it is
         // always tried first; the button stays for when it doesn't.
         start_apple_devices: apple_devices.is_some(),
         apple_devices,

@@ -1,46 +1,89 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CellGlide.Core.Desktop;
 
 namespace CellGlide.App.Hosting;
 
 /// <summary>
-/// Starts Apple Devices (the Store package AppleInc.AppleDevices_nzyj5cx40ttqa) as the signed-in user, each call
-/// on its own COM thread.
+/// Starts Apple Devices (the Store package AppleInc.AppleDevices_nzyj5cx40ttqa) as the signed-in user.
 /// <para>
-/// In the background: the package declares an out-of-process COM server, AMPDevicesAgent.exe, for the class
-/// AMP.Devices.IDiscovery. Creating that class starts AMPDevicesAgent, which starts AppleMobileDeviceLauncher and
-/// with it AppleMobileDeviceProcess (usbmuxd, 127.0.0.1:27015), with no window. Measured on Windows 11 26200 with
-/// Apple Devices 1.1792.39682.0 (W4 Task 13): listening about 1.5 s after the call, no new top-level window.
-/// Activating the AMPDevicesAgent application itself (IApplicationActivationManager) returns S_OK but the agent
-/// exits at once and nothing listens, so it is not used. Started within about 10 s of the previous usbmuxd
-/// ending, the new one may never list the iPhone; AppleDevicesStarter waits before its first attempt for that.
+/// In the background: what the package's startup task does at sign-in, run AppleMobileDeviceLauncher.exe (which
+/// starts AppleMobileDeviceProcess, usbmuxd on 127.0.0.1:27015) inside the package, through Windows'
+/// Invoke-CommandInDesktopPackage in a PowerShell that has no window. Measured on Windows 11 26200 with Apple
+/// Devices 1.1792.39682.0 (W4 Task 13): listening about 4 s after the call, the iPhone found, no new top-level
+/// window. Not used, from the same measurements: activating the package's AMPDevicesAgent application exits at
+/// once and starts nothing; creating its COM class (AMP.Devices.IDiscovery) starts the agent, the launcher and
+/// usbmuxd with no window, but that usbmuxd often never lists the iPhone that is plugged in (5 of 7 times).
 /// </para>
-/// <para>The window: IApplicationActivationManager activates the package's App (AppleDevices.exe).</para>
+/// <para>The window: IApplicationActivationManager activates the package's App (AppleDevices.exe), on its own COM thread.</para>
 /// </summary>
-public sealed unsafe partial class AppleDevicesLauncher : IAppleDevicesLauncher
+public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
 {
     const string AppId = "AppleInc.AppleDevices_nzyj5cx40ttqa!App";
 
-    /// <summary>AMP.Devices.IDiscovery, served by AMPDevicesAgent.exe (the package's windows.comServer).</summary>
-    static readonly Guid AgentClass = new("054AA48D-7681-4C3C-9554-AE093D8798DB");
+    /// <summary>The background start, as PowerShell runs it; it throws (exit code 1) when it can't.</summary>
+    const string StartScript =
+        "$ErrorActionPreference = 'Stop'; " +
+        "$p = Get-AppxPackage -Name 'AppleInc.AppleDevices' | Where-Object { $_.PackageFamilyName -eq 'AppleInc.AppleDevices_nzyj5cx40ttqa' } | Select-Object -First 1; " +
+        "if (-not $p) { throw 'Apple Devices is not installed for this user' }; " +
+        "Invoke-CommandInDesktopPackage -PackageFamilyName $p.PackageFamilyName -AppId 'AMPDevicesAgent' -Command (Join-Path $p.InstallLocation 'AppleMobileDeviceLauncher.exe')";
+
+    /// <summary>How long the PowerShell that starts it may take.</summary>
+    static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(60);
 
     static readonly Guid ActivationManagerClass = new("45BA127D-10A8-46EA-8AB7-56EA9078943C");
     static readonly Guid IApplicationActivationManager = new("2E941141-7F97-4756-BA1D-9DECDE894A3D");
-    static readonly Guid IUnknown = new("00000000-0000-0000-C000-000000000046");
 
     const uint CLSCTX_INPROC_SERVER = 0x1;
     const uint CLSCTX_LOCAL_SERVER = 0x4;
     const uint COINIT_APARTMENTTHREADED = 0x2;
     const int RPC_E_CHANGED_MODE = unchecked((int)0x80010106);
 
-    public Task StartInBackgroundAsync() => OnComThread(() =>
+    public async Task StartInBackgroundAsync()
     {
-        Marshal.ThrowExceptionForHR(CoCreateInstance(AgentClass, 0, CLSCTX_LOCAL_SERVER, IUnknown, out var agent));
-        // Only its starting matters: the agent keeps running (and usbmuxd with it) once let go.
-        Marshal.Release(agent);
-    });
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"))
+        {
+            UseShellExecute = false,
+            // No console at all, so nothing shows (not even a terminal the console would be handed to).
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", StartScript })
+        {
+            start.ArgumentList.Add(argument);
+        }
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("PowerShell did not start");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var errors = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(StartTimeout);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill();
+            }
+            catch (Exception)
+            {
+                // It may have ended meanwhile.
+            }
+            throw new TimeoutException($"PowerShell took longer than {StartTimeout.TotalSeconds:0} s");
+        }
+        await output;
+        var said = (await errors).Trim();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"PowerShell exit code {process.ExitCode}: {said}");
+        }
+    }
 
-    public Task OpenAsync() => OnComThread(() =>
+    public Task OpenAsync() => OnComThread(Activate);
+
+    static unsafe void Activate()
     {
         Marshal.ThrowExceptionForHR(CoCreateInstance(ActivationManagerClass, 0, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER, IApplicationActivationManager, out var manager));
         try
@@ -59,7 +102,7 @@ public sealed unsafe partial class AppleDevicesLauncher : IAppleDevicesLauncher
         {
             Marshal.Release(manager);
         }
-    });
+    }
 
     /// <summary>Runs <paramref name="action"/> on a new single-threaded COM apartment; the task ends with it.</summary>
     static Task OnComThread(Action action)

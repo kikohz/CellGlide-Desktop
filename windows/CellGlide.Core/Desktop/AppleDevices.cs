@@ -18,10 +18,8 @@ public interface IAppleDevicesLauncher
 /// attempt per <see cref="Spacing"/> and at most <see cref="MaxAttempts"/> in all. Every attempt and its outcome
 /// is logged; no failure escapes.
 /// <para>
-/// Why the wait: an usbmuxd started within about 10 s of the last one ending (measured on this PC after ending
-/// Apple's processes: started 9-10 s after, it answered but never listed the iPhone that stayed plugged in; 18 s
-/// and later, it found it at once) can stay blind to the iPhone until it is restarted. Waiting also leaves Apple's
-/// own startup task its chance first at sign-in.
+/// Why the wait: at sign-in Apple's own startup task starts usbmuxd, often within seconds and sometimes minutes
+/// late; it gets its chance first, so the two don't race.
 /// </para>
 /// <para>Called on one thread (the UI's); the attempts themselves run where the launcher runs them.</para>
 /// </summary>
