@@ -7,16 +7,20 @@
 //! Everything here is a pure function of its arguments: the time and the time zone come from
 //! the caller.
 
+mod apple;
 mod chrome;
 mod history;
 mod leak;
 mod overview;
 mod speed;
 
+pub use apple::{AppleDevicesView, any_stopped as apple_devices_stopped, apple_devices};
 pub use chrome::{
     BadgesView, ChromeView, MenuItemView, MenuKind, SidebarGroupView, SidebarItemView, chrome,
 };
-pub use history::{DetailItem, HistoryRowView, HistoryView, TickView, checks, history};
+pub use history::{
+    CheckRowView, DetailItem, HistoryRowView, HistoryView, TickView, checks, history,
+};
 pub(crate) use leak::{LeakOutcome, leak};
 pub use leak::{LeakResultView, LeakView, ResolverGroupView};
 pub use overview::{

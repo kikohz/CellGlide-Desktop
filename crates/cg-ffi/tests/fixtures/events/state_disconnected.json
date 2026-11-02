@@ -131,6 +131,8 @@
         "tone": "gray"
       },
       "proxy": null
-    }
+    },
+    "apple_devices": null,
+    "start_apple_devices": false
   }
 }

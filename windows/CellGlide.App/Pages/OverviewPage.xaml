@@ -62,6 +62,14 @@
                                     Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
                                     Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
                                     Click="OnToggleClick" />
+                            <!-- Apple's device service isn't running but Apple Devices is installed: its hint and button. -->
+                            <StackPanel Spacing="8" Visibility="{x:Bind s:Show.AppleDevicesVisible(Shell.Now), Mode=OneWay}">
+                                <TextBlock x:Name="AppleDevicesHint" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="{x:Bind s:Show.AppleDevicesHint(Shell.Now), Mode=OneWay}" />
+                                <Button x:Name="AppleDevicesButton" Padding="12,5,12,6"
+                                        Content="{x:Bind s:Show.AppleDevicesLabel(Shell.Now), Mode=OneWay}"
+                                        Click="OnAppleDevicesClick" />
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 

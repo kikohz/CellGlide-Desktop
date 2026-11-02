@@ -280,6 +280,13 @@ public static partial class Show
     /// <summary>The health row's line (the DLL's), or nothing.</summary>
     public static string HealthLine(ShellNow now) => now.Overview?.Health?.Line ?? "";
 
+    /// <summary>The "Open Apple Devices" button and its hint, only while the DLL offers them.</summary>
+    public static Visibility AppleDevicesVisible(ShellNow now) => Visible(now.Overview?.AppleDevices);
+
+    public static string AppleDevicesLabel(ShellNow now) => now.Overview?.AppleDevices?.ButtonLabel ?? "";
+
+    public static string AppleDevicesHint(ShellNow now) => now.Overview?.AppleDevices?.Hint ?? "";
+
     static Brush Resource(string key) => (Brush)Application.Current.Resources[key];
 
     /// <summary>

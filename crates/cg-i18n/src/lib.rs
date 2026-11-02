@@ -416,6 +416,8 @@ pub const KEYS: &[&str] = &[
     "gui.service_timeout",
     "gui.badge_warning",
     "gui.badge_critical",
+    "gui.apple_devices_open",
+    "gui.apple_devices_hint",
     "gui.state.waiting_usb.title",
     "gui.state.waiting_usb.detail",
     "gui.state.choose_phone.title",

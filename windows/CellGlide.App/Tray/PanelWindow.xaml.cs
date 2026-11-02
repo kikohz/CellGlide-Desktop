@@ -202,6 +202,12 @@ public sealed partial class PanelWindow : Window
         _openWindow(Section.History);
     }
 
+    void OnAppleDevicesClick(object sender, RoutedEventArgs e)
+    {
+        Dismiss();
+        _ = App.Current.AppleDevices.OpenAsync();
+    }
+
     void OnOpenClick(object sender, RoutedEventArgs e)
     {
         Dismiss();

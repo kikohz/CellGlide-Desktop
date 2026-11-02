@@ -63,7 +63,11 @@ public sealed record LegendItem(string Label, Tone Tone);
 
 public sealed record StripCell(float X, float Width, Tone Tone, float Alpha);
 
-public sealed record CheckRow(CheckState State, string Line, string? Fix, bool Copied);
+/// <summary>views/history.rs <c>CheckRowView</c>: <c>ui::CheckRow</c>'s fields and Apple's button.</summary>
+public sealed record CheckRow(CheckState State, string Line, string? Fix, bool Copied, AppleDevicesView? AppleDevices);
+
+/// <summary>views/apple.rs: the "Open Apple Devices" button and the sentence beside it.</summary>
+public sealed record AppleDevicesView(string ButtonLabel, string Hint);
 
 public sealed record TrailPoint(float X, float Down, float Up);
 
@@ -111,7 +115,9 @@ public sealed record OverviewView(
     string? StrictDns,
     PhoneCardView? Phone,
     ChromeView Chrome,
-    SettingsView Settings);
+    SettingsView Settings,
+    AppleDevicesView? AppleDevices,
+    bool StartAppleDevices);
 
 public sealed record HealthRowView(Tone Tone, string Line);
 

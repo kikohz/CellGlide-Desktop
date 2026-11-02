@@ -1,5 +1,6 @@
 //! The history page (one day: its strip, hours, events and legend) and the doctor's checks.
 
+use super::apple::{self, AppleDevicesView};
 use cg_ipc::Check;
 use cg_ipc::describe::{self, ui};
 use cg_ipc::health::{HealthEvent, HistoryDay, hour_marks};
@@ -69,9 +70,42 @@ pub fn history(day: &HistoryDay, now: Timestamp, tz: &TimeZone) -> HistoryView {
     }
 }
 
+/// One of the doctor's checks to draw: `ui::CheckRow`'s fields, and Apple's button.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CheckRowView {
+    pub state: ui::CheckState,
+    pub line: String,
+    /// The bare fix (for copying), when the check didn't pass (failed or couldn't be made).
+    pub fix: Option<String>,
+    /// For the Linux window's Copy button; always false here (the app keeps its own).
+    pub copied: bool,
+    /// Apple's check, when the Apple Devices app is installed but isn't answering: the row
+    /// offers to open it.
+    pub apple_devices: Option<AppleDevicesView>,
+}
+
 /// The checks as rows to draw; one that couldn't be made is `CheckState::Unknown`, not a pass.
-pub fn checks(checks: &[Check]) -> Vec<ui::CheckRow> {
+pub fn checks(checks: &[Check]) -> Vec<CheckRowView> {
     ui::check_rows(checks, None)
+        .into_iter()
+        .zip(checks)
+        .map(|(row, check)| {
+            // Every field named, so a new one fails to compile here until it is carried over.
+            let ui::CheckRow {
+                state,
+                line,
+                fix,
+                copied,
+            } = row;
+            CheckRowView {
+                state,
+                line,
+                fix,
+                copied,
+                apple_devices: apple::stopped(check).then(apple::apple_devices),
+            }
+        })
+        .collect()
 }
 
 fn ticks(day: &HistoryDay, tz: &TimeZone) -> Vec<TickView> {
@@ -222,6 +256,40 @@ mod tests {
             [CheckState::Pass, CheckState::Unknown, CheckState::Fail]
         );
         assert!(rows[0].fix.is_none() && rows[1].fix.is_some() && rows[2].fix.is_some());
-        assert!(rows.iter().all(|r| !r.copied));
+        assert!(rows.iter().all(|r| !r.copied && r.apple_devices.is_none()));
+    }
+
+    #[test]
+    fn apple_s_row_offers_apple_devices_while_it_is_not_answering() {
+        let _g = en();
+        let apple = |running: &str| {
+            Check::new(CheckId::AppleService, true)
+                .with("kind", "store")
+                .with("app", cg_ipc::APPLE_DEVICES_APP)
+                .with("running", running)
+        };
+        let rows = checks(&[
+            apple("false"),
+            Check::new(CheckId::Usbmuxd, true).with("running", "false"),
+        ]);
+        assert_eq!(rows[0].apple_devices, Some(super::apple::apple_devices()));
+        // A passing check, so no fix: the button is the way forward.
+        assert_eq!(rows[0].state, CheckState::Pass);
+        assert!(rows[0].fix.is_none());
+        assert_eq!(rows[1].apple_devices, None);
+        // Answering, or iTunes' service: nothing to open.
+        assert_eq!(checks(&[apple("true")])[0].apple_devices, None);
+        let itunes = Check::new(CheckId::AppleService, true)
+            .with("kind", "itunes")
+            .with("running", "false");
+        assert_eq!(checks(&[itunes])[0].apple_devices, None);
+        // Everything else is ui::check_rows' own.
+        let check = apple("false");
+        let ui_row = &ui::check_rows(std::slice::from_ref(&check), None)[0];
+        let row = &checks(&[check])[0];
+        assert_eq!(
+            (row.state, &row.line, &row.fix, row.copied),
+            (ui_row.state, &ui_row.line, &ui_row.fix, ui_row.copied)
+        );
     }
 }

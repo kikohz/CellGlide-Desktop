@@ -17,7 +17,8 @@ namespace CellGlide.App.Controls;
 /// The doctor's checks as cg-gui's widgets/checks.rs shows them: a button that runs them (it says
 /// <c>doctor.running</c> while they run), the reason in red when they could not be had, then a row per
 /// check: a green ✓ for Pass, a red ✗ for Fail, an orange ? for Unknown (it couldn't be checked: not a
-/// pass, not known to fail), the DLL's line, and under it the fix with a Copy button.
+/// pass, not known to fail), the DLL's line, and under it the fix with a Copy button, or (Apple's check, while
+/// the DLL offers it) the hint and the button that opens Apple Devices.
 /// <para>
 /// "Copied" is this control's own short-lived state: after a copy that fix's button says
 /// <c>common.copied</c> for 2 seconds. It is feedback only, so it never goes to the DLL and back. The
@@ -207,6 +208,15 @@ public sealed partial class ChecksList : UserControl
             entry.Children.Add(fixRow);
             _copyButtons.Add((fix, copy));
             Label(fix, copy);
+        }
+        if (row.AppleDevices is { } apple)
+        {
+            var offer = new StackPanel { Spacing = 6, Margin = new Thickness(21, 0, 0, 0) };
+            offer.Children.Add(new TextBlock { Text = apple.Hint, FontSize = 12, TextWrapping = TextWrapping.Wrap, Style = Show.ThemeStyle("SecondaryText") });
+            var open = new Button { Content = apple.ButtonLabel, Padding = new Thickness(8, 2, 8, 3) };
+            open.Click += (_, _) => _ = App.Current.AppleDevices.OpenAsync();
+            offer.Children.Add(open);
+            entry.Children.Add(offer);
         }
         return entry;
     }

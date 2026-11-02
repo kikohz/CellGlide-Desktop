@@ -260,6 +260,8 @@ gui:
   service_timeout: "The CellGlide service isn't responding. Try again later."
   badge_warning: "Needs attention"
   badge_critical: "Problem"
+  apple_devices_open: "Open Apple Devices"
+  apple_devices_hint: "After you sign in to Windows, Apple Devices can take a few minutes to start. CellGlide also tries to start it in the background; if the iPhone still isn't found, open Apple Devices."
   state:
     waiting_usb:
       title: "Waiting for USB"

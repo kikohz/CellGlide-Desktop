@@ -10,19 +10,25 @@
           "state": "pass",
           "line": "Apple's device service is installed (Apple Devices app)",
           "fix": null,
-          "copied": false
+          "copied": false,
+          "apple_devices": {
+            "button_label": "Open Apple Devices",
+            "hint": "After you sign in to Windows, Apple Devices can take a few minutes to start. CellGlide also tries to start it in the background; if the iPhone still isn't found, open Apple Devices."
+          }
         },
         {
           "state": "fail",
           "line": "wintun.dll is missing or its signature isn't valid",
           "fix": "run the installation command again in PowerShell: irm https://pkg.cellglide.com/install.ps1 | iex",
-          "copied": false
+          "copied": false,
+          "apple_devices": null
         },
         {
           "state": "unknown",
           "line": "Couldn't check whether another program is using DNS port 53 (access denied)",
           "fix": "run the check again; if it still can't check, restart the computer",
-          "copied": false
+          "copied": false,
+          "apple_devices": null
         }
       ]
     }

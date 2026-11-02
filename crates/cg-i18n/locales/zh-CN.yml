@@ -260,6 +260,8 @@ gui:
   service_gone: "CellGlide 服务已停止"
   badge_warning: "需要留意"
   badge_critical: "有问题"
+  apple_devices_open: "打开「Apple 设备」"
+  apple_devices_hint: "登录 Windows 后，「Apple 设备」可能要过几分钟才会启动。CellGlide 也会尝试在后台启动它；如果仍然找不到 iPhone，请打开「Apple 设备」。"
   state:
     waiting_usb:
       title: "等待 USB 连接"

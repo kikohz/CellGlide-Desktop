@@ -1,0 +1,134 @@
+{
+  "type": "state",
+  "view": {
+    "connected": false,
+    "wants_connection": false,
+    "title": "Waiting for USB",
+    "detail": "Connect your iPhone, open CellGlide and start sharing.",
+    "status_tone": "gray",
+    "button_label": "Connect",
+    "device_subtitle": "Test iPhone · iPhone 16e",
+    "health": null,
+    "strict_dns": null,
+    "phone": null,
+    "chrome": {
+      "window_title": "CellGlide",
+      "tray": {
+        "active": false,
+        "alert": false,
+        "wants": false,
+        "title": "Waiting for USB"
+      },
+      "menu": [
+        {
+          "kind": "version",
+          "label": "CellGlide 1.0.0",
+          "enabled": false
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "toggle",
+          "label": "Connect",
+          "enabled": true
+        },
+        {
+          "kind": "open",
+          "label": "Open CellGlide",
+          "enabled": true
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "quit",
+          "label": "Quit",
+          "enabled": true
+        }
+      ],
+      "badges": {
+        "overview": "none",
+        "history": "none",
+        "settings": "none"
+      },
+      "sidebar": [
+        {
+          "heading": null,
+          "sections": [
+            {
+              "section": "overview",
+              "title": "Overview"
+            }
+          ]
+        },
+        {
+          "heading": "Tools",
+          "sections": [
+            {
+              "section": "speed_test",
+              "title": "Speed test"
+            },
+            {
+              "section": "dns_leak",
+              "title": "DNS Leak Test"
+            }
+          ]
+        },
+        {
+          "heading": "Activity",
+          "sections": [
+            {
+              "section": "history",
+              "title": "Connection History"
+            },
+            {
+              "section": "diagnostics",
+              "title": "Diagnostics"
+            }
+          ]
+        },
+        {
+          "heading": "App",
+          "sections": [
+            {
+              "section": "settings",
+              "title": "Settings"
+            },
+            {
+              "section": "about",
+              "title": "About"
+            }
+          ]
+        }
+      ]
+    },
+    "settings": {
+      "auto_connect": true,
+      "strict_dns": true,
+      "phones": [
+        {
+          "choice": {
+            "mode": "auto"
+          },
+          "label": "Auto discovery / waiting for selected device"
+        }
+      ],
+      "selected_phone": 0,
+      "dns": {
+        "text": "Not connected; using this computer's own DNS",
+        "tone": "gray"
+      },
+      "proxy": null
+    },
+    "apple_devices": {
+      "button_label": "Open Apple Devices",
+      "hint": "After you sign in to Windows, Apple Devices can take a few minutes to start. CellGlide also tries to start it in the background; if the iPhone still isn't found, open Apple Devices."
+    },
+    "start_apple_devices": true
+  }
+}

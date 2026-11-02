@@ -422,6 +422,11 @@ impl Check {
     }
 }
 
+/// Windows: the `app` of an `AppleService` check whose usbmuxd is the Apple Devices app's
+/// rather than a Windows service's. The user's session starts it, so the desktop app can start
+/// it again when it isn't answering.
+pub const APPLE_DEVICES_APP: &str = "apple_devices";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 // A status reply carries the whole phone card; replies are short-lived, so boxing buys nothing.
 #[allow(clippy::large_enum_variant)]

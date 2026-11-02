@@ -183,6 +183,8 @@
         "tone": "green"
       },
       "proxy": "socks5h://127.0.0.1:1080"
-    }
+    },
+    "apple_devices": null,
+    "start_apple_devices": false
   }
 }

@@ -16,12 +16,16 @@ namespace CellGlide.App;
 /// The host: starts the DLL in the system's language with its events on the UI thread, builds the
 /// view models, shows the main window unless started with <c>--tray</c>, brings it forward when the
 /// user starts the app again, opens it when the DLL says a phone was plugged in (only while hidden,
-/// and if the preference allows), and quits in order.
+/// and if the preference allows), starts Apple Devices in the background when the DLL says to, and
+/// quits in order.
 /// </summary>
 public partial class App : Application
 {
     /// <summary>How long quitting waits for a running test to confirm its cancel.</summary>
     static readonly TimeSpan CancelWait = TimeSpan.FromSeconds(2);
+
+    /// <summary>How often the DLL's word on starting Apple Devices is looked at again between states.</summary>
+    static readonly TimeSpan AppleDevicesCheck = TimeSpan.FromSeconds(10);
 
     readonly LaunchOptions _options;
     readonly HostGate _gate = new();
@@ -30,6 +34,7 @@ public partial class App : Application
     MainWindow? _window;
     TrayHost? _tray;
     PanelWindow? _panel;
+    DispatcherQueueTimer? _appleTimer;
     Guid _trayId;
     Task? _quit;
 
@@ -60,6 +65,9 @@ public partial class App : Application
 
     /// <summary>Start at login: our own value in HKCU\...\Run for this executable (StartupApproved is only read).</summary>
     public Autostart Autostart { get; private set; } = null!;
+
+    /// <summary>Starts Apple Devices: by itself in the background, or its window from the user's button.</summary>
+    public AppleDevicesStarter AppleDevices { get; private set; } = null!;
 
     /// <summary>Set once quitting has begun: windows close for real, nothing opens any more.</summary>
     public bool IsQuitting => _gate.IsQuitting;
@@ -94,6 +102,7 @@ public partial class App : Application
         _lifetime = new AppLifetime(Hub, core, Speed, Leak);
 
         Hub.PhonePlugged += OnPhonePlugged;
+        StartAppleDevicesWhenAsked(queue);
         Hub.Fault += message => Debug.WriteLine("CellGlide: fault: " + message);
 
         _trayId = TrayIdentity.GuidFor(Environment.ProcessPath!);
@@ -117,6 +126,35 @@ public partial class App : Application
         {
             ShowWindow(Section.Overview);
         }
+    }
+
+    /// <summary>
+    /// Follows the DLL's <see cref="OverviewView.StartAppleDevices"/> (that flag is the whole decision) on every
+    /// state and every <see cref="AppleDevicesCheck"/>; the starter keeps the pace and logs to
+    /// %LOCALAPPDATA%\CellGlide\app.log.
+    /// </summary>
+    void StartAppleDevicesWhenAsked(DispatcherQueue queue)
+    {
+        var log = new FileLog(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CellGlide", "app.log"));
+        AppleDevices = new AppleDevicesStarter(new AppleDevicesLauncher(), () => DateTimeOffset.Now, log.Write);
+        void Look()
+        {
+            if (!IsQuitting)
+            {
+                _ = AppleDevices.Update(Shell.Overview?.StartAppleDevices == true);
+            }
+        }
+        Shell.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(ShellViewModel.Now))
+            {
+                Look();
+            }
+        };
+        _appleTimer = queue.CreateTimer();
+        _appleTimer.Interval = AppleDevicesCheck;
+        _appleTimer.Tick += (_, _) => Look();
+        _appleTimer.Start();
     }
 
     /// <summary>Opens (creating it the first time) or brings forward the main window; not while quitting.</summary>
@@ -161,6 +199,7 @@ public partial class App : Application
     {
         try
         {
+            _appleTimer?.Stop();
             _tray?.Dispose();
             _panel?.Dismiss();
             _window?.AppWindow.Hide();

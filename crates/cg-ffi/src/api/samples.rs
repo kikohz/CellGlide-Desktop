@@ -301,6 +301,12 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
         ("state_connected", state(everything_connected())),
         ("state_disconnected", state(disconnected_snapshot())),
         (
+            "state_apple_devices_stopped",
+            Event::State {
+                view: Box::new(apple_devices_stopped()),
+            },
+        ),
+        (
             "state_strict_dns_disabled",
             state(with_strict_dns(StrictDns::Disabled)),
         ),
@@ -479,8 +485,25 @@ fn fixed_version(mut chrome: ChromeView) -> ChromeView {
 }
 
 fn overview(snapshot: &cg_ipc::Snapshot) -> views::OverviewView {
-    let mut view = views::overview(snapshot, now(), &TimeZone::UTC);
+    fixed(views::overview(snapshot, false, now(), &TimeZone::UTC))
+}
+
+fn fixed(mut view: views::OverviewView) -> views::OverviewView {
     view.chrome = fixed_version(view.chrome);
+    view
+}
+
+/// Apple's device service isn't running and the doctor says the Apple Devices app is
+/// installed. The detail (`state.no_usb_service`, which each system says its own way) is
+/// replaced by one every system says alike, so the fixture reads the same on Linux.
+fn apple_devices_stopped() -> views::OverviewView {
+    let snapshot = cg_ipc::Snapshot {
+        state: cg_ipc::ConnState::NoUsbService,
+        devices: Vec::new(),
+        ..disconnected_snapshot()
+    };
+    let mut view = fixed(views::overview(&snapshot, true, now(), &TimeZone::UTC));
+    view.detail = tr("gui.state.waiting_usb.detail", &[]);
     view
 }
 
@@ -554,11 +577,15 @@ fn with_strict_dns(strict_dns: StrictDns) -> cg_ipc::Snapshot {
     }
 }
 
-/// A pass, a failure with its fix, and a check that couldn't be made. Windows checks whose
-/// text has no `_windows` variant, so the fixture reads the same on Linux.
+/// A pass (Apple Devices installed but not answering, so its row offers to open it), a
+/// failure with its fix, and a check that couldn't be made. Windows checks whose text has no
+/// `_windows` variant, so the fixture reads the same on Linux.
 fn checks() -> Vec<Check> {
     vec![
-        Check::new(CheckId::AppleService, true).with("kind", "store"),
+        Check::new(CheckId::AppleService, true)
+            .with("kind", "store")
+            .with("app", cg_ipc::APPLE_DEVICES_APP)
+            .with("running", "false"),
         Check::new(CheckId::Wintun, false),
         Check::new(CheckId::Dns, false)
             .with("cause", "unreadable")

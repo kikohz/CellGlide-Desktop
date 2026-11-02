@@ -2,11 +2,10 @@
 //! here (or a `cg_ipc::describe::ui` type it refers to); fields are snake_case, an `Option` is
 //! `null`, and nothing is a tuple or a fixed-size array.
 
-use crate::views::{ChromeView, HistoryView, LeakView, OverviewView, SpeedView};
+use crate::views::{CheckRowView, ChromeView, HistoryView, LeakView, OverviewView, SpeedView};
 use cg_i18n::tr;
 use cg_ipc::DiagRange;
 use cg_ipc::describe;
-use cg_ipc::describe::ui::CheckRow;
 use cg_tools::prefs::Prefs;
 use serde::{Deserialize, Serialize};
 
@@ -137,7 +136,7 @@ pub enum ReplyResult {
 pub enum ReplyValue {
     Done,
     Checks {
-        rows: Vec<CheckRow>,
+        rows: Vec<CheckRowView>,
     },
     History {
         view: HistoryView,

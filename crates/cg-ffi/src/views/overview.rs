@@ -1,6 +1,7 @@
 //! The overview page, the panel, the tray, the sidebar's dots and the settings page, all from
 //! one snapshot.
 
+use super::apple::{self, AppleDevicesView};
 use super::chrome::{ChromeView, chrome};
 use cg_i18n::tr;
 use cg_ipc::describe::{self, BatteryBadge, Heat, ui};
@@ -29,6 +30,12 @@ pub struct OverviewView {
     /// The tray, its menu, the sidebar and its dots.
     pub chrome: ChromeView,
     pub settings: SettingsView,
+    /// While Apple's device service isn't running and the doctor says the Apple Devices app is
+    /// installed: the overview and the panel show its button and hint.
+    pub apple_devices: Option<AppleDevicesView>,
+    /// Then the app also starts Apple Devices' background part itself, without a window (no
+    /// more than its own limits allow).
+    pub start_apple_devices: bool,
 }
 
 /// The health row: its dot and its line.
@@ -90,9 +97,19 @@ pub struct HeatView {
     pub severe: bool,
 }
 
-pub fn overview(snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> OverviewView {
+/// `apple_stopped`: the doctor's last word, while usbmuxd isn't reachable, is that the Apple
+/// Devices app is installed but not answering (`views::apple_devices_stopped`).
+pub fn overview(
+    snapshot: &Snapshot,
+    apple_stopped: bool,
+    now: Timestamp,
+    tz: &TimeZone,
+) -> OverviewView {
     let some = Some(snapshot);
     let state = describe::gui_state(snapshot);
+    // The reason is "Apple's service isn't running" and the app is there to start.
+    let apple_devices =
+        (snapshot.state == ConnState::NoUsbService && apple_stopped).then(apple::apple_devices);
     OverviewView {
         connected: ui::is_connected(some),
         wants_connection: snapshot.wants_connection,
@@ -113,6 +130,10 @@ pub fn overview(snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> OverviewV
             .map(phone_card),
         chrome: chrome(some, None),
         settings: settings(snapshot),
+        // Starting it silently works (W4 Task 13: COM activation of Apple's agent), so it is
+        // always tried first; the button stays for when it doesn't.
+        start_apple_devices: apple_devices.is_some(),
+        apple_devices,
     }
 }
 
@@ -199,7 +220,7 @@ mod tests {
     fn overview_of_a_connected_snapshot() {
         let _g = en();
         let s = connected_snapshot();
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         assert!(v.connected && v.chrome.tray.active);
         assert_eq!(v.title, describe::gui_state(&s).title);
         assert_eq!(v.status_tone, Tone::Green);
@@ -210,7 +231,7 @@ mod tests {
     #[test]
     fn overview_of_a_disconnected_snapshot() {
         let _g = en();
-        let v = overview(&disconnected_snapshot(), now(), &TimeZone::UTC);
+        let v = overview(&disconnected_snapshot(), false, now(), &TimeZone::UTC);
         assert!(!v.connected && v.health.is_none() && v.strict_dns.is_none());
         assert_eq!(v.button_label, cg_i18n::tr("gui.connect", &[]));
     }
@@ -224,6 +245,7 @@ mod tests {
                     strict_dns: strict,
                     ..connected_snapshot()
                 },
+                false,
                 now(),
                 &TimeZone::UTC,
             )
@@ -245,7 +267,7 @@ mod tests {
         let _g = en();
         let mut s = connected_snapshot();
         s.settings.chosen_serial = Some(SERIAL.into());
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         assert_eq!(
             v.settings.phones[v.settings.selected_phone].choice,
             PhoneChoice::Serial {
@@ -253,7 +275,7 @@ mod tests {
             }
         );
         // Nothing chosen: "automatic", the first entry.
-        let v = overview(&disconnected_snapshot(), now(), &TimeZone::UTC);
+        let v = overview(&disconnected_snapshot(), false, now(), &TimeZone::UTC);
         assert_eq!(v.settings.selected_phone, 0);
         assert_eq!(v.settings.phones[0].choice, PhoneChoice::Auto);
     }
@@ -264,7 +286,7 @@ mod tests {
         let mut s = connected_snapshot();
         s.health.cause = Some(IssueCause::PhoneNetwork);
         s.health.since = Some(now() - jiff::SignedDuration::from_mins(3));
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         let health = v.health.expect("a health row while connected");
         assert_eq!(health.tone, ui::health_tone(&s));
         assert_eq!(
@@ -283,14 +305,14 @@ mod tests {
         let mut s = connected_snapshot();
         s.settings.auto_connect = false;
         s.settings.strict_dns = false;
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         assert!(!v.settings.auto_connect && !v.settings.strict_dns);
         assert_eq!(v.settings.dns, ui::dns_line(Some(DnsMode::Phone)));
         assert_eq!(
             v.settings.proxy.as_deref(),
             Some("socks5h://127.0.0.1:1080")
         );
-        let v = overview(&disconnected_snapshot(), now(), &TimeZone::UTC);
+        let v = overview(&disconnected_snapshot(), false, now(), &TimeZone::UTC);
         assert_eq!(v.settings.dns, ui::dns_line(None));
         assert_eq!(v.settings.proxy, None);
     }
@@ -312,7 +334,7 @@ mod tests {
             }),
         ];
         let text = describe::card_text(card);
-        let v = overview(&s, now(), &TimeZone::UTC).phone.unwrap();
+        let v = overview(&s, false, now(), &TimeZone::UTC).phone.unwrap();
         assert_eq!(v.title, text.title);
         assert_eq!(v.radio.as_deref(), Some("5G"));
         assert_eq!(v.download, text.download);
@@ -320,7 +342,38 @@ mod tests {
         assert_eq!(v.trail.len(), 2, "a gap splits the trail");
         // A card with nothing to show is no card.
         s.phone = Some(PhoneCard::default());
-        assert_eq!(overview(&s, now(), &TimeZone::UTC).phone, None);
+        assert_eq!(overview(&s, false, now(), &TimeZone::UTC).phone, None);
+    }
+
+    #[test]
+    fn apple_devices_is_offered_only_while_its_service_is_the_reason() {
+        let _g = en();
+        let no_usb = Snapshot {
+            state: ConnState::NoUsbService,
+            devices: Vec::new(),
+            ..disconnected_snapshot()
+        };
+        let v = overview(&no_usb, true, now(), &TimeZone::UTC);
+        assert_eq!(v.apple_devices, Some(apple::apple_devices()));
+        assert!(v.start_apple_devices);
+        // The doctor hasn't said (or said it isn't the app, or it isn't installed).
+        let v = overview(&no_usb, false, now(), &TimeZone::UTC);
+        assert_eq!(v.apple_devices, None);
+        assert!(!v.start_apple_devices);
+        // Any other state: usbmuxd answers, whatever the doctor said last.
+        for s in [
+            connected_snapshot(),
+            disconnected_snapshot(),
+            Snapshot {
+                state: ConnState::NoPhone,
+                devices: Vec::new(),
+                ..disconnected_snapshot()
+            },
+        ] {
+            let v = overview(&s, true, now(), &TimeZone::UTC);
+            assert_eq!(v.apple_devices, None);
+            assert!(!v.start_apple_devices);
+        }
     }
 
     #[test]
@@ -346,7 +399,7 @@ mod tests {
         let _g = en();
         let mut s = disconnected_snapshot();
         s.settings.chosen_serial = Some("OTHER".into());
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         let selected = &v.settings.phones[v.settings.selected_phone];
         assert_eq!(
             selected.choice,
@@ -378,7 +431,7 @@ mod tests {
         let frame = card.frame.as_mut().unwrap();
         frame.battery = Some(0.8);
         frame.thermal = Some(3);
-        let v = overview(&s, now(), &TimeZone::UTC);
+        let v = overview(&s, false, now(), &TimeZone::UTC);
         assert!(
             v.phone
                 .as_ref()

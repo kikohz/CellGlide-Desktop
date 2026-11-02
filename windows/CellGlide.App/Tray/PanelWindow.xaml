@@ -39,6 +39,15 @@
                         Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
                         Click="OnMainClick" />
 
+                <!-- Apple's device service isn't running but Apple Devices is installed: its hint and button. -->
+                <StackPanel Spacing="6" Visibility="{x:Bind s:Show.AppleDevicesVisible(Shell.Now), Mode=OneWay}">
+                    <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="{x:Bind s:Show.AppleDevicesHint(Shell.Now), Mode=OneWay}" />
+                    <Button x:Name="AppleDevicesButton" HorizontalAlignment="Stretch" Padding="10,6,10,6"
+                            Content="{x:Bind s:Show.AppleDevicesLabel(Shell.Now), Mode=OneWay}"
+                            Click="OnAppleDevicesClick" />
+                </StackPanel>
+
                 <c:PhoneCard Compact="True" View="{x:Bind s:Show.Phone(Shell.Now), Mode=OneWay}" />
 
                 <!-- The connection's health; opens the history. -->

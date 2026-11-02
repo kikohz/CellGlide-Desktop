@@ -73,6 +73,8 @@ public sealed partial class OverviewPage : Page
 
     void OnChangeClick(object sender, RoutedEventArgs e) => _navigate(Section.Settings);
 
+    void OnAppleDevicesClick(object sender, RoutedEventArgs e) => _ = App.Current.AppleDevices.OpenAsync();
+
     // ---- For x:Bind (the rest is in Show): which of the DLL's texts and tones to show, never new ones. ----
 
     Brush ErrorBrush => Show.Brush(Tone.Red);

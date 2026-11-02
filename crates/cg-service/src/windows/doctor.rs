@@ -4,7 +4,7 @@
 
 use super::system::{self, HKEY_LOCAL_MACHINE};
 use cg_core::mux::{self, MuxEndpoint};
-use cg_ipc::{Check, CheckId};
+use cg_ipc::{APPLE_DEVICES_APP, Check, CheckId};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::Duration;
@@ -31,12 +31,7 @@ pub async fn checks(endpoint: &MuxEndpoint, install_dir: &Path) -> Vec<Check> {
     let running = tokio::time::timeout(MUX_TIMEOUT, endpoint.open())
         .await
         .is_ok_and(|opened| opened.is_ok());
-    let apple = match kind {
-        Some(kind) => Check::new(CheckId::AppleService, true)
-            .with("kind", kind)
-            .with("running", running.to_string()),
-        None => Check::new(CheckId::AppleService, false).with("running", running.to_string()),
-    };
+    let apple = apple_check(classic.as_deref(), kind, running);
 
     let listed = tokio::time::timeout(MUX_TIMEOUT, mux::list_devices(endpoint))
         .await
@@ -71,6 +66,26 @@ fn apple_kind(classic_image: Option<&str>, packages: &[String]) -> Option<&'stat
         .iter()
         .any(|p| p.starts_with(STORE_NAME) && p.ends_with(STORE_PUBLISHER))
         .then_some("store")
+}
+
+/// Apple's check: which package provides usbmuxd and whether it answers. Without a Windows
+/// service, usbmuxd is the Apple Devices app's, which the user's session starts (so the
+/// desktop app can start it again when it isn't answering): `app` says so.
+fn apple_check(classic_image: Option<&str>, kind: Option<&'static str>, running: bool) -> Check {
+    let running = running.to_string();
+    match kind {
+        Some(kind) => {
+            let check = Check::new(CheckId::AppleService, true)
+                .with("kind", kind)
+                .with("running", running);
+            if classic_image.is_none() {
+                check.with("app", APPLE_DEVICES_APP)
+            } else {
+                check
+            }
+        }
+        None => Check::new(CheckId::AppleService, false).with("running", running),
+    }
 }
 
 /// `wintun.dll` beside the service, with a valid Authenticode signature.
@@ -376,6 +391,23 @@ mod tests {
         assert_eq!(checks[2].id, CheckId::Phone);
         assert!(!checks[2].ok);
         assert_eq!(checks.len(), 5, "no trust check without a phone");
+    }
+
+    #[test]
+    fn only_the_apple_devices_app_is_named_as_the_app() {
+        let app = |check: &Check| check.args.get("app").cloned();
+        let store = apple_check(None, Some("store"), false);
+        assert!(store.ok);
+        assert_eq!(store.args["running"], "false");
+        assert_eq!(app(&store).as_deref(), Some(APPLE_DEVICES_APP));
+        // iTunes' service, wherever it lives, is a Windows service: not the app.
+        let itunes = r"C:\Program Files\WindowsApps\AppleInc.iTunes_12.13_x64__nzyj5cx40ttqa\AMDS\AppleMobileDeviceService.exe";
+        assert_eq!(app(&apple_check(Some(itunes), Some("store"), false)), None);
+        assert_eq!(app(&apple_check(Some("x"), Some("itunes"), true)), None);
+        // Nothing installed.
+        let none = apple_check(None, None, false);
+        assert!(!none.ok);
+        assert_eq!(app(&none), None);
     }
 
     #[test]
