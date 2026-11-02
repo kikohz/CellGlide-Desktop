@@ -12,7 +12,7 @@ use crate::widgets::kit::{self, Tone};
 use crate::writer::Writer;
 use cg_i18n::tr;
 use cg_ipc::describe::ui::{
-    self, Badge, GROUPS, KnownDevices, Section, ServiceDown, plugged_in, version_line,
+    self, Badge, GROUPS, KnownDevices, MuxLife, Section, ServiceDown, version_line,
 };
 use cg_ipc::{Request, Snapshot, describe};
 use cg_tools::prefs::{self, PrefChange, Prefs};
@@ -354,8 +354,13 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Snapshot(snapshot) => {
-                let plugged =
-                    plugged_in(&mut self.known_devices, &snapshot.devices, Instant::now());
+                let plugged = ui::snapshot_plugged(
+                    &mut self.known_devices,
+                    &snapshot,
+                    MuxLife::HERE,
+                    Instant::now(),
+                )
+                .is_some();
                 self.snapshot = Some(*snapshot);
                 self.service = None;
                 self.settle_command();
@@ -737,6 +742,7 @@ mod tests {
     use super::*;
     use crate::effect::Reply;
     use crate::pages::{fixtures, history};
+    use cg_ipc::describe::ui::plugged_in;
     use std::path::Path;
 
     fn down(text: &str) -> ServiceDown {

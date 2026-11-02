@@ -17,7 +17,7 @@ use cg_i18n::tr;
 use cg_ipc::client::{self, Update};
 use cg_ipc::describe::{
     self,
-    ui::{self, DownReason, KnownDevices, ServiceDown},
+    ui::{self, DownReason, KnownDevices, MuxLife, ServiceDown},
 };
 use cg_ipc::{Endpoint, Snapshot};
 use futures::FutureExt;
@@ -176,6 +176,8 @@ struct Follower {
     /// The iPhones of the last snapshot; `None` before the subscription's first snapshot, so the
     /// phones already there don't count as plugged in. Kept while the service is away: when it
     /// comes back (often listing no iPhones at first), the ones it had are not plugged in again.
+    /// The iPhones usbmuxd finds as it becomes reachable (Apple Devices starting after the app
+    /// at sign-in, or restarting) aren't either ([`ui::USBMUXD_SETTLE`]).
     known: Option<KnownDevices>,
     /// A `State` was sent since the subscription loop last looked: a panic after it is news.
     recovered: bool,
@@ -199,7 +201,9 @@ impl Follower {
         tz: &TimeZone,
         instant: Instant,
     ) -> Vec<Event> {
-        let plugged = ui::plugged_serial(&mut self.known, &snapshot.devices, instant);
+        // The DLL serves the Windows app, whose usbmuxd (Apple Devices') runs from sign-in.
+        let plugged =
+            ui::snapshot_plugged(&mut self.known, &snapshot, MuxLife::FromSignIn, instant);
         let view = views::overview(&snapshot, now, tz);
         // Only now that the view is made: a view that panics leaves the reason said before
         // (the panic's) in place, so the same panic again isn't said again.
@@ -392,6 +396,90 @@ mod tests {
             ["gone"],
             "said again after a snapshot"
         );
+    }
+
+    /// The service's snapshots while usbmuxd isn't reachable, once it is but lists no iPhone,
+    /// and once it lists ours.
+    fn no_usb_service() -> Snapshot {
+        Snapshot {
+            state: cg_ipc::ConnState::NoUsbService,
+            devices: Vec::new(),
+            ..disconnected_snapshot()
+        }
+    }
+
+    fn no_phone() -> Snapshot {
+        Snapshot {
+            state: cg_ipc::ConnState::NoPhone,
+            devices: Vec::new(),
+            ..disconnected_snapshot()
+        }
+    }
+
+    fn plugged(f: &mut Follower, snapshot: Snapshot, instant: Instant) -> Vec<Event> {
+        f.snapshot(snapshot, at(0), &TimeZone::UTC, instant)
+            .into_iter()
+            .filter(|e| matches!(e, Event::PhonePlugged { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn a_phone_usbmuxd_finds_once_it_starts_after_the_app_was_not_plugged_in() {
+        // W4 checklist i: at sign-in the app starts before Apple Devices' usbmuxd, which then
+        // lists no iPhone at first and finds the one plugged in all along about 3 s later.
+        let _g = cg_i18n::lock_for_tests();
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut f = Follower::new(Arc::default());
+        assert!(plugged(&mut f, no_usb_service(), s(0)).is_empty());
+        assert!(plugged(&mut f, no_usb_service(), s(8)).is_empty());
+        assert!(plugged(&mut f, no_phone(), s(9)).is_empty());
+        assert!(plugged(&mut f, disconnected_snapshot(), s(12)).is_empty());
+        // Or listed at once, in usbmuxd's first list.
+        let mut f = Follower::new(Arc::default());
+        assert!(plugged(&mut f, no_usb_service(), s(0)).is_empty());
+        assert!(plugged(&mut f, disconnected_snapshot(), s(9)).is_empty());
+    }
+
+    #[test]
+    fn a_phone_that_appears_while_usbmuxd_runs_is_plugged_in() {
+        let _g = cg_i18n::lock_for_tests();
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        // usbmuxd came up after the app and has been running a while; no iPhone, then one.
+        let mut f = Follower::new(Arc::default());
+        assert!(plugged(&mut f, no_usb_service(), s(0)).is_empty());
+        assert!(plugged(&mut f, no_phone(), s(9)).is_empty());
+        assert_eq!(
+            plugged(&mut f, disconnected_snapshot(), s(40)),
+            [Event::PhonePlugged {
+                serial: crate::testing::SERIAL.into()
+            }]
+        );
+        // usbmuxd reachable from the start.
+        let mut f = Follower::new(Arc::default());
+        assert!(plugged(&mut f, no_phone(), s(0)).is_empty());
+        assert_eq!(plugged(&mut f, disconnected_snapshot(), s(30)).len(), 1);
+    }
+
+    #[test]
+    fn usbmuxd_restarting_while_the_phone_stays_plugged_in_plugs_nothing() {
+        let _g = cg_i18n::lock_for_tests();
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut f = Follower::new(Arc::default());
+        assert!(plugged(&mut f, connected_snapshot(), s(0)).is_empty());
+        // usbmuxd's connection closes: the service drops its phones, then can't reach it
+        // again for a minute and a half.
+        assert!(plugged(&mut f, no_phone(), s(1)).is_empty());
+        assert!(plugged(&mut f, no_usb_service(), s(5)).is_empty());
+        assert!(plugged(&mut f, no_usb_service(), s(85)).is_empty());
+        // Back, listing nothing at first, then the phone that never left.
+        assert!(plugged(&mut f, no_phone(), s(90)).is_empty());
+        assert!(plugged(&mut f, disconnected_snapshot(), s(93)).is_empty());
+        // A real replug later still counts.
+        assert!(plugged(&mut f, no_phone(), s(200)).is_empty());
+        assert_eq!(plugged(&mut f, disconnected_snapshot(), s(300)).len(), 1);
     }
 
     #[test]

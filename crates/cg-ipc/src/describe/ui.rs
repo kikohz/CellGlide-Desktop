@@ -321,11 +321,45 @@ pub fn window_title(snapshot: Option<&Snapshot>) -> String {
 /// The cost: unplugging and replugging within a minute doesn't open the window.
 pub const REPLUG_AFTER: Duration = Duration::from_secs(60);
 
+/// How long after usbmuxd is reachable again the iPhones it finds were there all along, where
+/// usbmuxd runs from sign-in ([`MuxLife::FromSignIn`]). Apple Devices' AppleMobileDeviceProcess
+/// starts as a per-user startup task, often after the app; it first lists no iPhone and finds
+/// the one plugged in all along about 3 s later (W4 checklist i). The cost: plugging an iPhone
+/// in within this long of Apple Devices starting doesn't open the window.
+pub const USBMUXD_SETTLE: Duration = Duration::from_secs(15);
+
+/// When usbmuxd runs, which decides what its not being reachable says about the iPhones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuxLife {
+    /// Linux (Ubuntu, Fedora): udev starts usbmuxd when an iPhone is plugged in and it exits
+    /// once the last is unplugged. No usbmuxd means no iPhone, and the iPhone it lists as it
+    /// starts was just plugged in.
+    OnPlug,
+    /// Windows: Apple Devices' usbmuxd runs from sign-in whether or not an iPhone is plugged
+    /// in. The iPhones it lists within [`USBMUXD_SETTLE`] of being reachable again (after the
+    /// app saw it unreachable) were plugged in all along.
+    FromSignIn,
+}
+
+impl MuxLife {
+    /// This platform's.
+    pub const HERE: MuxLife = if cfg!(windows) {
+        MuxLife::FromSignIn
+    } else {
+        MuxLife::OnPlug
+    };
+}
+
 /// The iPhones seen in the last snapshot, and when each that has gone since went missing.
 #[derive(Clone, Debug, Default)]
 pub struct KnownDevices {
     present: BTreeSet<String>,
     missing: BTreeMap<String, Instant>,
+    /// usbmuxd was seen unreachable and has listed nothing since.
+    mux_away: bool,
+    /// When usbmuxd listed iPhones again after being away: within [`USBMUXD_SETTLE`] of it the
+    /// iPhones it finds are not plugged in.
+    mux_back: Option<Instant>,
 }
 
 impl KnownDevices {
@@ -333,12 +367,13 @@ impl KnownDevices {
     fn new(devices: &[String]) -> KnownDevices {
         KnownDevices {
             present: devices.iter().cloned().collect(),
-            missing: Default::default(),
+            ..KnownDevices::default()
         }
     }
 
     /// Takes the next snapshot's iPhones; true when one was plugged in: one that wasn't in the
-    /// last snapshot and was never seen or has been missing for at least [`REPLUG_AFTER`].
+    /// last snapshot and was never seen or has been missing for at least [`REPLUG_AFTER`], and
+    /// not while usbmuxd settles after being away.
     pub fn update(&mut self, devices: &[String], now: Instant) -> bool {
         self.plugged(devices, now).is_some()
     }
@@ -346,6 +381,12 @@ impl KnownDevices {
     /// [`KnownDevices::update`], naming the first iPhone (in `devices` order) that was plugged
     /// in.
     pub fn plugged(&mut self, devices: &[String], now: Instant) -> Option<String> {
+        if std::mem::take(&mut self.mux_away) {
+            self.mux_back = Some(now);
+        }
+        let settling = self
+            .mux_back
+            .is_some_and(|back| now.saturating_duration_since(back) < USBMUXD_SETTLE);
         for gone in self.present.iter().filter(|s| !devices.contains(s)) {
             self.missing.entry(gone.clone()).or_insert(now);
         }
@@ -357,12 +398,20 @@ impl KnownDevices {
             if !self.present.contains(serial)
                 && self.missing.remove(serial).is_none()
                 && plugged.is_none()
+                && !settling
             {
                 plugged = Some(serial.clone());
             }
         }
         self.present = devices.iter().cloned().collect();
         plugged
+    }
+
+    /// usbmuxd isn't reachable ([`MuxLife::FromSignIn`]): the iPhones it finds once it is again
+    /// were plugged in all along. The ones it listed last stay known.
+    fn mux_unreachable(&mut self) {
+        self.mux_away = true;
+        self.mux_back = None;
     }
 }
 
@@ -388,6 +437,24 @@ pub fn plugged_serial(
             None
         }
     }
+}
+
+/// [`plugged_serial`] for a service snapshot, which also says whether usbmuxd is reachable.
+/// With [`MuxLife::OnPlug`] an unreachable usbmuxd is a snapshot listing no iPhone, like any
+/// other. With [`MuxLife::FromSignIn`] it says nothing about the iPhones, and those usbmuxd
+/// finds within [`USBMUXD_SETTLE`] of being reachable again were there all along: when the app
+/// started before usbmuxd, and when usbmuxd was away or restarted.
+pub fn snapshot_plugged(
+    known: &mut Option<KnownDevices>,
+    snapshot: &Snapshot,
+    life: MuxLife,
+    now: Instant,
+) -> Option<String> {
+    if life == MuxLife::FromSignIn && snapshot.state == ConnState::NoUsbService {
+        known.get_or_insert_default().mux_unreachable();
+        return None;
+    }
+    plugged_serial(known, &snapshot.devices, now)
 }
 
 // The panel's and the overview's state dot and health line.
@@ -1241,6 +1308,150 @@ mod tests {
             &["aaaa".into(), "bbbb".into()],
             seconds(28)
         ));
+    }
+
+    /// A snapshot with usbmuxd reachable, listing `devices`.
+    fn listing(devices: &[&str]) -> Snapshot {
+        Snapshot {
+            state: ConnState::NoPhone,
+            devices: devices.iter().map(|s| s.to_string()).collect(),
+            ..Snapshot::default()
+        }
+    }
+
+    fn no_usbmuxd() -> Snapshot {
+        Snapshot {
+            state: ConnState::NoUsbService,
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn iphones_apple_devices_finds_as_it_starts_after_the_app_were_there_all_along() {
+        // W4 checklist i: at sign-in usbmuxd starts after the app, lists nothing at first and
+        // finds the iPhone plugged in all along about 3 s later.
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let life = MuxLife::FromSignIn;
+        let mut known = None;
+        assert_eq!(
+            snapshot_plugged(&mut known, &no_usbmuxd(), life, s(0)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&[]), life, s(9)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&["a"]), life, s(12)),
+            None
+        );
+        // Or in its first list; and a second iPhone it finds while settling.
+        let mut known = None;
+        assert_eq!(
+            snapshot_plugged(&mut known, &no_usbmuxd(), life, s(0)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&["a"]), life, s(9)),
+            None
+        );
+        let both = listing(&["a", "b"]);
+        let settled = s(9) + USBMUXD_SETTLE;
+        assert_eq!(
+            snapshot_plugged(&mut known, &both, life, settled - Duration::from_secs(1)),
+            None
+        );
+        // Once it has settled, a new iPhone counts again.
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&["a", "b", "c"]), life, settled),
+            Some("c".into())
+        );
+    }
+
+    #[test]
+    fn an_iphone_plugged_in_while_usbmuxd_runs_is_plugged_in() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        for life in [MuxLife::FromSignIn, MuxLife::OnPlug] {
+            // Reachable from the start.
+            let mut known = None;
+            assert_eq!(
+                snapshot_plugged(&mut known, &listing(&[]), life, s(0)),
+                None
+            );
+            assert_eq!(
+                snapshot_plugged(&mut known, &listing(&["a"]), life, s(1)),
+                Some("a".into()),
+                "{life:?}"
+            );
+            // Reachable again after being away, for longer than it takes to settle.
+            let mut known = None;
+            assert_eq!(
+                snapshot_plugged(&mut known, &no_usbmuxd(), life, s(0)),
+                None
+            );
+            assert_eq!(
+                snapshot_plugged(&mut known, &listing(&[]), life, s(9)),
+                None
+            );
+            let later = s(9) + USBMUXD_SETTLE;
+            assert_eq!(
+                snapshot_plugged(&mut known, &listing(&["a"]), life, later),
+                Some("a".into()),
+                "{life:?}"
+            );
+        }
+        // Linux: udev starts usbmuxd when the iPhone is plugged in, so the iPhone it lists as it
+        // starts was just plugged in.
+        let mut known = None;
+        let life = MuxLife::OnPlug;
+        assert_eq!(
+            snapshot_plugged(&mut known, &no_usbmuxd(), life, s(0)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&["a"]), life, s(30)),
+            Some("a".into())
+        );
+    }
+
+    #[test]
+    fn usbmuxd_restarting_while_the_iphone_stays_plugged_in_plugs_nothing() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let life = MuxLife::FromSignIn;
+        let mut known = None;
+        let a = listing(&["a"]);
+        assert_eq!(snapshot_plugged(&mut known, &a, life, s(0)), None);
+        // The service drops its iPhones as usbmuxd's connection closes, then can't reach it
+        // for a minute and a half; back, it lists nothing at first.
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&[]), life, s(1)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &no_usbmuxd(), life, s(5)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &no_usbmuxd(), life, s(85)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&[]), life, s(90)),
+            None
+        );
+        assert_eq!(snapshot_plugged(&mut known, &a, life, s(93)), None);
+        // Unplugged and plugged back in for real, a minute later: it counts.
+        assert_eq!(
+            snapshot_plugged(&mut known, &listing(&[]), life, s(200)),
+            None
+        );
+        assert_eq!(
+            snapshot_plugged(&mut known, &a, life, s(200) + REPLUG_AFTER),
+            Some("a".into())
+        );
     }
 
     // From cg-gui's panel.rs.
