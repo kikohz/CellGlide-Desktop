@@ -4,6 +4,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Nothing here writes to the repository; artifacts need no token permission.
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -158,9 +162,8 @@ jobs:
           # The runner image's dockerd listens on 172.x.x.1:53, which the resolver-port test (an exclusive
           # bind of 0.0.0.0:53) cannot coexist with. Stop it before the first snapshot.
           Stop-Service docker -ErrorAction SilentlyContinue
-          # Internet Connection Sharing (SharedAccess) holds 0.0.0.0:53 on the arm64 image.
-          Stop-Service SharedAccess -Force -ErrorAction Continue
-          (Get-Service SharedAccess, docker -ErrorAction SilentlyContinue | Format-Table Name, Status | Out-String).Trim()
+          # Internet Connection Sharing (SharedAccess) holds 0.0.0.0:53 on the arm64 image and cannot be
+          # stopped there; resolver_port_taken then prints SKIPPED (shown by --nocapture). Say who holds it.
           Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "UDP 53 still held: $($_.LocalAddress) pid $($_.OwningProcess)" }
           $before = "$env:RUNNER_TEMP\net-before.json"
           $after = "$env:RUNNER_TEMP\net-after.json"
@@ -204,6 +207,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
