@@ -109,6 +109,19 @@ function Invoke-Git([string]$Root, [string[]]$GitArgs) {
     return [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
 }
 
+function Get-GitBlobId([string]$Path) {
+    # git's SHA-1 blob id of the file's exact bytes ("blob <length>", NUL, bytes), no filters.
+    $ErrorActionPreference = 'Stop'
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $header = [Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)`0")
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try {
+        [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
+        [void]$sha.TransformFinalBlock($bytes, 0, $bytes.Length)
+        return (($sha.Hash | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally { $sha.Dispose() }
+}
+
 function Test-ScriptsCommitted([string]$Root, [string]$Commit) {
     # Problems (strings) when install.ps1 / uninstall.ps1 are not committed, or (with $Commit)
     # differ from that commit's.
@@ -128,9 +141,16 @@ function Test-ScriptsCommitted([string]$Root, [string]$Commit) {
         if ($Commit -notmatch '\A[0-9a-fA-F]{7,40}\z') { return $problems + "-Commit '$Commit' is not a commit hash" }
         $exists = Invoke-Git $Root @('cat-file', '-e', "$Commit^{commit}")
         if ($exists.Code -ne 0) { return $problems + "commit $Commit is not in this repository (git fetch?)" }
-        $diff = Invoke-Git $Root (@('diff', '--quiet', $Commit, '--') + $paths)
-        if ($diff.Code -eq 1) { $problems += "install.ps1 or uninstall.ps1 here differs from commit $Commit, which the zips were built from" }
-        elseif ($diff.Code -ne 0) { $problems += "git diff against $Commit failed: $($diff.Out -join ' ')" }
+        # Raw bytes against the commit's blob id, not `git diff`: skip-worktree / assume-unchanged
+        # and clean filters would hide a local edit from git, but not from the bytes uploaded.
+        foreach ($path in $paths) {
+            $blob = Invoke-Git $Root @('rev-parse', "${Commit}:$path")
+            if ($blob.Code -ne 0) { $problems += "$path is not in commit ${Commit}: $($blob.Out -join ' ')"; continue }
+            $local = Get-GitBlobId (Join-Path $Root $path)
+            if ($local -ne ($blob.Out -join '').Trim().ToLowerInvariant()) {
+                $problems += "$path here differs from commit $Commit, which the zips were built from"
+            }
+        }
     }
     return $problems
 }

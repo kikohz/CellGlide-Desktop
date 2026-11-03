@@ -325,6 +325,16 @@ Describe 'publish-windows run against a fake bucket' {
         Write-Lf (Join-Path $script:Root 'packaging\windows\install.ps1') "Write-Host 'install'`n"
         (Invoke-Fake $script:Root).Code | Should -Be 0
     }
+    It 'sees a local edit that skip-worktree hides from git' {
+        $c = Get-Head $script:Root
+        $path = Join-Path $script:Root 'packaging\windows\install.ps1'
+        & git -C $script:Root update-index --skip-worktree packaging/windows/install.ps1
+        Write-Lf $path "Write-Host 'hidden edit'`n"
+        $r = Invoke-Fake $script:Root -Upload -Commit $c
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match "install.ps1 here differs from commit $c"
+        $r.Puts | Should -BeNullOrEmpty
+    }
     It 'refuses a checkout that is not a git work tree' {
         Remove-Item -LiteralPath (Join-Path $script:Root '.git') -Recurse -Force
         $r = Invoke-Fake $script:Root -Commit ''
