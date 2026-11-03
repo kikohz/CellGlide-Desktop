@@ -100,7 +100,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $ver = (Get-ChildItem dist\windows -Directory | Select-Object -First 1).Name
-          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\\CellGlide-$ver-windows-x64.zip"
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\$ver\CellGlide-$ver-windows-x64.zip"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
   windows-arm64:
@@ -191,7 +191,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch arm64
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $ver = (Get-ChildItem dist\windows -Directory | Select-Object -First 1).Name
-          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\\CellGlide-$ver-windows-arm64.zip"
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\$ver\CellGlide-$ver-windows-arm64.zip"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
   windows-release:
