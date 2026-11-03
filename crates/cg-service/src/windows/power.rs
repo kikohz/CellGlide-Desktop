@@ -69,8 +69,11 @@ impl Sleep {
         }
         // The timers stop in S3 (and in a standby that reaches its deepest state), so the
         // jump is seen up to a tick after the wake; a resume or 507 since the reading before
-        // the gap has already reported this sleep.
+        // the gap has already reported this sleep. Only while marked awake: while marked
+        // asleep (506, 507, 506 together, then a lost 507) the jump is the only word of the
+        // wake left, however early the reading before the gap was (W4 Task 10 review).
         if let Signal::ClockJump { since } = signal
+            && !self.asleep
             && self.woke_at.is_some_and(|woke| woke >= since)
         {
             tracing::debug!("wall clock jump already reported by a wake");
@@ -628,6 +631,77 @@ mod tests {
         assert_eq!(sleep.on(exit_at(238), ms(1_027)), [false]);
         assert_eq!(sleep.on(enter_at(240), ms(1_027)), [true]);
         assert_eq!(sleep.on(exit_at(121_420), ms(121_500)), [false]);
+        // The second 506 delivered again after the real 507: stale.
+        assert_eq!(sleep.on(enter_at(240), ms(121_600)), Vec::<bool>::new());
+    }
+
+    /// The 506, 507, 506 of the power button, as above.
+    fn quick_exit_then_entry(sleep: &mut Sleep) {
+        let ms = |n: u64| t(0) + Duration::from_millis(n);
+        for (signal, flag) in [
+            (
+                Signal::StandbyEnter {
+                    at: ms(0),
+                    reason: Some(1),
+                },
+                true,
+            ),
+            (
+                Signal::StandbyExit {
+                    at: ms(238),
+                    reason: Some(1),
+                },
+                false,
+            ),
+            (
+                Signal::StandbyEnter {
+                    at: ms(240),
+                    reason: Some(1),
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(sleep.on(signal, ms(1_027)), [flag]);
+        }
+    }
+
+    #[test]
+    fn a_clock_jump_before_the_real_exit_wakes_even_from_an_early_reading() {
+        let ms = |n: u64| t(0) + Duration::from_millis(n);
+        let mut sleep = Sleep::default();
+        quick_exit_then_entry(&mut sleep);
+        // The last reading before the gap was before the quick 507 (the timer stopped at
+        // once), and the jump is seen before the real 507 arrives.
+        let early = Signal::ClockJump { since: ms(100) };
+        assert_eq!(sleep.on(early, ms(121_000)), [false]);
+        // The real 507, written before the jump was seen: already reported.
+        let exit = Signal::StandbyExit {
+            at: ms(120_900),
+            reason: Some(1),
+        };
+        assert_eq!(sleep.on(exit, ms(121_100)), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn a_clock_jump_after_a_lost_exit_still_ends_the_standby() {
+        let ms = |n: u64| t(0) + Duration::from_millis(n);
+        let mut sleep = Sleep::default();
+        quick_exit_then_entry(&mut sleep);
+        // The real 507 never arrives; the clock jump is the wake.
+        let early = Signal::ClockJump { since: ms(100) };
+        assert_eq!(sleep.on(early, ms(121_000)), [false]);
+        // And the next standby is reported as usual.
+        assert_eq!(sleep.on(enter(300), t(300)), [true]);
+        assert_eq!(sleep.on(exit(360), t(360)), [false]);
+    }
+
+    #[test]
+    fn an_entry_written_at_the_same_time_as_the_exit_is_a_new_standby() {
+        let mut sleep = Sleep::default();
+        assert_eq!(sleep.on(enter(0), t(1)), [true]);
+        assert_eq!(sleep.on(exit(60), t(61)), [false]);
+        // Not before the wake, so not stale.
+        assert_eq!(sleep.on(enter(60), t(61)), [true]);
     }
 
     #[test]
