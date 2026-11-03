@@ -18,9 +18,10 @@ namespace CellGlide.App.Tray;
 /// (<see cref="ShellViewModel.Chrome"/>); only the choice of icon file for a light or dark taskbar is
 /// made here. Left click toggles the panel; right click shows a native menu built from
 /// <see cref="ChromeView.Menu"/>, in its order, with its labels and enabled states. From the keyboard
-/// (Win+B, then the arrows to the icon), Enter and Space toggle the panel (decision 12); Windows 11 sends them
-/// as a left click, other shells as NIN_KEYSELECT. Shift+F10 opens the menu where the shell makes a right
-/// click of it (Windows 11), and the panel where it sends only WM_CONTEXTMENU.
+/// (Win+B, then the arrows to the icon), Enter and Space toggle the panel (decision 12): Windows 11 sends them
+/// as a left click, with the pointer off the icon, so the panel then shows its keyboard focus. Shift+F10 opens
+/// the menu (Windows 11 makes a right click of it). Only Windows 11 was tried; NIN_KEYSELECT and a lone
+/// WM_CONTEXTMENU are handled as keys too, for a shell that sends them instead.
 /// </summary>
 sealed class TrayHost : IDisposable
 {
@@ -57,8 +58,9 @@ sealed class TrayHost : IDisposable
             // A click goes straight to the panel (no wait for a double click), so a click that
             // closed the panel by taking its focus is still within the panel's reopen guard.
             NoLeftClickDelay = true,
-            // Raised on a timer thread: the panel is the UI thread's.
-            LeftClickCommand = new RelayCommand(() => Post(() => _togglePanel(false))),
+            // Raised on a timer thread: the panel is the UI thread's. Windows 11 makes a left click of
+            // Enter and Space on the icon; the pointer is then off the icon, and the panel shows its focus.
+            LeftClickCommand = new RelayCommand(OnLeftClick),
             ContextFlyout = _menu,
         };
         Update();
@@ -152,6 +154,13 @@ sealed class TrayHost : IDisposable
         {
             Post(() => _togglePanel(true));
         }
+    }
+
+    /// <summary>A left click (a real one, or Enter or Space made into one): toggles the panel, with keyboard focus for a key.</summary>
+    void OnLeftClick()
+    {
+        var fromKey = TrayKeyboard.ClickFromKey(TrayNative.IconRect(Id), TrayNative.Pointer());
+        Post(() => _togglePanel(fromKey));
     }
 
     static TimeSpan Now() => TimeSpan.FromMilliseconds(Environment.TickCount64);

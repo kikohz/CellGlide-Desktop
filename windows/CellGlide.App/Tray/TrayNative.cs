@@ -19,6 +19,13 @@ static unsafe partial class TrayNative
         return Shell_NotifyIconGetRect(&identifier, &rect) == 0 ? rect.ToPixels() : null;
     }
 
+    /// <summary>Where the mouse pointer is now, or null when Windows does not say.</summary>
+    public static (int X, int Y)? Pointer()
+    {
+        POINT point;
+        return GetCursorPos(&point) != 0 ? (point.x, point.y) : null;
+    }
+
     /// <summary>The side the (primary) taskbar is on; bottom if the shell does not say.</summary>
     public static TaskbarEdge TaskbarEdge()
     {

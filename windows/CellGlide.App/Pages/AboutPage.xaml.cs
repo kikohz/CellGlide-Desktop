@@ -61,9 +61,10 @@ public sealed partial class AboutPage : Page
         CopyFeedback.SetLabel(CopyVersionButton, _copy.Copied is not null);
         AutomationProperties.SetHelpText(CopyVersionButton, VersionText.Text);
 
-        // The DLL's label for the link ("t.me/cellglide"); the button opens TelegramUrl.
+        // The DLL's label for the link ("t.me/cellglide"); the button opens TelegramUrl, which a screen
+        // reader gets as the help text (the label is already the name).
         TelegramButton.Content = about?.TelegramLabel ?? "";
-        AutomationProperties.SetHelpText(TelegramButton, about?.TelegramLabel ?? "");
+        AutomationProperties.SetHelpText(TelegramButton, about?.TelegramUrl ?? "");
         Show.SetEnabled(
             [(CopyVersionButton, about is not null), (TelegramButton, about is not null), (ShowLicensesButton, about is not null && !_dialogOpen)],
             [CopyVersionButton, TelegramButton, ShowLicensesButton, QuitButton]);

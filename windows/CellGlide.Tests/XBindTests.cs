@@ -161,6 +161,8 @@ public class XBindTests
         foreach (var f in files)
         {
             Assert.DoesNotContain("BasedOn=", f.Text);
+            // Nor is a system text style used directly (MainWindow's title had CaptionTextBlockStyle).
+            Assert.DoesNotMatch(@"\{(?:Static|Theme)Resource \w+TextBlockStyle\}", f.Text);
         }
     }
 
@@ -178,6 +180,11 @@ public class XBindTests
             """var b = (Brush)Application.Current.Resources[key];""",
             """var b = Resources[name] as Microsoft.UI.Xaml.Media.SolidColorBrush;""",
             """if (Resources[name] is Brush b) { }""",
+            """var b = (Brush?)Application.Current.Resources[key];""",
+            """Application.Current.Resources.TryGetValue(key, out var o); var b = o as Brush;""",
+            """if (Resources.TryGetValue("Something", out var o)) { var b = o as SolidColorBrush; }""",
+            """Application.Current.Resources.TryGetValue(name, out Brush b);""",
+            """Resources.TryGetValue(name, out object? o);""",
         })
         {
             Assert.True(ThemeBrushGuard.IsBad(bad, file: "X.cs"), bad);
@@ -187,6 +194,10 @@ public class XBindTests
         // Show.cs's one reader of the tone brushes, and only there.
         const string reader = "static Brush Resource(string key) => (Brush)Application.Current.Resources[key];";
         Assert.False(ThemeBrushGuard.IsBad(reader, file: Path.Combine("Shell", "Show.cs")));
+        // Reformatted, it is still the one reader.
+        Assert.False(ThemeBrushGuard.IsBad("static Brush Resource(string key) =>\n        (Brush) Application.Current.Resources[ key ];", file: Path.Combine("Shell", "Show.cs")));
+        // Other dictionaries' TryGetValue are no resource reads.
+        Assert.False(ThemeBrushGuard.IsBad("if (!_pages.TryGetValue(section, out var page)) { }", file: "MainWindow.xaml.cs"));
         Assert.True(ThemeBrushGuard.IsBad(reader, file: "Other.cs"));
         // Show.cs is still checked for everything else.
         Assert.True(ThemeBrushGuard.IsBad(reader + "\nvar b = Resources[\"TextFillColorPrimaryBrush\"];", file: Path.Combine("Shell", "Show.cs")));
@@ -199,24 +210,32 @@ public class XBindTests
     /// </summary>
     static class ThemeBrushGuard
     {
-        const string ShowReader = "(Brush)Application.Current.Resources[key]";
+        // Show.cs's reader, however it is spaced.
+        static readonly System.Text.RegularExpressions.Regex ShowReader =
+            new(@"\(\s*Brush\s*\)\s*Application\s*\.\s*Current\s*\.\s*Resources\s*\[\s*key\s*\]");
         const string Brushy = @"(?:[\w.]+\.)?(?:Brush|SolidColorBrush|Color)\b";
 
         static readonly System.Text.RegularExpressions.Regex[] Rules =
         [
             // A theme key, however it is read.
             new(@"(?:Resources\s*\[|TryGetValue\s*\()\s*@?""[^""]*(?:Brush|Color)""\s*[\],]"),
-            // (Brush)...Resources[...], (Windows.UI.Color)Resources[...]
-            new(@"\(\s*" + Brushy + @"\s*\)\s*(?:[\w.]+\.)?Resources\b"),
+            // (Brush)...Resources[...], (Brush?)Resources[...], (Windows.UI.Color)Resources[...]
+            new(@"\(\s*" + Brushy + @"\s*\??\s*\)\s*(?:[\w.]+\.)?Resources\b"),
             // Resources[...] as Brush, Resources[...] is SolidColorBrush b
             new(@"Resources\s*\[[^\]]*\]\s*(?:as|is)\s+" + Brushy),
+            // Resources.TryGetValue with a key that is not a literal (literal keys: the first rule).
+            new(@"Resources\s*\.\s*TryGetValue\s*\(\s*(?!@?"")"),
+            // TryGetValue(..., out Brush b)
+            new(@"TryGetValue\s*\([^)]*\bout\s+" + Brushy),
+            // TryGetValue(..., out var o) and then o as Brush / o is Brush
+            new(@"TryGetValue\s*\([^)]*\bout\s+(?:var|object\??)\s+(\w+)\s*\)[\s\S]*?\b\1\s+(?:as|is)\s+" + Brushy),
         ];
 
         public static bool IsBad(string text, string file)
         {
             if (Path.GetFileName(file) == "Show.cs")
             {
-                text = text.Replace(ShowReader, "", StringComparison.Ordinal);
+                text = ShowReader.Replace(text, "");
             }
             return Rules.Any(rule => rule.IsMatch(text));
         }
@@ -247,6 +266,11 @@ public class XBindTests
         }
         Assert.Contains("Post(() => _togglePanel(true))", handler);
         Assert.Contains("_keys.Toggles(", handler);
+        // Enter and Space made into a left click (Windows 11) open the panel with keyboard focus too.
+        Assert.Contains("LeftClickCommand = new RelayCommand(OnLeftClick)", tray);
+        var click = System.Text.RegularExpressions.Regex.Match(tray, @"void OnLeftClick\(\)[\s\S]*?\n    }").Value;
+        Assert.Contains("TrayKeyboard.ClickFromKey(TrayNative.IconRect(Id), TrayNative.Pointer())", click);
+        Assert.Contains("_togglePanel(fromKey)", click);
 
         var panel = File.ReadAllText(Path.Combine(AppSources.AppDir, "Tray", "PanelWindow.xaml.cs"));
         Assert.Contains("FocusManager.FindFirstFocusableElement(Root)", panel);

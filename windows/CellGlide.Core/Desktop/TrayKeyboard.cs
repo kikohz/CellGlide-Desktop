@@ -31,6 +31,14 @@ public sealed class TrayKeyboard
     TimeSpan? _mouseAt;
     TimeSpan? _keyAt;
 
+    /// <summary>
+    /// Whether a left click on the icon was made by the shell from Enter or Space (Windows 11), so the panel it
+    /// opens shows its keyboard focus: a real click has the pointer on the icon, a key leaves it wherever it was.
+    /// When the icon's place or the pointer is unknown, or the pointer happens to be on the icon, it is a click.
+    /// </summary>
+    public static bool ClickFromKey(PixelRect? icon, (int X, int Y)? pointer) =>
+        icon is { } r && pointer is { } p && (p.X < r.Left || p.X >= r.Right || p.Y < r.Top || p.Y >= r.Bottom);
+
     /// <summary>A mouse button went down or up on the icon at <paramref name="now"/> (a real click or one the shell made of a key).</summary>
     public void Mouse(TimeSpan now) => _mouseAt = now;
 

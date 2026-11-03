@@ -499,6 +499,24 @@ public class DesktopTests
         Assert.Equal(ms(500), TrayKeyboard.Window);
     }
 
+    /// <summary>
+    /// Windows 11 makes a left click of Enter and Space on the focused icon. Such a click has the pointer
+    /// wherever it was, not on the icon, and the panel then opens with keyboard focus (a visible ring).
+    /// </summary>
+    [Fact]
+    public void A_left_click_with_the_pointer_off_the_icon_came_from_a_key()
+    {
+        var icon = new PixelRect(1800, 1040, 1832, 1080);
+        Assert.False(TrayKeyboard.ClickFromKey(icon, (1800, 1040)));
+        Assert.False(TrayKeyboard.ClickFromKey(icon, (1831, 1079)));
+        Assert.True(TrayKeyboard.ClickFromKey(icon, (1832, 1060)));
+        Assert.True(TrayKeyboard.ClickFromKey(icon, (1810, 1039)));
+        Assert.True(TrayKeyboard.ClickFromKey(icon, (400, 300)));
+        // Unknown: a click, as before.
+        Assert.False(TrayKeyboard.ClickFromKey(null, (400, 300)));
+        Assert.False(TrayKeyboard.ClickFromKey(icon, null));
+    }
+
     [Fact]
     public void Tray_guid_is_stable_per_path()
     {

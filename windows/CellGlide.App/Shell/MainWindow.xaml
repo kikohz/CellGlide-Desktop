@@ -19,8 +19,9 @@
             </Grid.ColumnDefinitions>
             <Image Width="16" Height="16" VerticalAlignment="Center" Source="ms-appx:///Assets/AppIcon-128.png"
                    AutomationProperties.AccessibilityView="Raw" />
+            <!-- CaptionTextBlockStyle's size and line height, set here rather than taken from the system style. -->
             <TextBlock x:Name="TitleText" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                       Style="{StaticResource CaptionTextBlockStyle}" />
+                       FontSize="12" LineHeight="16" />
         </Grid>
 
         <NavigationView x:Name="Nav" Grid.Row="1"
