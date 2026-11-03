@@ -230,13 +230,14 @@ mod tests {
     #[test]
     fn names_this_computer_and_user() {
         let host = computer_name().unwrap();
-        // COMPUTERNAME is the NetBIOS name: the host name's first 15 characters, upper case.
+        // COMPUTERNAME is the NetBIOS name: the host name's first 15 characters.
         let netbios = std::env::var("COMPUTERNAME").unwrap();
         assert!(
-            host.to_uppercase().starts_with(&netbios),
+            host.to_uppercase().starts_with(&netbios.to_uppercase()),
             "{host} {netbios}"
         );
-        assert_eq!(netbios_name().as_deref(), Some(netbios.as_str()));
+        // The case of COMPUTERNAME is the machine's own (hosted runners use lower case).
+        assert!(netbios_name().unwrap().eq_ignore_ascii_case(&netbios));
         let me = account_name(&super::super::auth::testing::my_sid()).unwrap();
         assert!(
             me.eq_ignore_ascii_case(&std::env::var("USERNAME").unwrap()),
