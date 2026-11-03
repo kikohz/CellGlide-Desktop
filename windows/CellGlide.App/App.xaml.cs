@@ -142,7 +142,7 @@ public partial class App : Application
     /// </summary>
     void StartAppleDevicesWhenAsked(DispatcherQueue queue)
     {
-        AppleDevices = new AppleDevicesStarter(new AppleDevicesLauncher(), () => DateTimeOffset.Now, _log.Write);
+        AppleDevices = new AppleDevicesStarter(new AppleDevicesLauncher(), AppleDevicesStarter.MonotonicNow, _log.Write);
         void Look()
         {
             if (!IsQuitting)

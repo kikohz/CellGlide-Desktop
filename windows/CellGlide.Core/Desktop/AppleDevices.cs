@@ -31,6 +31,10 @@ public interface IAppleDevicesLauncher
 /// late; it gets its chance first, so the two don't race.
 /// </para>
 /// <para>Called on one thread (the UI's); the attempts themselves run where the launcher runs them.</para>
+/// <para>
+/// <c>now</c> should be a monotonic clock (the app passes <see cref="MonotonicNow"/>): a wall clock set back after resume or
+/// by NTP would stop the attempts until it caught up, and one set forward would let them come sooner.
+/// </para>
 /// </summary>
 public sealed class AppleDevicesStarter(
     IAppleDevicesLauncher launcher,
@@ -38,6 +42,9 @@ public sealed class AppleDevicesStarter(
     Action<string> log,
     Func<TimeSpan, Task>? delay = null)
 {
+    /// <summary>A clock that only goes forward (the tick count since boot), for <c>now</c>; not a time of day.</summary>
+    public static DateTimeOffset MonotonicNow() => DateTimeOffset.UnixEpoch + TimeSpan.FromMilliseconds(Environment.TickCount64);
+
     public static readonly TimeSpan FirstAfter = TimeSpan.FromSeconds(30);
 
     public static readonly TimeSpan Spacing = TimeSpan.FromSeconds(60);
@@ -112,7 +119,7 @@ public sealed class AppleDevicesStarter(
             if (!_capped)
             {
                 _capped = true;
-                Log($"{MaxPerWindow} attempts in the last {Window.TotalMinutes:0} minutes; the next no sooner than {(_made[0] + Window).ToLocalTime():HH:mm:ss}");
+                Log($"{MaxPerWindow} attempts in the last {Window.TotalMinutes:0} minutes; the next in {Math.Ceiling((_made[0] + Window - at).TotalMinutes):0} minute(s) at the earliest");
             }
             return Task.CompletedTask;
         }

@@ -292,6 +292,17 @@ public class AppleDevicesTests
     }
 
     [Fact]
+    public void The_app_paces_by_a_clock_that_only_goes_forward()
+    {
+        var a = AppleDevicesStarter.MonotonicNow();
+        var b = AppleDevicesStarter.MonotonicNow();
+        Assert.True(b >= a);
+        Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromMilliseconds(Environment.TickCount64), b, TimeSpan.FromSeconds(5));
+        var app = File.ReadAllText(Path.Combine(AppSources.AppDir, "App.xaml.cs"));
+        Assert.Contains("new AppleDevicesStarter(new AppleDevicesLauncher(), AppleDevicesStarter.MonotonicNow, _log.Write)", app);
+    }
+
+    [Fact]
     public async Task Failures_are_logged_and_kept_in()
     {
         var (starter, launcher, clock, log) = Make();

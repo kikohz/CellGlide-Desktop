@@ -79,7 +79,9 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
         {
             try
             {
-                process.Kill(entireProcessTree: true);
+                // PowerShell only: Apple's launcher is started by package activation, not as its child, but
+                // nothing here should ever end an Apple process, so the tree is left alone.
+                process.Kill();
             }
             catch (Exception)
             {
