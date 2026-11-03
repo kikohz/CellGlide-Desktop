@@ -543,11 +543,11 @@ fn crash_leaves_nothing() {
 }
 
 /// Holds 0.0.0.0:53 (UDP) with SO_EXCLUSIVEADDRUSE, as a service like SharedAccess might.
-fn hold_port_53_exclusively() -> std::net::UdpSocket {
+fn hold_port_53_exclusively() -> Option<std::net::UdpSocket> {
     use std::os::windows::io::FromRawSocket;
     use windows::Win32::Networking::WinSock::{
         AF_INET, IPPROTO_UDP, SO_EXCLUSIVEADDRUSE, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN, SOL_SOCKET,
-        WSAGetLastError, bind, setsockopt, socket,
+        WSAEADDRINUSE, WSAGetLastError, bind, setsockopt, socket,
     };
     // Initializes Winsock for this process.
     drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
@@ -571,8 +571,14 @@ fn hold_port_53_exclusively() -> std::net::UdpSocket {
     let bound = unsafe { bind(s, (&raw const address).cast::<SOCKADDR>(), length) };
     // SAFETY: as above.
     let error = unsafe { WSAGetLastError() }.0;
+    if bound != 0 && error == WSAEADDRINUSE.0 {
+        // Something else already owns the port (a hosted CI runner has Internet Connection Sharing or
+        // dockerd on UDP 53): the port is taken all the same, which is this test's precondition.
+        eprintln!("UDP 53 is already held by another process (WSA {error}); using that");
+        return None;
+    }
     assert_eq!(bound, 0, "bind 0.0.0.0:53: WSA {error}");
-    owned
+    Some(owned)
 }
 
 #[test]
