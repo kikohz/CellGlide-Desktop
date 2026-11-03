@@ -74,7 +74,7 @@ Unblock-File .\install.ps1, .\CellGlide-<version>-windows-x64.zip
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-<version>-windows-x64.zip
 ```
 
-The installer prints the zip's SHA-256 before installing; it must match the website's.
+The installer prints the zip's SHA-256 before the UAC prompt and again, for the copy it installs, at the end; both must match the website's. It does not wait for you, so compare the hash before you run it (step 1).
 
 ### Upgrade
 
@@ -272,7 +272,7 @@ Unblock-File .\install.ps1, .\CellGlide-<版本>-windows-x64.zip
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-<版本>-windows-x64.zip
 ```
 
-安装脚本在安装前会打印 zip 的 SHA-256，应与官网上的相同。
+安装脚本在 UAC 确认前打印一次 zip 的 SHA-256，安装结束时再为它实际安装的那份拷贝打印一次，两者都应与官网上的相同。脚本不会停下来等你核对，所以请在运行前先按第 1 步核对。
 
 ### 升级
 
