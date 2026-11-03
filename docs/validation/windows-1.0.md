@@ -654,7 +654,7 @@ Speed test finished
 - **基线快照**：`scratchpad\w4t10\base.json`，20:03（当天新拍）。测前状态：开发安装（Task 7 装回），服务 Running；自动连接开、严格 DNS 开、iPhone automatic；HKCU Run 无 `CellGlide`；`StartupApproved\Run` 有 Windows 写的 `CellGlide = 00…`（不碰）；`prefs.json` 不存在；`settings.json` `0B3CA63D…`、`speedtests.json` `62B71C14…`。
 - **系统版本**：b、h 的设置 / 诊断 / 关于、m 的自动部分是在 Windows 11 23H2（build 22631）上做的（10-31 晚）。之后电脑重启并更新到 **build 26200**，c、d、e、h 的连接部分以及之后的各项都在 26200 上做。重启后在 26200 上新拍基线 `base2.json`（11-02 10:11，隧道未连），之后的快照都与它比较。重启时 `%TEMP%` 被清理，22631 上的快照和驱动脚本随之丢失（比较结果已记在下面）；驱动重写后放在 `%LOCALAPPDATA%\CellGlide-dev\w4t10\`。
 - **重启后没有自动连接的原因**：`settings.json` 里 `"user_disconnected": true`（`auto_connect` 是 true）。这个文件的 SHA-256 `0B3CA63D…` 与本任务开始时相同，最后写入时间 10-31 18:49，即 Task 7 装回开发安装那次，本任务没有写过它；是之前的测试最后用「断开」收尾留下的。用户点过断开后不再自动连接，这是设计如此。在概览点 `Connect`（UIA Invoke）后变为 `false`，自动连接设置一直是开。之后每次收尾的「断开」都会再把它设为 true，所以 f、g、i 前要先连接一次。
-- **手机流量**：iPhone 到 10-31 20:30 仍未插上，当晚隧道没有连过。11-02：连接 10:13:20 → 断开 10:15:28，`This session` 0 → **15.9 MB**（小测速约 15 MB，泄漏测试约 0.7 MB）。本任务累计约 **15.9 MB**。
+- **手机流量**：iPhone 到 10-31 20:30 仍未插上，当晚隧道没有连过。11-02：连接 10:13:20 → 断开 10:15:28，`This session` 0 → **15.9 MB**（小测速约 15 MB，泄漏测试约 0.7 MB）。本任务累计约 **15.9 MB**（这是 11-02 10:15 时的中途数字，已被下面「手机流量」一行的 22.3 / 372.3 MB 取代）。
 
 | # | 项目 | 结果 | 证据 |
 |---|---|---|---|
@@ -675,7 +675,7 @@ Speed test finished
 
 - **a 的缺陷与修复（`d9fff26` install.ps1: doctor's check marks read as UTF-8）**：普通窗口里 Windows PowerShell 5.1 的控制台代码页是 OEM 437，PowerShell 用它解码被管道接收的原生程序输出；`cellglide.exe` 往管道写的是 UTF-8，于是 ✓（E2 9C 93）显示成 `Γ£ô`。会话 0 的代理 shell 是 65001，所以之前的实装都没看到。`Invoke-Doctor` 改为自己用 `ProcessStartInfo` 启动 `cellglide.exe doctor`，按 UTF-8 读 stdout 和 stderr，不改控制台的任何设置。uninstall.ps1 和共用函数里没有转发 `cellglide.exe` 输出的地方（`sc.exe`、`icacls.exe`、`pnputil.exe` 的输出都丢弃）。新测试 `doctor's check marks survive an OEM console…`：替身 `cellglide.exe` 写 UTF-8，控制台设为 437，旧代码失败、新代码通过；Pester 197/197。实测：在新开的 Windows PowerShell 5.1 控制台（代码页 437）里分别载入 HEAD 前后的 `Invoke-Doctor`，对已安装的 `cellglide.exe`：旧的打出 `Γ£ô The CellGlide service is running`（U+0393 U+00A3 U+00F4），新的打出 `✓ The CellGlide service is running`（U+2713），之后代码页仍是 437。本地源的 `install.ps1` 已换成修好的版本，j、l 的用户安装会用到它。
 - **h 的托盘部分（用户确认，2026-11-02，「都正常」）**：左键点托盘图标打开面板，点别处关闭；右键出菜单 `CellGlide 1.0.0`、`Disconnect`、`Open CellGlide`、`Quit`，Esc 关闭；Win+B、Enter 打开溢出区，选中图标按 Enter 打开面板、焦点在 Connect/Disconnect，Esc 关闭；Shift+F10 打开菜单（Task 2 裁定）。
-- **f 的缺陷与修复（`9a7437d` service: a 507 dates the wake by its record）**：按电源键时 Windows 11 26200 在 240 ms 内写了 506、507、506 三条，服务约 0.8 秒后一起收到。`Sleep::on` 把醒来时间记为**收到** 507 的时间（10:37:41.34），于是写于 10:37:40.557 的第二个 506 被当成「已结束的那次睡眠的迟到记录」丢掉，两分钟后真正的 507 又因为「已经醒着」被当作重复。结果是真正那次待机既没有记日志，也没有在醒来时重置健康判断。改为 507 用自己的记录时间作为醒来时间（S3 的 resume 和时钟跳变仍用收到的时间）。新测试 `a_quick_exit_then_a_new_entry_delivered_together_is_a_second_standby` 用这次记下的时间，旧代码失败；`cargo fmt --check`、`clippy -D warnings`、`cargo test --workspace` 都通过。这一修复随 j 的升级包装上，j 之后请用户再按一次电源键重测。
+- **f 的缺陷与修复（`9a7437d` service: a 507 dates the wake by its record）**：按电源键时 Windows 11 26200 在 240 ms 内写了 506、507、506 三条，服务约 0.8 秒后一起收到。`Sleep::on` 把醒来时间记为**收到** 507 的时间（10:37:41.34），于是写于 10:37:40.557 的第二个 506 被当成「已结束的那次睡眠的迟到记录」丢掉，两分钟后真正的 507 又因为「已经醒着」被当作重复。结果是真正那次待机既没有记日志，也没有在醒来时重置健康判断。改为 507 用自己的记录时间作为醒来时间（S3 的 resume 和时钟跳变仍用收到的时间）。新测试 `a_quick_exit_then_a_new_entry_delivered_together_is_a_second_standby` 用这次记下的时间，旧代码失败；`cargo fmt --check`、`clippy -D warnings`、`cargo test --workspace` 都通过。这一修复随 j 的升级包装上，j 之后请用户再按一次电源键重测（已重测，见 f 行）。
 - **「已安装的应用」截图**（UIA 取该行的位置，只复制这一行的屏幕区域，没有发送输入）：
 
     ![已安装的应用里的 CellGlide](images/windows-w4-installed-apps.png)
@@ -683,7 +683,7 @@ Speed test finished
   - 服务：`BINARY_PATH_NAME "C:\Program Files\CellGlide\cellglide-service.exe"`（带引号），`AUTO_START`，LocalSystem；`qfailure` 重置 86400 秒，RESTART 2000 / 5000 / 30000 ms；`qsidtype` UNRESTRICTED；`qprivs` 为 SeChangeNotify、SeImpersonate、SeLoadDriver、SeCreateGlobal、SeAudit 五项。
   - `C:\ProgramData\CellGlide` 的 ACL 与 W1 记录逐行相同：根目录 `NT SERVICE\CellGlide:(OI)(CI)(M)`、`BUILTIN\Administrators:(OI)(CI)(F)`、`NT AUTHORITY\SYSTEM:(OI)(CI)(F)`；`health` 另有 `BUILTIN\Users:(OI)(CI)(RX)`；`logs` 只有继承的三项。
   - 开始菜单 `CellGlide.lnk` → `C:\Program Files\CellGlide\app\CellGlide.exe`（工作目录 `app`）。在会话 1 用 ShellExecute 打开这个快捷方式（与开始菜单相同）：进程 `C:\Program Files\CellGlide\app\CellGlide.exe`，属于 `DESKTOP-2H99NV0\iloss`，`TokenElevation = 0`，窗口打开到概览（`Waiting for USB`）。
-  - 卸载项：`DisplayName CellGlide`、`DisplayVersion 1.0.0`、`Publisher CellGlide`、`EstimatedSize 98858`（KB）、`DisplayIcon C:\Program Files\CellGlide\app\CellGlide.exe`、`NoModify 1`、`NoRepair 1`，`UninstallString` 为 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\CellGlide\uninstall.ps1"`。「已安装的应用」里的显示与截图待用户打开设置页。
+  - 卸载项：`DisplayName CellGlide`、`DisplayVersion 1.0.0`、`Publisher CellGlide`、`EstimatedSize 98858`（KB）、`DisplayIcon C:\Program Files\CellGlide\app\CellGlide.exe`、`NoModify 1`、`NoRepair 1`，`UninstallString` 为 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\CellGlide\uninstall.ps1"`。「已安装的应用」里的显示与截图待用户打开设置页（已完成，见 b 行）。
   - 安装后与安装前逐项相同，只有 `EstimatedSize` 98857 → 98858（新 zip 的文件大小）。
   - 这台机器上 Apple 的设备服务是 Apple Devices 应用包里的 `AppleMobileDeviceProcess`（不是经典的 `Apple Mobile Device Service` 服务），端口 27015 在听；k 以它为准。
 - **h（发布版，会话 1 临时计划任务 `CGW4T10`，`wscript //B` 隐藏运行，用完删除；英文界面；只用 UIA 的 SelectionItem / Invoke / Toggle / Value / ScrollItem，没有发键盘鼠标输入，没有切换主题）**：
@@ -697,10 +697,10 @@ Speed test finished
   - 不 `Unblock-File`，不带 `-ExecutionPolicy`（本机策略全是 Undefined，即 Restricted）：`install.ps1 cannot be loaded because running scripts is disabled on this system.`，exit 1，什么都没改。
   - 不 `Unblock-File`，`-ExecutionPolicy RemoteSigned` / `AllSigned`：`install.ps1 cannot be loaded. The file … is not digitally signed. You cannot run this script on the current system.`，exit 1。
   - 不 `Unblock-File`，照 README 带 `-ExecutionPolicy Bypass -File .\install.ps1 -ZipPath …`：**照常运行**，没有提示，打印 `Package: …`、`SHA-256: fc087cb6…1e33`、`Reinstalling 1.0.0`，exit 0；前后快照 identical。也就是说 README 的命令即使漏了 `Unblock-File` 也能装上；`Unblock-File` 在 RemoteSigned / AllSigned 或直接 `.\install.ps1` 时才是必要的。
-  - 照 README：`Unblock-File .\install.ps1, .\CellGlide-1.0.0-windows-x64.zip`（之后两个文件都没有标记）→ `powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-1.0.0-windows-x64.zip`：打印 zip 的 SHA-256（与 `SHA256SUMS` 相同），`Reinstalling 1.0.0`，exit 0；前后快照 identical，与基线 identical。Edge 真实下载（以及 Edge 给 127.0.0.1 写的是哪个区域）待用户。
+  - 照 README：`Unblock-File .\install.ps1, .\CellGlide-1.0.0-windows-x64.zip`（之后两个文件都没有标记）→ `powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\CellGlide-1.0.0-windows-x64.zip`：打印 zip 的 SHA-256（与 `SHA256SUMS` 相同），`Reinstalling 1.0.0`，exit 0；前后快照 identical，与基线 identical。Edge 真实下载（以及 Edge 给 127.0.0.1 写的是哪个区域）待用户（已完成，见 m 行：ZoneId=3）。
 - **收尾（11-02 11:49–11:50）**：设置里打开登录启动（UIA Toggle；Run 值如上，`StartupApproved` 仍是 Windows 写的 `00…`）；自动连接开、严格 DNS 开、「插上 iPhone 时打开窗口」开（`prefs.json` 在 i 的核对之后删除）；`speedtests.json` 用 Task 6 的备份恢复为测前的 `62B71C14…`；「下载」里 m 的两个文件已删除，恢复为测前的 6 项；本地源已停止；断开状态拍 `final.json`（与 base2 identical），然后为 i 连接。开发目录的 `CellGlide.exe` 已停。
 - **手机流量**：到 11:50 收尾为 **22.3 MB**（10-31 为 0；11-02 小测速约 15 MB、泄漏约 0.7 MB，其余是隧道连着时电脑的普通流量）。之后为 i 一直连着（11:50 → 14:27，含用户注销登录前后约 2.5 小时的正常使用），`This session` 到 14:27 断开前为 **372.3 MB**。这超过了本任务 100 MB 的上限，也超过了 W4 的 300 MB 预算；其中约 350 MB 是 i 期间用户自己用电脑的流量（测试本身约 22 MB）。W4 合计约 372 MB（此前各任务约 0）。
-- **为后面的用户步骤准备好的**（10-31 时的记录）：本地源在 127.0.0.1:8770 运行；j 用的第二个 zip 在 `dist\windows\t10b\1.0.0\`（`j-prep.ps1` 换进本地源并重新生成 `latest.json`）；开发目录的 `CellGlide.exe` 用 `--tray` 启动时，因为单实例（`AppInstance` 键 `CellGlide.Main`，`LaunchDecision`：不是第一个实例且 `--tray` → 直接退出）会立刻退出，所以 j 另放一个只会睡眠的同名替身 `dist\windows\t10\devdir\CellGlide.exe`，用来核对安装脚本不结束安装目录以外的同名进程。
+- **为后面的用户步骤准备好的**（10-31 时的记录；以下三点已被 j 行推翻：两个 exe 可以同时运行，不需要替身；第二个 zip 实际在 `t10c` 出）：本地源在 127.0.0.1:8770 运行；j 用的第二个 zip 在 `dist\windows\t10b\1.0.0\`（`j-prep.ps1` 换进本地源并重新生成 `latest.json`）；开发目录的 `CellGlide.exe` 用 `--tray` 启动时，因为单实例（`AppInstance` 键 `CellGlide.Main`，`LaunchDecision`：不是第一个实例且 `--tray` → 直接退出）会立刻退出，所以 j 另放一个只会睡眠的同名替身 `dist\windows\t10\devdir\CellGlide.exe`，用来核对安装脚本不结束安装目录以外的同名进程。
 
 ### Task 13：帮用户启动 Apple 设备（2026-11-02，x64，本机构建，Windows 11 26200，Apple Devices 1.1792.39682.0）
 
@@ -733,6 +733,10 @@ Speed test finished
 - doctor 判断「已安装 Apple Devices」看的是全机的 PackageRepository：只要有任何一个用户装了，就算已安装。所以只有另一个用户装了 Apple Devices 时，本用户也会看到按钮和自动尝试。这时尝试会失败（`app.log`：`not installed for this user`），每段最多 3 次。
 - 检查列表里的按钮是那次检查时的结果。Apple 已经起来后，要重新运行检查按钮才会消失；概览和面板会跟着状态马上更新。
 - 按钮失败时只写进 `app.log`，界面上没有提示。
+- 后台启动只认装在 `%ProgramFiles%\WindowsApps\` 或 `<盘符>:\WindowsApps\`（设置里把新应用放到别的盘时）下、`SignatureKind = Store` 的包（最终小修补放宽了盘符，之前其他盘上的 Store 安装会被拒绝）。
+- 按钮：没有监听时先启动后台部分，但窗口最多等 10 秒就打开，不再等后台启动本身（它的 PowerShell 最长 60 秒）；后台启动在后面继续，结果写进 `app.log`。已有自动尝试在进行时，按钮等它，不再另启动一个。
+- doctor 在「没装 Apple 的设备服务」时每 10 分钟才问一次，所以刚装好 Apple Devices 后，按钮和自动启动最多晚 10 分钟出现（通常 Apple 自己的启动任务会先把 usbmuxd 拉起来，影响小）。
+- App 收到 DLL 的「插上了 iPhone」时在 `app.log` 记一行（开窗或不开窗，不记序列号）。usbmuxd 刚可达后 15 秒内被压住的插入，DLL 没有日志可写，不记。
 
 ## 已知问题（W1 实测发现，未修）
 
@@ -753,3 +757,11 @@ Speed test finished
 - **提交 C**：`18c60d189f3780bc97451b1b8b0ab05b16ce5c7c`（这次运行构建的提交；本节只改文档，提交 C 仍是它）。
 - 结果：`linux`、`windows-x64`、`windows-arm64`、`resolved-probe`、`privileged`、`windows-release`（x64、arm64）全部通过。
 - 四个产物：`CellGlide-windows-x64`、`CellGlide-windows-x64-symbols`、`CellGlide-windows-arm64`、`CellGlide-windows-arm64-symbols`（保留 90 天）。
+- 说明（Task 11 评审 Minor 8）：`windows-release` 任务按 brief 重新构建包，所以发布的 zip 与通过往返测试的那个 zip 不是逐字节相同（zip 本来就不可复现，Task 4 已记），只是同一提交、同一脚本的产物。
+
+## W4 收尾小修补（2026-11-02）
+
+- 安装脚本的两处已知边界只记录、不改：`Get-FileIdentity` 用 1024 字符的缓冲区读最终路径，更长的路径会让调用失败、文件被拒绝（偏安全，我们的路径远短于此）；提权子进程用 `-EncodedCommand` 引导，命令行上限 32767 字符，只有 `-ZipPath` 约 8300 字符以上时才启动不了（同样是拒绝，偏安全）。两处都在代码注释里写明。
+- 提权判断：`Test-Elevated`（Administrators 角色）之外新增共用函数 `Test-TokenElevated`（TokenElevation）。不是管理员但有拆分令牌（例如 Backup Operators）的用户在提权窗口里运行时，卸载 `-Purge` 也不删 `%LOCALAPPDATA%\CellGlide`，安装结束时也经 explorer.exe 启动 App；读不到令牌时按已提权处理。
+- 托盘：Windows 11 把 Enter、Space 变成左键点击；点击时鼠标不在图标上，就按键盘打开面板（焦点显示为键盘焦点，有焦点框）。只有单元测试，没有用真键盘复核（不发合成输入）。
+- Windows 上的 service 在第一次查看 usbmuxd 之前报「usbmuxd 不可达」（之前是「没有 iPhone」），所以 service 刚（重）启动时连上的 App 不会把空列表当基准、再把一直插着的 iPhone 当成新插入。Linux 不变。
