@@ -746,3 +746,10 @@ Speed test finished
   - 泄漏仍为 0：连接时 pktmon 抓 `--comp nics`、端口 53，60 秒内 360 次查询、90 次 `.ts.net` 查询、90 次网页请求：Wi-Fi 0 包；只有 Tailscale Tunnel 有 Rx 180 / Tx 180（MagicDNS，符合预期）。对照（端口 443，5 秒）：Wi-Fi Rx 7 / Tx 7，CellGlide Tunnel Rx 14 / Tx 10。直接问 `192.168.1.254` 和 `2600:381:7368:4c73::1` 都超时，`100.100.100.100` 0.01 秒有应答。
   - 断开后 `netsh wfp show filters` 里 CellGlide 对象 0 个；快照与基线 `identical`。
 - **测速上行是 0.0**，见第 8 项。W2 Task 4 已修（引擎按服务器确认的字节计上行，cg-netstack 在客户端 RST 后中止 SOCKS 一侧），见「上行 0.0 调查」。
+
+## CI 发布构建（W4 Task 11）
+
+- 发布构建运行：workflow_dispatch，运行号 41570841320（https://github.com/kikohz/CellGlide-Desktop/actions/runs/41570841320），在 `windows` 分支上运行。
+- **提交 C**：`18c60d189f3780bc97451b1b8b0ab05b16ce5c7c`（这次运行构建的提交；本节只改文档，提交 C 仍是它）。
+- 结果：`linux`、`windows-x64`、`windows-arm64`、`resolved-probe`、`privileged`、`windows-release`（x64、arm64）全部通过。
+- 四个产物：`CellGlide-windows-x64`、`CellGlide-windows-x64-symbols`、`CellGlide-windows-arm64`、`CellGlide-windows-arm64-symbols`（保留 90 天）。
