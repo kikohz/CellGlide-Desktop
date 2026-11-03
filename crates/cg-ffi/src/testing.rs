@@ -33,6 +33,12 @@ pub fn panic_speed_watch(runtime: &crate::runtime::Runtime, times: u32) {
         .store(times, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How many of the panics asked for with [`panic_speed_watch`] are still to come.
+pub fn speed_watch_panics_left(runtime: &crate::runtime::Runtime) -> u32 {
+    let speed = &runtime.context().speed;
+    speed.panic_left.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Events delivered by calling `sink` right away on the emitting thread.
 pub fn events_into(sink: Box<dyn Fn(Event) + Send>) -> Events {
     Events::direct(sink)

@@ -769,8 +769,10 @@ async fn persistent_speed_watch_panic_is_said_once() {
     )
     .await;
     events.lock().unwrap().clear();
-    // The next three wake-ups panic: the first after this snapshot, then the first of each of
-    // the next two retries. The page changes (Start turns off), so `show` sends it at last.
+    // The next three wake-ups panic, whatever wakes the watch (a tick, this snapshot, a retry's
+    // first tick). Only a wake-up that doesn't panic sends a page, so once the page with Start
+    // off has come, all three panics have happened with no page between them, however long
+    // the retries took: the count below doesn't depend on timing.
     cellglide_native::testing::panic_speed_watch(&rt, 3);
     svc.snapshots.send_replace(disconnected_snapshot());
     wait_for(
@@ -778,6 +780,7 @@ async fn persistent_speed_watch_panic_is_said_once() {
         |e| matches!(e, Event::SpeedProgress { view } if !view.start_enabled),
     )
     .await;
+    assert_eq!(cellglide_native::testing::speed_watch_panics_left(&rt), 0);
     assert_eq!(
         count(&events, |e| matches!(e, Event::Fault { .. })),
         1,
@@ -793,6 +796,7 @@ async fn persistent_speed_watch_panic_is_said_once() {
         |e| matches!(e, Event::SpeedProgress { view } if view.start_enabled),
     )
     .await;
+    assert_eq!(cellglide_native::testing::speed_watch_panics_left(&rt), 0);
     assert_eq!(
         count(&events, |e| matches!(e, Event::Fault { .. })),
         1,
