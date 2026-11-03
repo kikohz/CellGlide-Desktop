@@ -68,6 +68,9 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          # dockerd on the runner image listens on 172.x.x.1:53, which blocks the resolver-port test's
+          # exclusive hold of 0.0.0.0:53. Stop it so that test runs for real (the arm64 image has none).
+          Stop-Service docker -ErrorAction SilentlyContinue
           $before = "$env:RUNNER_TEMP\net-before.json"
           $after = "$env:RUNNER_TEMP\net-after.json"
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $before

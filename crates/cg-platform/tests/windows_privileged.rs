@@ -572,9 +572,8 @@ fn hold_port_53_exclusively() -> Option<std::net::UdpSocket> {
     // SAFETY: as above.
     let error = unsafe { WSAGetLastError() }.0;
     if bound != 0 && error == WSAEADDRINUSE.0 {
-        // Something else already owns the port (a hosted CI runner has Internet Connection Sharing or
-        // dockerd on UDP 53): the port is taken all the same, which is this test's precondition.
-        eprintln!("UDP 53 is already held by another process (WSA {error}); using that");
+        // Something else already owns UDP 53 (a hosted CI runner: ICS, dockerd); the caller skips.
+        eprintln!("UDP 53 is already held by another process (WSA {error})");
         return None;
     }
     assert_eq!(bound, 0, "bind 0.0.0.0:53: WSA {error}");
@@ -595,7 +594,13 @@ fn resolver_port_taken_rolls_back() {
 
     let dll = dll();
     assert_absent(&dll);
-    let _held = hold_port_53_exclusively();
+    // Hosted runners: ICS (arm64 image) respawns a wildcard holder on UDP 53 that cannot be stopped, and
+    // another process's non-exclusive hold does not stop the controller binding the resolver address, so
+    // the precondition cannot be made. Skip loudly; the test runs for real wherever the port is free.
+    let Some(_held) = hold_port_53_exclusively() else {
+        eprintln!("SKIPPED resolver_port_taken_rolls_back: UDP 53 is held by another process");
+        return;
+    };
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (state, gone) = runtime.block_on(async {
         let mux = FakeMux::start().await;
