@@ -127,16 +127,26 @@ public sealed class AppleDevicesStarter(
     /// <summary>
     /// The user's button: when nothing listens on usbmuxd's port, first starts the background part as the automatic
     /// attempts do (so the window's own agent doesn't start usbmuxd, the way that so often left it blind to the
-    /// iPhone) and waits up to <see cref="OpenWait"/> for it; then opens the Apple Devices window. Not paced: the
-    /// user asked. Logged; never faulting.
+    /// iPhone) and waits up to <see cref="OpenWait"/> for it to listen; then opens the Apple Devices window. The wait
+    /// doesn't wait for the start itself (its PowerShell may take up to a minute): the window opens within
+    /// <see cref="OpenWait"/> of the click, and the start goes on and is logged. An automatic attempt still running
+    /// is waited on instead of starting a second one. Not paced: the user asked. Logged; never faulting.
     /// </summary>
     public async Task OpenAsync()
     {
         Log("opening Apple Devices (the user's button)");
         if (!Listening())
         {
-            Log("usbmuxd isn't listening: starting it first");
-            await Run(launcher.StartInBackgroundAsync, "starting before opening");
+            if (_attempt.IsCompleted)
+            {
+                Log("usbmuxd isn't listening: starting it first");
+                // Kept as the attempt under way, so no automatic attempt starts alongside it.
+                _attempt = Run(launcher.StartInBackgroundAsync, "starting before opening");
+            }
+            else
+            {
+                Log("usbmuxd isn't listening and an attempt to start it is under way: waiting for it");
+            }
             var waited = TimeSpan.Zero;
             while (!Listening() && waited < OpenWait)
             {

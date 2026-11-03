@@ -35,6 +35,9 @@ public partial class App : Application
     TrayHost? _tray;
     PanelWindow? _panel;
     DispatcherQueueTimer? _appleTimer;
+
+    /// <summary>%LOCALAPPDATA%\CellGlide\app.log: the Apple Devices starter, and each phone-plugged event.</summary>
+    readonly FileLog _log = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CellGlide", "app.log"));
     Guid _trayId;
     Task? _quit;
 
@@ -122,7 +125,11 @@ public partial class App : Application
     /// </summary>
     void OnPhonePlugged(string serial)
     {
-        if (_window?.IsShown != true && Settings.Prefs?.OpenOnPlug == true)
+        // Logged (without the serial) so a window that opened at sign-in can be told apart from a real plug-in
+        // later: the DLL holds back the iPhones usbmuxd finds while it settles (USBMUXD_SETTLE) and logs nothing.
+        var open = _window?.IsShown != true && Settings.Prefs?.OpenOnPlug == true;
+        _log.Write(open ? "phone plugged in: opening the window" : "phone plugged in: window already shown or opening on plug-in is off");
+        if (open)
         {
             ShowWindow(Section.Overview);
         }
@@ -135,8 +142,7 @@ public partial class App : Application
     /// </summary>
     void StartAppleDevicesWhenAsked(DispatcherQueue queue)
     {
-        var log = new FileLog(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CellGlide", "app.log"));
-        AppleDevices = new AppleDevicesStarter(new AppleDevicesLauncher(), () => DateTimeOffset.Now, log.Write);
+        AppleDevices = new AppleDevicesStarter(new AppleDevicesLauncher(), () => DateTimeOffset.Now, _log.Write);
         void Look()
         {
             if (!IsQuitting)

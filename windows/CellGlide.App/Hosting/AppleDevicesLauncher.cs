@@ -25,7 +25,8 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
     /// The background start, as PowerShell runs it; it throws (exit code 1) when it can't. The Appx module is the
     /// system's own (by path, and its commands called by module name, so a module of the same name elsewhere on
     /// PSModulePath isn't used); the package must be the Store's Apple Devices for this user, installed under
-    /// WindowsApps (not a registered loose copy in a folder the user can write). No -ExecutionPolicy: a -Command
+    /// %ProgramFiles%\WindowsApps\ or, where Settings sends new apps to another drive, that drive's
+    /// &lt;drive&gt;:\WindowsApps\ (not a registered loose copy in a folder the user can write). No -ExecutionPolicy: a -Command
     /// string isn't subject to it, and the signed system module loads under Restricted too (checked on this PC).
     /// </summary>
     const string StartScript =
@@ -33,8 +34,8 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
         "Import-Module (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\Modules\\Appx\\Appx.psd1'); " +
         "$p = Appx\\Get-AppxPackage -Name 'AppleInc.AppleDevices' | Where-Object { $_.PackageFamilyName -eq 'AppleInc.AppleDevices_nzyj5cx40ttqa' -and $_.SignatureKind -eq 'Store' } | Select-Object -First 1; " +
         "if (-not $p) { throw 'Apple Devices from the Store is not installed for this user' }; " +
-        "$apps = Join-Path $env:ProgramFiles 'WindowsApps\\'; " +
-        "if (-not $p.InstallLocation.StartsWith($apps, [StringComparison]::OrdinalIgnoreCase)) { throw ('Apple Devices is not under ' + $apps) }; " +
+        "$at = $p.InstallLocation; $apps = Join-Path $env:ProgramFiles 'WindowsApps\\'; " +
+        "if ($at -match '\\.\\.' -or -not ($at.StartsWith($apps, [StringComparison]::OrdinalIgnoreCase) -or $at -match '^[A-Za-z]:\\\\WindowsApps\\\\')) { throw ('Apple Devices is not under ' + $apps + ' or <drive>:\\WindowsApps\\: ' + $at) }; " +
         "Appx\\Invoke-CommandInDesktopPackage -PackageFamilyName $p.PackageFamilyName -AppId 'AMPDevicesAgent' -Command (Join-Path $p.InstallLocation 'AppleMobileDeviceLauncher.exe')";
 
     /// <summary>The longest error text kept for the log (one line).</summary>

@@ -253,6 +253,44 @@ public class AppleDevicesTests
         Assert.Contains(otherLog, l => l.Contains("couldn't tell whether usbmuxd listens"));
     }
 
+    /// <summary>
+    /// The button's start may hang (PowerShell up to a minute): the window opens after <see cref="AppleDevicesStarter.OpenWait"/>
+    /// all the same, and no automatic attempt starts while that start is still going. An automatic attempt already
+    /// going is waited on, not doubled (task-13 re-review N2).
+    /// </summary>
+    [Fact]
+    public async Task The_button_does_not_wait_for_a_slow_start_or_start_twice()
+    {
+        var waits = new List<TimeSpan>();
+        var (starter, launcher, clock, log) = Make(waits);
+        var hang = new TaskCompletionSource();
+        launcher.Next = () => launcher.Calls[^1] == "start" ? hang.Task : Task.CompletedTask;
+        await starter.OpenAsync();
+        Assert.Equal(1, launcher.Started);
+        Assert.Equal(1, launcher.Opened);
+        Assert.Equal(AppleDevicesStarter.OpenWait, TimeSpan.FromTicks(waits.Sum(w => w.Ticks)));
+        Assert.DoesNotContain(log, l => l.Contains("starting before opening:"));
+        // The automatic attempts wait for the button's start to end.
+        clock.Add(120);
+        await Begin(starter, clock);
+        Assert.Equal(1, launcher.Started);
+        hang.SetResult();
+        await Task.Yield();
+        Assert.Contains(log, l => l.Contains("starting before opening: done"));
+
+        // An automatic attempt under way: the button waits for it rather than starting another.
+        var (other, otherLauncher, otherClock, otherLog) = Make();
+        var slow = new TaskCompletionSource();
+        otherLauncher.Next = () => otherLauncher.Calls[^1] == "start" ? slow.Task : Task.CompletedTask;
+        _ = Begin(other, otherClock);
+        Assert.Equal(1, otherLauncher.Started);
+        await other.OpenAsync();
+        Assert.Equal(1, otherLauncher.Started);
+        Assert.Equal(1, otherLauncher.Opened);
+        Assert.Contains(otherLog, l => l.Contains("an attempt to start it is under way"));
+        slow.SetResult();
+    }
+
     [Fact]
     public async Task Failures_are_logged_and_kept_in()
     {
