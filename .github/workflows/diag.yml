@@ -1,0 +1,11 @@
+name: diag
+on: workflow_dispatch
+jobs:
+  d:
+    runs-on: windows-latest
+    steps:
+      - shell: powershell
+        run: |
+          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; "$($_.LocalAddress):$($_.LocalPort) pid=$($_.OwningProcess) $($p.ProcessName)"; Get-CimInstance Win32_Service | Where-Object ProcessId -eq $_.OwningProcess | ForEach-Object { "  service $($_.Name)" } }
+          netstat -ano -p UDP | Select-String ':53 '
+          Get-Service SharedAccess, Dnscache, hns, vmcompute -ErrorAction SilentlyContinue | Format-Table Name, Status
