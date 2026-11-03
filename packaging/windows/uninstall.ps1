@@ -879,7 +879,7 @@ function Invoke-CellGlideUninstall {
             $code = Invoke-UninstallPart -Purge:$Purge
         }
         if ($Purge) { $code = Remove-UserDataAsUser $code $elevated }
-        else { Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history and preferences); run with -Purge to delete it." }
+        else { Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history, preferences and the app log); run with -Purge to delete it." }
         return $code
     } catch {
         Write-Host "Uninstall failed: $($_.Exception.Message)"

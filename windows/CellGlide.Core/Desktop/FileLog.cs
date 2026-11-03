@@ -16,6 +16,17 @@ public sealed class FileLog(string path, long maxBytes = 256 * 1024)
 
     public string Path => path;
 
+    /// <summary>
+    /// <paramref name="text"/> as one log line: its lines trimmed and joined with " | ", cut to <paramref name="max"/>
+    /// characters (then ending in "...").
+    /// </summary>
+    public static string OneLine(string text, int max)
+    {
+        var lines = text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var joined = string.Join(" | ", lines);
+        return joined.Length <= max ? joined : joined[..max] + "...";
+    }
+
     public void Write(string line)
     {
         var text = DateTimeOffset.Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz", CultureInfo.InvariantCulture) + " " + line + "\n";

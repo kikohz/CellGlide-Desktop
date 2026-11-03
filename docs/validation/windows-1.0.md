@@ -715,6 +715,24 @@ Speed test finished
   - `network-snapshot.ps1 -Compare`（任务开始前 14:39 的快照对最后的快照）：identical。最后状态 Connected，严格 DNS 开；Apple 的进程是 launcher + process。
 - **没有在本机验证**：按钮打开 Apple Devices 窗口（会在用户屏幕上弹窗）；按钮在概览、面板、检查列表里的显示（由 DLL 视图测试和 C# 构建覆盖）。
 - **手机流量**：本任务期间 `This session` 377.3 → 381.2 MB（约 3.9 MB，隧道的后台流量和推送、CI），没有测速。
+- **Fix round 1（评审意见）**：
+  - 节奏：两次自动尝试之间至少 60 秒，跨持续期也算；任意 60 分钟内最多 6 次，所以 usbmuxd 反复退出时也不会无限启动 PowerShell；每段仍最多 3 次。
+  - 按钮：如果 27015 没有在监听，先用后台同样的方式在包内启动 launcher，最多等 10 秒监听，再激活 `...!App`。这样 Apple Devices 窗口不会自己通过 COM 冷启动 usbmuxd。按钮不受节奏限制，也不计入次数。
+  - doctor：如果它说根本没装 Apple 的设备服务，改为每 10 分钟问一次。
+  - PowerShell：
+    - 去掉 `-ExecutionPolicy Bypass`。本机策略全是 Undefined（即 Restricted），系统 Appx 模块照样能加载。
+    - 按路径加载 system32 下的 Appx 模块，命令都写成 `Appx\…` 的形式。
+    - 只认 `SignatureKind = Store`、且装在 `%ProgramFiles%\WindowsApps\` 下的包。
+    - 在线程池上启动进程；超时时结束整个进程树；错误文字合成一行，最多 500 个字符。
+- **待用户核对**：
+  - 点「Open Apple Devices」按钮（需要在 Apple 的进程没在运行时点）：窗口打开后，能否找到 iPhone、隧道能否连上，以及 `app.log` 里「starting it first」之后有没有「usbmuxd is listening」。
+  - 下次真正登录时，Apple 的启动任务很晚才运行的情况下，看 App 的 launcher 和启动任务的 launcher 会不会各启动一次（看 `app.log` 和进程），以及 iPhone 能否连上。
+
+### Task 13 的已知限制
+
+- doctor 判断「已安装 Apple Devices」看的是全机的 PackageRepository：只要有任何一个用户装了，就算已安装。所以只有另一个用户装了 Apple Devices 时，本用户也会看到按钮和自动尝试。这时尝试会失败（`app.log`：`not installed for this user`），每段最多 3 次。
+- 检查列表里的按钮是那次检查时的结果。Apple 已经起来后，要重新运行检查按钮才会消失；概览和面板会跟着状态马上更新。
+- 按钮失败时只写进 `app.log`，界面上没有提示。
 
 ## 已知问题（W1 实测发现，未修）
 

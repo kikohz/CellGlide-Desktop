@@ -11,11 +11,13 @@
 //! again.
 //!
 //! While usbmuxd isn't reachable (`NoUsbService`), the service's doctor is asked at once and
-//! then every [`DOCTOR_EVERY`] whether that is the Apple Devices app installed but not
+//! then every [`DOCTOR_EVERY`] (every [`DOCTOR_EVERY_MISSING`] while it says Apple's device
+//! service isn't installed at all) whether that is the Apple Devices app installed but not
 //! answering; the view then offers to open it (`OverviewView::apple_devices`).
 
 use crate::api::{Event, ReplyResult};
 use crate::runtime::{Context, panic_message};
+use crate::views::AppleWord;
 use crate::views::{self, OverviewView};
 use cg_i18n::tr;
 use cg_ipc::client::{self, Update};
@@ -36,6 +38,10 @@ use tokio::time::MissedTickBehavior;
 
 /// How often the doctor is asked again while usbmuxd stays unreachable.
 const DOCTOR_EVERY: Duration = Duration::from_secs(60);
+
+/// How often instead while the doctor says Apple's device service isn't installed: the most
+/// usual reason for `NoUsbService`, and installing it takes a while.
+const DOCTOR_EVERY_MISSING: Duration = Duration::from_secs(600);
 
 /// What the subscription shares with the other commands.
 #[derive(Default)]
@@ -137,7 +143,7 @@ async fn follow(context: &Context, follower: &mut Follower) {
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + config.tick, config.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // The doctor's answers about Apple Devices: `None` when it couldn't be asked.
-    let (doctor_tx, mut doctor_rx) = mpsc::unbounded_channel::<Option<bool>>();
+    let (doctor_tx, mut doctor_rx) = mpsc::unbounded_channel::<Option<AppleWord>>();
     // A doctor asked before a panic answers to a receiver that is gone: not waited for.
     follower.doctor_out = false;
     loop {
@@ -168,8 +174,8 @@ async fn follow(context: &Context, follower: &mut Follower) {
             () = context.shared.relabel.notified() => {
                 follower.relabel(Timestamp::now(), &TimeZone::system())
             }
-            Some(stopped) = doctor_rx.recv() => {
-                follower.doctor(stopped, Timestamp::now(), &TimeZone::system())
+            Some(word) = doctor_rx.recv() => {
+                follower.doctor(word, Timestamp::now(), &TimeZone::system())
             }
         };
         for event in events {
@@ -179,11 +185,11 @@ async fn follow(context: &Context, follower: &mut Follower) {
             let endpoint = config.endpoint.clone();
             let answers = doctor_tx.clone();
             tokio::spawn(async move {
-                let stopped = match cg_ipc::client::call(&endpoint, Request::Doctor).await {
-                    Ok(Response::Doctor { checks }) => Some(views::apple_devices_stopped(&checks)),
+                let word = match cg_ipc::client::call(&endpoint, Request::Doctor).await {
+                    Ok(Response::Doctor { checks }) => Some(views::apple_word(&checks)),
                     _ => None,
                 };
-                let _ = answers.send(stopped);
+                let _ = answers.send(word);
             });
         }
     }
@@ -206,9 +212,9 @@ struct Follower {
     known: Option<KnownDevices>,
     /// A `State` was sent since the subscription loop last looked: a panic after it is news.
     recovered: bool,
-    /// The doctor's last word while usbmuxd isn't reachable: the Apple Devices app is
-    /// installed but not answering. Forgotten once usbmuxd answers or the service goes.
-    apple_stopped: bool,
+    /// The doctor's last word on Apple Devices while usbmuxd isn't reachable. Forgotten once
+    /// usbmuxd answers or the service goes.
+    apple: AppleWord,
     /// When the doctor was last asked while usbmuxd isn't reachable; `None` otherwise.
     doctor_asked: Option<Instant>,
     /// A doctor request is out.
@@ -223,7 +229,7 @@ impl Follower {
             down: None,
             known: None,
             recovered: false,
-            apple_stopped: false,
+            apple: AppleWord::Other,
             doctor_asked: None,
             doctor_out: false,
         }
@@ -242,7 +248,7 @@ impl Follower {
         if snapshot.state != ConnState::NoUsbService {
             self.forget_apple();
         }
-        let view = views::overview(&snapshot, self.apple_stopped, now, tz);
+        let view = views::overview(&snapshot, self.apple == AppleWord::Stopped, now, tz);
         // Only now that the view is made: a view that panics leaves the reason said before
         // (the panic's) in place, so the same panic again isn't said again.
         self.down = None;
@@ -293,19 +299,20 @@ impl Follower {
         let Some(snapshot) = self.shared.snapshot() else {
             return Vec::new();
         };
-        let view = views::overview(&snapshot, self.apple_stopped, now, tz);
+        let view = views::overview(&snapshot, self.apple == AppleWord::Stopped, now, tz);
         self.show(view).into_iter().collect()
     }
 
     /// usbmuxd answers (or the service is away): what the doctor said about Apple Devices no
     /// longer holds, and the next time usbmuxd is unreachable it is asked again at once.
     fn forget_apple(&mut self) {
-        self.apple_stopped = false;
+        self.apple = AppleWord::Other;
         self.doctor_asked = None;
     }
 
     /// Whether to ask the doctor now: usbmuxd isn't reachable, no request is out, and it
-    /// wasn't asked in the last [`DOCTOR_EVERY`]. Yes means it counts as asked.
+    /// wasn't asked in the last [`DOCTOR_EVERY`] ([`DOCTOR_EVERY_MISSING`] after it said Apple's
+    /// device service isn't installed). Yes means it counts as asked.
     fn wants_doctor(&mut self, instant: Instant) -> bool {
         let unreachable = self
             .shared
@@ -313,7 +320,7 @@ impl Follower {
             .is_some_and(|s| s.state == ConnState::NoUsbService);
         let due = self
             .doctor_asked
-            .is_none_or(|asked| instant.saturating_duration_since(asked) >= DOCTOR_EVERY);
+            .is_none_or(|asked| instant.saturating_duration_since(asked) >= self.doctor_every());
         if !unreachable || self.doctor_out || !due {
             return false;
         }
@@ -324,14 +331,22 @@ impl Follower {
 
     /// The doctor's answer (`None`: it couldn't be asked, so the last word stands). It counts
     /// only while usbmuxd is still unreachable.
-    fn doctor(&mut self, stopped: Option<bool>, now: Timestamp, tz: &TimeZone) -> Vec<Event> {
+    fn doctor_every(&self) -> Duration {
+        if self.apple == AppleWord::Missing {
+            DOCTOR_EVERY_MISSING
+        } else {
+            DOCTOR_EVERY
+        }
+    }
+
+    fn doctor(&mut self, word: Option<AppleWord>, now: Timestamp, tz: &TimeZone) -> Vec<Event> {
         self.doctor_out = false;
         let unreachable = self
             .shared
             .snapshot()
             .is_some_and(|s| s.state == ConnState::NoUsbService);
-        match stopped {
-            Some(stopped) if unreachable => self.apple_stopped = stopped,
+        match word {
+            Some(word) if unreachable => self.apple = word,
             _ => return Vec::new(),
         }
         self.tick(now, tz)
@@ -590,12 +605,15 @@ mod tests {
         assert!(f.wants_doctor(s(1)));
         assert!(!f.wants_doctor(s(2)));
         // The Apple Devices app is installed but not answering: offered, and started.
-        let events = f.doctor(Some(true), at(3), &TimeZone::UTC);
+        let events = f.doctor(Some(AppleWord::Stopped), at(3), &TimeZone::UTC);
         let view = view_of(&events);
         assert_eq!(view.apple_devices, Some(views::apple_devices()));
         assert!(view.start_apple_devices);
         // The same word again changes nothing; ticks keep it.
-        assert!(f.doctor(Some(true), at(3), &TimeZone::UTC).is_empty());
+        assert!(
+            f.doctor(Some(AppleWord::Stopped), at(3), &TimeZone::UTC)
+                .is_empty()
+        );
         assert!(f.tick(at(8), &TimeZone::UTC).is_empty());
         // Asked again a minute after the last time, not before.
         assert!(!f.wants_doctor(s(60)));
@@ -604,9 +622,35 @@ mod tests {
         assert!(f.doctor(None, at(62), &TimeZone::UTC).is_empty());
         assert!(f.wants_doctor(s(121)));
         // Not the app (iTunes, or uninstalled meanwhile): no button.
-        let events = f.doctor(Some(false), at(122), &TimeZone::UTC);
+        let events = f.doctor(Some(AppleWord::Other), at(122), &TimeZone::UTC);
         assert_eq!(view_of(&events).apple_devices, None);
         assert!(!view_of(&events).start_apple_devices);
+    }
+
+    #[test]
+    fn without_apple_s_device_service_the_doctor_is_asked_every_ten_minutes() {
+        let _g = cg_i18n::lock_for_tests();
+        cg_i18n::set(cg_i18n::Lang::En);
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut f = Follower::new(Arc::default());
+        f.snapshot(no_usb_service(), at(0), &TimeZone::UTC, s(0));
+        assert!(f.wants_doctor(s(0)));
+        let events = f.doctor(Some(AppleWord::Missing), at(1), &TimeZone::UTC);
+        assert!(events.is_empty(), "nothing to offer, nothing changed");
+        assert!(!f.wants_doctor(s(60)));
+        assert!(!f.wants_doctor(s(599)));
+        assert!(f.wants_doctor(s(600)));
+        // Installed meanwhile: offered, and back to every minute.
+        let events = f.doctor(Some(AppleWord::Stopped), at(601), &TimeZone::UTC);
+        assert!(view_of(&events).start_apple_devices);
+        assert!(!f.wants_doctor(s(659)));
+        assert!(f.wants_doctor(s(660)));
+        f.doctor(None, at(661), &TimeZone::UTC);
+        // usbmuxd answering forgets it all: the next stretch asks at once.
+        f.snapshot(no_phone(), at(700), &TimeZone::UTC, s(700));
+        f.snapshot(no_usb_service(), at(701), &TimeZone::UTC, s(701));
+        assert!(f.wants_doctor(s(701)));
     }
 
     #[test]
@@ -618,7 +662,9 @@ mod tests {
         let mut f = Follower::new(Arc::default());
         f.snapshot(no_usb_service(), at(0), &TimeZone::UTC, s(0));
         assert!(f.wants_doctor(s(0)));
-        assert!(view_of(&f.doctor(Some(true), at(1), &TimeZone::UTC)).start_apple_devices);
+        assert!(
+            view_of(&f.doctor(Some(AppleWord::Stopped), at(1), &TimeZone::UTC)).start_apple_devices
+        );
         // Apple Devices started: usbmuxd answers, the button goes.
         let events = f.snapshot(no_phone(), at(5), &TimeZone::UTC, s(5));
         assert_eq!(view_of(&events).apple_devices, None);
@@ -630,12 +676,15 @@ mod tests {
         assert!(f.wants_doctor(s(10)));
         // An answer that comes after usbmuxd is back counts for nothing.
         f.snapshot(no_phone(), at(11), &TimeZone::UTC, s(11));
-        assert!(f.doctor(Some(true), at(12), &TimeZone::UTC).is_empty());
+        assert!(
+            f.doctor(Some(AppleWord::Stopped), at(12), &TimeZone::UTC)
+                .is_empty()
+        );
         let events = f.snapshot(no_usb_service(), at(13), &TimeZone::UTC, s(13));
         assert_eq!(view_of(&events).apple_devices, None);
         // The service going forgets it too.
         assert!(f.wants_doctor(s(13)));
-        f.doctor(Some(true), at(14), &TimeZone::UTC);
+        f.doctor(Some(AppleWord::Stopped), at(14), &TimeZone::UTC);
         f.down(stopped());
         assert!(!f.wants_doctor(s(15)), "no snapshot, nothing to ask");
         let events = f.snapshot(no_usb_service(), at(16), &TimeZone::UTC, s(16));

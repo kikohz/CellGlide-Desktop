@@ -14,7 +14,7 @@ mod leak;
 mod overview;
 mod speed;
 
-pub use apple::{AppleDevicesView, any_stopped as apple_devices_stopped, apple_devices};
+pub use apple::{AppleDevicesView, AppleWord, apple_devices, word as apple_word};
 pub use chrome::{
     BadgesView, ChromeView, MenuItemView, MenuKind, SidebarGroupView, SidebarItemView, chrome,
 };

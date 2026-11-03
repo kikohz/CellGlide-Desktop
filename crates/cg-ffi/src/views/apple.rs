@@ -36,6 +36,31 @@ pub fn any_stopped(checks: &[Check]) -> bool {
     checks.iter().any(stopped)
 }
 
+/// What the doctor's checks say about Apple Devices, while usbmuxd isn't reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AppleWord {
+    /// The Apple Devices app is installed but not answering: offer it, and start it.
+    Stopped,
+    /// Apple's device service isn't installed at all (the Apple check failed).
+    Missing,
+    /// Anything else (answering after all, or iTunes' Windows service).
+    #[default]
+    Other,
+}
+
+pub fn word(checks: &[Check]) -> AppleWord {
+    if any_stopped(checks) {
+        AppleWord::Stopped
+    } else if checks
+        .iter()
+        .any(|c| c.id == CheckId::AppleService && !c.ok)
+    {
+        AppleWord::Missing
+    } else {
+        AppleWord::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +95,20 @@ mod tests {
             apple(Some(APPLE_DEVICES_APP), "false")
         ]));
         assert!(!any_stopped(&[]));
+    }
+
+    #[test]
+    fn the_word_is_stopped_missing_or_other() {
+        assert_eq!(
+            word(&[apple(Some(APPLE_DEVICES_APP), "false")]),
+            AppleWord::Stopped
+        );
+        assert_eq!(
+            word(&[Check::new(CheckId::AppleService, false).with("running", "false")]),
+            AppleWord::Missing
+        );
+        assert_eq!(word(&[apple(None, "false")]), AppleWord::Other);
+        assert_eq!(word(&[]), AppleWord::Other);
     }
 
     #[test]

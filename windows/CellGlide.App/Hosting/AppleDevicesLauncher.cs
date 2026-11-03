@@ -21,12 +21,24 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
 {
     const string AppId = "AppleInc.AppleDevices_nzyj5cx40ttqa!App";
 
-    /// <summary>The background start, as PowerShell runs it; it throws (exit code 1) when it can't.</summary>
+    /// <summary>
+    /// The background start, as PowerShell runs it; it throws (exit code 1) when it can't. The Appx module is the
+    /// system's own (by path, and its commands called by module name, so a module of the same name elsewhere on
+    /// PSModulePath isn't used); the package must be the Store's Apple Devices for this user, installed under
+    /// WindowsApps (not a registered loose copy in a folder the user can write). No -ExecutionPolicy: a -Command
+    /// string isn't subject to it, and the signed system module loads under Restricted too (checked on this PC).
+    /// </summary>
     const string StartScript =
         "$ErrorActionPreference = 'Stop'; " +
-        "$p = Get-AppxPackage -Name 'AppleInc.AppleDevices' | Where-Object { $_.PackageFamilyName -eq 'AppleInc.AppleDevices_nzyj5cx40ttqa' } | Select-Object -First 1; " +
-        "if (-not $p) { throw 'Apple Devices is not installed for this user' }; " +
-        "Invoke-CommandInDesktopPackage -PackageFamilyName $p.PackageFamilyName -AppId 'AMPDevicesAgent' -Command (Join-Path $p.InstallLocation 'AppleMobileDeviceLauncher.exe')";
+        "Import-Module (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\Modules\\Appx\\Appx.psd1'); " +
+        "$p = Appx\\Get-AppxPackage -Name 'AppleInc.AppleDevices' | Where-Object { $_.PackageFamilyName -eq 'AppleInc.AppleDevices_nzyj5cx40ttqa' -and $_.SignatureKind -eq 'Store' } | Select-Object -First 1; " +
+        "if (-not $p) { throw 'Apple Devices from the Store is not installed for this user' }; " +
+        "$apps = Join-Path $env:ProgramFiles 'WindowsApps\\'; " +
+        "if (-not $p.InstallLocation.StartsWith($apps, [StringComparison]::OrdinalIgnoreCase)) { throw ('Apple Devices is not under ' + $apps) }; " +
+        "Appx\\Invoke-CommandInDesktopPackage -PackageFamilyName $p.PackageFamilyName -AppId 'AMPDevicesAgent' -Command (Join-Path $p.InstallLocation 'AppleMobileDeviceLauncher.exe')";
+
+    /// <summary>The longest error text kept for the log (one line).</summary>
+    const int MaxErrorText = 500;
 
     /// <summary>How long the PowerShell that starts it may take.</summary>
     static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(60);
@@ -49,11 +61,12 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", StartScript })
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", StartScript })
         {
             start.ArgumentList.Add(argument);
         }
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("PowerShell did not start");
+        // Off the UI thread: starting a process can take a while (an antivirus scan, say).
+        using var process = await Task.Run(() => Process.Start(start)) ?? throw new InvalidOperationException("PowerShell did not start");
         var output = process.StandardOutput.ReadToEndAsync();
         var errors = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(StartTimeout);
@@ -65,7 +78,7 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
         {
             try
             {
-                process.Kill();
+                process.Kill(entireProcessTree: true);
             }
             catch (Exception)
             {
@@ -74,12 +87,17 @@ public sealed partial class AppleDevicesLauncher : IAppleDevicesLauncher
             throw new TimeoutException($"PowerShell took longer than {StartTimeout.TotalSeconds:0} s");
         }
         await output;
-        var said = (await errors).Trim();
+        var said = FileLog.OneLine(await errors, MaxErrorText);
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException($"PowerShell exit code {process.ExitCode}: {said}");
         }
     }
+
+    /// <summary>Whether something listens on 127.0.0.1:27015 (the TCP table only; nothing connects).</summary>
+    public bool UsbmuxdListening() =>
+        System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+            .Any(e => e.Port == 27015 && (e.Address.Equals(System.Net.IPAddress.Loopback) || e.Address.Equals(System.Net.IPAddress.Any)));
 
     public Task OpenAsync() => OnComThread(Activate);
 

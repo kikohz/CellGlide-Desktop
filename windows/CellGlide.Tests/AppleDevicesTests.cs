@@ -3,31 +3,46 @@ using CellGlide.Core.Desktop;
 namespace CellGlide.Tests;
 
 /// <summary>
-/// Starting Apple Devices: the pace (the first attempt 30 s into an episode, then once a minute, three times in
-/// all), the log, and failures kept in.
+/// Starting Apple Devices: the pace (the first attempt 30 s into an episode, then once a minute, across episodes
+/// too, three times an episode and six an hour), the button (usbmuxd first, then the window), the log, and
+/// failures kept in.
 /// </summary>
 public class AppleDevicesTests
 {
-    /// <summary>Counts the calls; each answers with what <see cref="Next"/> says.</summary>
+    /// <summary>Counts the calls, in order; each answers with what <see cref="Next"/> says.</summary>
     sealed class FakeLauncher : IAppleDevicesLauncher
     {
         public int Started { get; private set; }
 
         public int Opened { get; private set; }
 
+        /// <summary>"start", "open" and "listening?" as they were called.</summary>
+        public List<string> Calls { get; } = [];
+
         /// <summary>What the next call does: complete (null), throw at once, or return this task.</summary>
         public Func<Task>? Next { get; set; }
+
+        /// <summary>What <see cref="UsbmuxdListening"/> answers.</summary>
+        public Func<bool> Listening { get; set; } = () => false;
 
         public Task StartInBackgroundAsync()
         {
             Started++;
+            Calls.Add("start");
             return Next?.Invoke() ?? Task.CompletedTask;
         }
 
         public Task OpenAsync()
         {
             Opened++;
+            Calls.Add("open");
             return Next?.Invoke() ?? Task.CompletedTask;
+        }
+
+        public bool UsbmuxdListening()
+        {
+            Calls.Add("listening?");
+            return Listening();
         }
     }
 
@@ -38,12 +53,18 @@ public class AppleDevicesTests
         public void Add(int seconds) => Now = Now.AddSeconds(seconds);
     }
 
-    static (AppleDevicesStarter Starter, FakeLauncher Launcher, Clock Clock, List<string> Log) Make()
+    static (AppleDevicesStarter Starter, FakeLauncher Launcher, Clock Clock, List<string> Log) Make(List<TimeSpan>? waits = null)
     {
         var launcher = new FakeLauncher();
         var clock = new Clock();
         var log = new List<string>();
-        return (new AppleDevicesStarter(launcher, () => clock.Now, log.Add), launcher, clock, log);
+        Func<TimeSpan, Task> delay = d =>
+        {
+            waits?.Add(d);
+            clock.Add((int)Math.Ceiling(d.TotalSeconds));
+            return Task.CompletedTask;
+        };
+        return (new AppleDevicesStarter(launcher, () => clock.Now, log.Add, delay), launcher, clock, log);
     }
 
     /// <summary>Starts an episode and waits out its first 30 s: the attempt this returns is the first.</summary>
@@ -102,7 +123,7 @@ public class AppleDevicesTests
     }
 
     [Fact]
-    public async Task A_new_episode_starts_counting_again()
+    public async Task A_new_episode_starts_counting_again_but_keeps_the_minute()
     {
         var (starter, launcher, clock, log) = Make();
         await Begin(starter, clock);
@@ -114,11 +135,17 @@ public class AppleDevicesTests
         await starter.Update(false);
         Assert.Equal(0, starter.Attempts);
         Assert.Contains(log, l => l.Contains("no longer needs starting (after 2 attempt(s))"));
-        // It stops again, a little later: a new episode, with its own wait and its own three attempts.
+        // It stops again, a little later: a new episode, with its own wait and its own three attempts, but still a
+        // minute after the last attempt (40 s after it here: not yet).
         clock.Add(5);
         await starter.Update(true);
-        Assert.Equal(2, launcher.Started);
         clock.Add(30);
+        await starter.Update(true);
+        Assert.Equal(2, launcher.Started);
+        clock.Add(19);
+        await starter.Update(true);
+        Assert.Equal(2, launcher.Started);
+        clock.Add(1);
         await starter.Update(true);
         Assert.Equal(3, launcher.Started);
         clock.Add(60);
@@ -133,6 +160,97 @@ public class AppleDevicesTests
         await starter.Update(false);
         await starter.Update(false);
         Assert.Single(log);
+    }
+
+    [Fact]
+    public async Task Episodes_that_end_at_once_are_still_a_minute_apart_and_six_an_hour()
+    {
+        var (starter, launcher, clock, log) = Make();
+        var started = new List<DateTimeOffset>();
+        launcher.Next = () =>
+        {
+            started.Add(clock.Now);
+            return Task.CompletedTask;
+        };
+        // usbmuxd keeps ending: every 35 s a new episode, each over 2 s after its attempt (or its chance of one).
+        var end = clock.Now.AddHours(3);
+        while (clock.Now < end)
+        {
+            await starter.Update(true);
+            clock.Add(31);
+            await starter.Update(true);
+            clock.Add(2);
+            await starter.Update(false);
+            clock.Add(2);
+        }
+        Assert.All(started.Zip(started.Skip(1)), p => Assert.True(p.Second - p.First >= AppleDevicesStarter.Spacing, $"{p.First:T} {p.Second:T}"));
+        foreach (var at in started)
+        {
+            Assert.True(started.Count(t => t >= at && t - at < AppleDevicesStarter.Window) <= AppleDevicesStarter.MaxPerWindow, $"{at:T}");
+        }
+        // Six in each of the three hours, give or take where the hours fall.
+        Assert.InRange(started.Count, 16, 18);
+        // The limit is said once each time it is reached (at most once an attempt), not on every episode.
+        var said = log.Count(l => l.Contains("attempts in the last 60 minutes"));
+        Assert.InRange(said, 1, started.Count);
+    }
+
+    [Fact]
+    public async Task The_button_starts_usbmuxd_first_and_waits_for_it()
+    {
+        var waits = new List<TimeSpan>();
+        var (starter, launcher, _, log) = Make(waits);
+        // usbmuxd answers on the fourth look after it was started.
+        var startedAt = 0;
+        launcher.Next = () =>
+        {
+            startedAt = launcher.Calls.Count;
+            return Task.CompletedTask;
+        };
+        launcher.Listening = () => startedAt > 0 && launcher.Calls.Count - startedAt > 3;
+        await starter.OpenAsync();
+        Assert.Equal("listening?", launcher.Calls[0]);
+        Assert.Equal("start", launcher.Calls[1]);
+        Assert.Equal("open", launcher.Calls[^1]);
+        Assert.Equal(1, launcher.Calls.Count(c => c == "open"));
+        Assert.Equal(1, launcher.Started);
+        Assert.Equal(1, launcher.Opened);
+        Assert.NotEmpty(waits);
+        Assert.Contains(log, l => l.Contains("starting it first"));
+        Assert.Contains(log, l => l.Contains("usbmuxd is listening"));
+        Assert.Contains(log, l => l.Contains("opening Apple Devices: done"));
+        // The button isn't paced and isn't counted: the automatic attempts go on as before.
+        Assert.Equal(0, starter.Attempts);
+    }
+
+    [Fact]
+    public async Task The_button_opens_at_once_when_usbmuxd_listens()
+    {
+        var (starter, launcher, _, _) = Make();
+        launcher.Listening = () => true;
+        await starter.OpenAsync();
+        Assert.Equal(["listening?", "open"], launcher.Calls);
+    }
+
+    [Fact]
+    public async Task The_button_opens_the_window_even_when_usbmuxd_never_comes()
+    {
+        var waits = new List<TimeSpan>();
+        var (starter, launcher, _, log) = Make(waits);
+        launcher.Next = () => throw new InvalidOperationException("Apple Devices from the Store is not installed for this user");
+        await starter.OpenAsync();
+        Assert.Equal(1, launcher.Started);
+        Assert.Equal(1, launcher.Opened);
+        Assert.Equal("open", launcher.Calls[^1]);
+        Assert.Equal(AppleDevicesStarter.OpenWait, TimeSpan.FromTicks(waits.Sum(w => w.Ticks)));
+        Assert.Contains(log, l => l.Contains("starting before opening: failed: InvalidOperationException"));
+        Assert.Contains(log, l => l.Contains("still isn't listening after 10 s; opening anyway"));
+        // A listener check that throws counts as not listening.
+        var (other, otherLauncher, _, otherLog) = Make();
+        otherLauncher.Listening = () => throw new System.Net.NetworkInformation.NetworkInformationException(5);
+        await other.OpenAsync();
+        Assert.Equal(1, otherLauncher.Opened);
+        Assert.Contains(otherLog, l => l.Contains("couldn't tell whether usbmuxd listens"));
     }
 
     [Fact]
@@ -184,11 +302,22 @@ public class AppleDevicesTests
     public async Task The_button_opens_apple_devices_whatever_the_pace()
     {
         var (starter, launcher, _, log) = Make();
+        launcher.Listening = () => true;
         await starter.OpenAsync();
         await starter.OpenAsync();
         Assert.Equal(2, launcher.Opened);
         Assert.Equal(0, launcher.Started);
         Assert.Equal(2, log.Count(l => l.Contains("opening Apple Devices: done")));
+    }
+
+    [Fact]
+    public void Error_text_becomes_one_short_line()
+    {
+        Assert.Equal("a | b | c", FileLog.OneLine("a\r\n  b \n\n c\r\n", 500));
+        Assert.Equal("", FileLog.OneLine("\r\n", 500));
+        var cut = FileLog.OneLine(new string('x', 600), 500);
+        Assert.Equal(503, cut.Length);
+        Assert.EndsWith("...", cut);
     }
 
     [Fact]
