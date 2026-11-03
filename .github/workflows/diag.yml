@@ -6,14 +6,15 @@ jobs:
     steps:
       - shell: powershell
         run: |
-          $p = (Get-NetUDPEndpoint -LocalPort 53).OwningProcess
-          "pid $p"; (Get-CimInstance Win32_Service | Where-Object ProcessId -eq $p | ForEach-Object Name) -join ','
+          sc.exe config SharedAccess start= disabled
+          sc.exe failure SharedAccess reset= 0 actions= '""'
+          sc.exe qfailure SharedAccess
           sc.exe stop SharedAccess | Out-Null
-          Start-Sleep 20
-          (Get-Service SharedAccess).Status
-          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after 20s: $($_.LocalAddress) pid $($_.OwningProcess)" }
-          taskkill /f /pid $p
-          Start-Sleep 5
-          (Get-Service SharedAccess).Status
-          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after kill: $($_.LocalAddress) pid $($_.OwningProcess)" }
+          for ($i = 0; $i -lt 12; $i++) {
+            $e = Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue
+            "t=$($i*5)s status=$((Get-Service SharedAccess).Status) holder=$(($e | ForEach-Object { $_.LocalAddress + ' pid ' + $_.OwningProcess }) -join ';')"
+            if (-not $e) { break }
+            foreach ($x in $e) { taskkill /f /pid $x.OwningProcess }
+            Start-Sleep 5
+          }
           "done"
