@@ -101,6 +101,31 @@ function Test-Elevated {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-TokenElevated {
+    # Whether this process runs with an elevated token (TokenElevation), whatever its groups. A
+    # user who is not an administrator can still have a split token (Backup Operators, say), and
+    # an elevated one is not an administrator to Test-Elevated: this tells such a process apart
+    # from an ordinary one, so it is never taken for the user's own unelevated window.
+    $ErrorActionPreference = 'Stop'
+    if (-not ('CellGlideInstall.Token' -as [type])) {
+        Add-Type -Namespace CellGlideInstall -Name Token -MemberDefinition @'
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool GetTokenInformation(System.IntPtr token, int infoClass, out int info, int length, out int returned);
+'@
+    }
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $elevated = 0; $returned = 0
+        # 20 = TokenElevation: a DWORD, non-zero when elevated.
+        if (-not [CellGlideInstall.Token]::GetTokenInformation($id.Token, 20, [ref]$elevated, 4, [ref]$returned)) {
+            throw 'cannot read whether this process is elevated'
+        }
+        return ($elevated -ne 0)
+    } finally {
+        $id.Dispose()
+    }
+}
+
 function Invoke-Native {
     # Runs a native command; throws with its output when the exit code is not 0.
     param([string]$Exe, [string[]]$ArgList)
@@ -395,7 +420,9 @@ function New-ChildBootstrap([string]$ScriptPath, [string]$Sha256, [hashtable]$Pa
     # that were checked from memory (dot-sourced, so the script's $code is ours), exit with it.
     # Exit 3 means the file was not the text the parent wrote. No value from outside ever
     # appears in the code: the path, the hash and the parameters travel as one base64 blob of
-    # JSON (base64 has no quote of any kind), decoded inside.
+    # JSON (base64 has no quote of any kind), decoded inside. The command line holds 32767
+    # characters, so -EncodedCommand (UTF-16 in base64, about 2.7 characters per character of
+    # code) fails to start only with a -ZipPath of roughly 8300 characters or more: refused, safe.
     $ErrorActionPreference = 'Stop'
     $values = @{}
     foreach ($key in @($Parameters.Keys)) {
@@ -453,6 +480,8 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
     try {
         $info = New-Object CellGlideInstall.FileHandle+Info
         if (-not [CellGlideInstall.FileHandle]::GetFileInformationByHandle($stream.SafeFileHandle, [ref]$info)) { throw "cannot read what $Path is" }
+        # A final path longer than 1024 characters makes the call fail (it returns the size it
+        # needs), so such a file is refused: that fails safe, and our paths are far shorter.
         $buffer = New-Object Text.StringBuilder 1024
         if ([CellGlideInstall.FileHandle]::GetFinalPathNameByHandle($stream.SafeFileHandle, $buffer, 1024, 0) -eq 0) { throw "cannot read the final path of $Path" }
         $final = $buffer.ToString()
@@ -823,10 +852,13 @@ function Set-UninstallEntry([string]$Version) {
 
 function Start-AppAsUser {
     # An elevated process starts the app through explorer.exe, so it runs as the signed-in
-    # user without administrator rights.
+    # user without administrator rights. An elevated token that is not an administrator's counts
+    # too (Test-TokenElevated); when that cannot be read, explorer.exe is used, which is safe.
     $ErrorActionPreference = 'Stop'
     $exe = Join-Path $InstallDir 'app\CellGlide.exe'
-    if (Test-Elevated) { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$exe`"" }
+    $tokenElevated = $true
+    try { $tokenElevated = Test-TokenElevated } catch { }
+    if ((Test-Elevated) -or $tokenElevated) { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$exe`"" }
     else { Start-Process -FilePath $exe }
 }
 
@@ -836,8 +868,13 @@ function Invoke-Doctor {
     # console's encoding, which in an ordinary window is the OEM code page (437 shows a check
     # mark as three wrong characters). So the output is read here as UTF-8 directly, and the
     # console's own settings are never touched.
+    # stdout and stderr come through two pipes, so stderr's lines (doctor writes none today) are
+    # printed after stdout's rather than interleaved. Blank lines are kept. Doctor gets 60 s, then
+    # it is stopped. Its exit code is ignored on purpose, and since it runs through
+    # Process.Start, it no longer leaves $LASTEXITCODE behind in the user's session.
     $ErrorActionPreference = 'Continue'
     Write-Host 'cellglide doctor:'
+    $p = $null
     try {
         $utf8 = New-Object Text.UTF8Encoding($false)
         $psi = New-Object Diagnostics.ProcessStartInfo((Join-Path $InstallDir 'cellglide.exe'), 'doctor')
@@ -846,11 +883,18 @@ function Invoke-Doctor {
         $psi.StandardOutputEncoding = $utf8; $psi.StandardErrorEncoding = $utf8
         $p = [Diagnostics.Process]::Start($psi)
         $err = $p.StandardError.ReadToEndAsync()
-        $out = $p.StandardOutput.ReadToEnd()
-        $p.WaitForExit()
-        foreach ($line in (($out + $err.Result) -split "`r?`n")) { if ($line) { Write-Host "  $line" } }
+        $out = $p.StandardOutput.ReadToEndAsync()
+        if (-not $p.WaitForExit(60000)) {
+            try { $p.Kill() } catch { }
+            Write-Host '  (cellglide doctor did not finish within 60 s and was stopped)'
+            return
+        }
+        $text = ($out.Result + $err.Result) -replace "`r?`n\z", ''
+        if ($text -ne '') { foreach ($line in ($text -split "`r?`n")) { Write-Host "  $line" } }
     } catch {
         Write-Host "  (cellglide doctor could not run: $($_.Exception.Message))"
+    } finally {
+        if ($p) { $p.Dispose() }
     }
 }
 

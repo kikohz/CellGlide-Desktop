@@ -106,6 +106,31 @@ function Test-Elevated {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-TokenElevated {
+    # Whether this process runs with an elevated token (TokenElevation), whatever its groups. A
+    # user who is not an administrator can still have a split token (Backup Operators, say), and
+    # an elevated one is not an administrator to Test-Elevated: this tells such a process apart
+    # from an ordinary one, so it is never taken for the user's own unelevated window.
+    $ErrorActionPreference = 'Stop'
+    if (-not ('CellGlideInstall.Token' -as [type])) {
+        Add-Type -Namespace CellGlideInstall -Name Token -MemberDefinition @'
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool GetTokenInformation(System.IntPtr token, int infoClass, out int info, int length, out int returned);
+'@
+    }
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $elevated = 0; $returned = 0
+        # 20 = TokenElevation: a DWORD, non-zero when elevated.
+        if (-not [CellGlideInstall.Token]::GetTokenInformation($id.Token, 20, [ref]$elevated, 4, [ref]$returned)) {
+            throw 'cannot read whether this process is elevated'
+        }
+        return ($elevated -ne 0)
+    } finally {
+        $id.Dispose()
+    }
+}
+
 function Invoke-Native {
     # Runs a native command; throws with its output when the exit code is not 0.
     param([string]$Exe, [string[]]$ArgList)
@@ -238,7 +263,9 @@ function New-ChildBootstrap([string]$ScriptPath, [string]$Sha256, [hashtable]$Pa
     # that were checked from memory (dot-sourced, so the script's $code is ours), exit with it.
     # Exit 3 means the file was not the text the parent wrote. No value from outside ever
     # appears in the code: the path, the hash and the parameters travel as one base64 blob of
-    # JSON (base64 has no quote of any kind), decoded inside.
+    # JSON (base64 has no quote of any kind), decoded inside. The command line holds 32767
+    # characters, so -EncodedCommand (UTF-16 in base64, about 2.7 characters per character of
+    # code) fails to start only with a -ZipPath of roughly 8300 characters or more: refused, safe.
     $ErrorActionPreference = 'Stop'
     $values = @{}
     foreach ($key in @($Parameters.Keys)) {
@@ -296,6 +323,8 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
     try {
         $info = New-Object CellGlideInstall.FileHandle+Info
         if (-not [CellGlideInstall.FileHandle]::GetFileInformationByHandle($stream.SafeFileHandle, [ref]$info)) { throw "cannot read what $Path is" }
+        # A final path longer than 1024 characters makes the call fail (it returns the size it
+        # needs), so such a file is refused: that fails safe, and our paths are far shorter.
         $buffer = New-Object Text.StringBuilder 1024
         if ([CellGlideInstall.FileHandle]::GetFinalPathNameByHandle($stream.SafeFileHandle, $buffer, 1024, 0) -eq 0) { throw "cannot read the final path of $Path" }
         $final = $buffer.ToString()
@@ -878,7 +907,13 @@ function Invoke-CellGlideUninstall {
         } else {
             $code = Invoke-UninstallPart -Purge:$Purge
         }
-        if ($Purge) { $code = Remove-UserDataAsUser $code $elevated }
+        if ($Purge) {
+            # Any elevated token keeps its hands off the user's profile, an administrator's or
+            # not (Test-TokenElevated); one that cannot be read counts as elevated.
+            $tokenElevated = $true
+            try { $tokenElevated = Test-TokenElevated } catch { }
+            $code = Remove-UserDataAsUser $code ($elevated -or $tokenElevated)
+        }
         else { Write-Host "Kept $env:LOCALAPPDATA\CellGlide (speed test history, preferences and the app log); run with -Purge to delete it." }
         return $code
     } catch {

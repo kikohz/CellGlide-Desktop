@@ -37,7 +37,29 @@ Describe 'install.ps1' {
         Test-SmartAppControlBlocks 1 | Should -BeTrue
         Test-SmartAppControlBlocks 0 | Should -BeFalse; Test-SmartAppControlBlocks 2 | Should -BeFalse
     }
-    It 'doctor''s check marks survive an OEM console, and the console encoding is put back' {
+    It 'doctor not running is said and does not throw' {
+        $savedDir = $InstallDir; $InstallDir = Join-Path $TestDrive 'no-such-install'
+        try {
+            Mock Write-Host {}
+            { Invoke-Doctor } | Should -Not -Throw
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '  (cellglide doctor could not run: *' }
+        } finally { $InstallDir = $savedDir }
+    }
+    It 'doctor''s output is printed in full, blank lines and a failing exit code included' {
+        $dir = Join-Path $TestDrive 'doctor-fails'; New-Item -ItemType Directory $dir | Out-Null
+        Add-Type -OutputAssembly (Join-Path $dir 'cellglide.exe') -OutputType ConsoleApplication -TypeDefinition @'
+public static class DoctorFails { public static int Main() {
+  System.Console.Out.Write("first\n\nthird\n"); System.Console.Error.Write("on stderr\n"); return 3; } }
+'@
+        $savedDir = $InstallDir; $InstallDir = $dir
+        try {
+            $script:printed = @()
+            Mock Write-Host { $script:printed += "$Object" }
+            Invoke-Doctor
+            $script:printed | Should -Be @('cellglide doctor:', '  first', '  ', '  third', '  on stderr')
+        } finally { $InstallDir = $savedDir }
+    }
+    It 'doctor''s check marks survive an OEM console, and the console encoding is left alone' {
         # W4 Task 10 item a: in an ordinary window (code page 437) the check marks came out as
         # three wrong characters. A stand-in cellglide.exe writes UTF-8 like the real one.
         $dir = Join-Path $TestDrive 'doctor'; New-Item -ItemType Directory $dir | Out-Null
@@ -383,9 +405,25 @@ public static class P { public static void Main() {
         }
         It 'an ordinary process starts the app directly' {
             Mock Test-Elevated { $false }
+            Mock Test-TokenElevated { $false }
             Mock Start-Process {}
             Start-AppAsUser
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\Program Files\CellGlide\app\CellGlide.exe' -and -not $ArgumentList }
+        }
+        It 'an elevated token that is no administrator''s, or one that cannot be read, also goes through explorer.exe' {
+            Mock Test-Elevated { $false }
+            Mock Start-Process {}
+            foreach ($token in { $true }, { throw 'no token' }) {
+                Mock Test-TokenElevated $token
+                Start-AppAsUser
+            }
+            Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq "$env:SystemRoot\explorer.exe" }
+        }
+        It 'Test-TokenElevated reads the token' {
+            $t = Test-TokenElevated
+            $t | Should -BeOfType [bool]
+            # An administrator to Test-Elevated always has an elevated token (or UAC is off).
+            if ((Test-Elevated) -and (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA -ne 0) { $t | Should -BeTrue }
         }
         It 'the uninstall entry is written with string and DWord values' {
             $key = 'HKCU:\Software\CellGlideTest-' + [guid]::NewGuid().ToString('N')

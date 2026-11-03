@@ -8,7 +8,7 @@ BeforeAll {
 Describe 'Shared functions are identical' {
     It 'in install.ps1 and uninstall.ps1' {
         # Decision 3's list, then the elevated-child and work-folder helpers both scripts use.
-        $names = 'Test-Elevated', 'Invoke-Native', 'Get-OurAdapter', 'Wait-AdapterGone', 'Stop-OurService', 'Remove-PathWithRetry',
+        $names = 'Test-Elevated', 'Test-TokenElevated', 'Invoke-Native', 'Get-OurAdapter', 'Wait-AdapterGone', 'Stop-OurService', 'Remove-PathWithRetry',
                  'Remove-PhantomDevice', 'Select-ProcessesToStop', 'Test-ReparsePoint', 'Get-ReparsePoints', 'Refuse-ReparsePoint',
                  'Stop-CellGlideProcesses', 'Get-TranscriptBody', 'New-ChildBootstrap', 'Get-FileIdentity', 'Copy-LogToParent',
                  'New-PrivateWorkDir', 'Remove-StaleWorkDirs'

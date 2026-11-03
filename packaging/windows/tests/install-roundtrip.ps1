@@ -13,8 +13,10 @@ cellglide0's two interface keys, C:\ProgramData\CellGlide and the phantom wintun
 GUID are all gone, while %LOCALAPPDATA%\CellGlide is kept with a message (this script runs elevated,
 and an elevated uninstall never deletes the user's own data); Apple's service as at the start; snapshot C = A.
 
--Purge deletes C:\ProgramData\CellGlide and %LOCALAPPDATA%\CellGlide, so when either exists the
-script refuses to run without -BackupDir. With it, both are copied there first (robocopy /E
+-Purge deletes C:\ProgramData\CellGlide; %LOCALAPPDATA%\CellGlide only when run from a normal
+(unelevated) window, so here it is kept. Both are still backed up, in case the uninstall does
+not behave as it should: when either exists the script refuses to run without -BackupDir. With
+it, both are copied there first (robocopy /E
 /COPYALL) and copied back after the uninstall; their file counts and the SHA-256 of
 settings.json and speedtests.json (where present) must match what they were. Every failed check
 is printed as FAIL and the exit code is then 1.
@@ -135,7 +137,7 @@ if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { Write-Host "$Zip does n
 $Zip = (Resolve-Path -LiteralPath $Zip).ProviderPath
 $existing = @($DataDir, $UserDataDir | Where-Object { Test-Path -LiteralPath $_ })
 if ($existing.Count -gt 0 -and -not $BackupDir) {
-    Write-Host "$($existing -join ' and ') exist; uninstall.ps1 -Purge would delete them. Run again with -BackupDir <new folder> to have them copied there first and put back afterwards."
+    Write-Host "$($existing -join ' and ') exist; uninstall.ps1 -Purge deletes ProgramData (and the per-user folder from a normal window). Run again with -BackupDir <new folder> to have them copied there first and put back afterwards."
     exit 1
 }
 if ($BackupDir) {

@@ -297,7 +297,18 @@ Describe 'uninstall.ps1' {
             Mock Write-Host {}
             Mock Invoke-UninstallPart { $script:part = @{ Purge = [bool]$Purge; Keep = $Keep }; 0 }
             Mock Remove-OwnUserData { $script:ownData = $true }
+            # The test shell's own token (elevated on CI) must not decide; the cases below say.
+            Mock Test-TokenElevated { $false }
             $script:part = $null; $script:ownData = $false
+        }
+        It 'an elevated token that is no administrator''s, or one that cannot be read, never deletes the user''s data' {
+            Mock Test-Elevated { $false }
+            Mock Invoke-UninstallChild { 0 }
+            foreach ($token in { $true }, { throw 'no token' }) {
+                Mock Test-TokenElevated $token
+                Invoke-CellGlideUninstall -Purge -ScriptPath 'C:\Temp\uninstall.ps1' | Should -Be 0
+                $script:ownData | Should -BeFalse
+            }
         }
         It 'an ordinary window hands the work to an elevated child, then removes the user''s own data with -Purge' {
             Mock Test-Elevated { $false }
