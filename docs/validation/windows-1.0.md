@@ -780,7 +780,7 @@ Speed test finished
 - **上传**：`publish-windows.ps1 -Dist dist\windows\1.0.0-ci -Commit <C> -Upload`，六个对象依次上传，HEAD 全部 200、大小一致；下载回来的两个 zip、`latest.json`、两个脚本与本地逐字节相同；`published.sha256` 增加三行。上传前确认 CDN 不缓存 404（`cf-cache-status: DYNAMIC`）。
 - **线上冒烟**（Step 8）：用户在普通窗口运行 `irm https://pkg.cellglide.com/install.ps1 | iex`，安装成功；服务、界面重新启动，doctor 7 项 ✓，已连接；装上的 `cellglide-service.exe` 与发布 zip 里的相同；线上 `latest.json` 与 `$dist\latest.json` 相同；两个 zip 和 `SHA256SUMS` 200；前后快照 identical。
   - 用户反馈：**浏览器下载 zip 时有警告**。这是 spec §8 已知的情况：未签名的文件从浏览器下载会带网络标记，浏览器和 SmartScreen 对新文件提示「不常下载」。README 推荐一行命令安装（不带网络标记），手动下载时用 `Unblock-File`。要消除只能靠代码签名或积累信誉，不在 1.0 范围。
-- **微软误报申诉**：两种架构各四个二进制（`cellglide-service.exe`、`cellglide.exe`、`app\CellGlide.exe`、`app\cellglide_native.dll`）放在 `dist\windows\wdsi-1.0.0\`，由用户用自己的微软账号提交；提交编号待补。
+- **微软误报申诉**：两种架构各四个二进制（`cellglide-service.exe`、`cellglide.exe`、`app\CellGlide.exe`、`app\cellglide_native.dll`）放在 `dist\windows\wdsi-1.0.0\`，打包成一个 `CellGlide-1.0.0-windows-binaries.zip`（SHA-256 `a9a2f8d3f7a92fdaf1231464acc046774b3a49bde973b560d84b58a321e32f83`），用户 2026-11-03 15:01 用自己的微软账号提交（Microsoft Defender Antivirus，定义版本 1.463.110.0，类别 PUA 误报）。提交编号 `08460b0d-92ee-41ba-a025-3e36f8f9f46f`，当时状态 Submitted，分析结果待定。
 - **官网**：`release-windows.json` 取自 CI 数据，更新日志日期定为 2026-11-03，CellProxy 提交 `934861b`。部署为 cellglide-site 版本 `1d6f25f8-7306-449a-9460-39bb5c6606cf`。
   - 第一次部署（`750aa1e0`）是 Windows 文本模式写出的 CRLF，`appcast.xml` 因此多了 2 字节；改用 LF 重新构建后再部署，线上 `appcast.xml` 与部署前逐字节相同。
   - zh、en、es 的下载页都有 Windows 与 Linux 两节、x64 的 SHA-256；两个 Windows 直链、四个 Linux 直链 200。
