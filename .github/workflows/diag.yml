@@ -6,16 +6,14 @@ jobs:
     steps:
       - shell: powershell
         run: |
-          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "before: $($_.LocalAddress) pid $($_.OwningProcess)" }
-          Get-Service SharedAccess | Format-List Name, Status, StartType, CanStop, DependentServices, ServicesDependedOn | Out-String
-          "--- Stop-Service"
-          try { Stop-Service SharedAccess -Force -ErrorAction Stop; "stopped" } catch { "ERR: $_" }
+          $p = (Get-NetUDPEndpoint -LocalPort 53).OwningProcess
+          "pid $p"; (Get-CimInstance Win32_Service | Where-Object ProcessId -eq $p | ForEach-Object Name) -join ','
+          sc.exe stop SharedAccess | Out-Null
+          Start-Sleep 20
           (Get-Service SharedAccess).Status
-          "--- net stop"
-          net stop SharedAccess /y
+          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after 20s: $($_.LocalAddress) pid $($_.OwningProcess)" }
+          taskkill /f /pid $p
+          Start-Sleep 5
           (Get-Service SharedAccess).Status
-          "--- sc"
-          sc.exe stop SharedAccess
-          sc.exe query SharedAccess
-          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after: $($_.LocalAddress) pid $($_.OwningProcess)" }
-          Get-Service | Where-Object { $_.Status -eq 'Running' -and $_.Name -match 'hns|SharedAccess|icssvc|docker' } | Format-Table Name, Status | Out-String
+          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after kill: $($_.LocalAddress) pid $($_.OwningProcess)" }
+          "done"
