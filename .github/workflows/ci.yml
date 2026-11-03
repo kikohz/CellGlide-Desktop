@@ -78,7 +78,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-wintun.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
-          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1
+          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
           if ($LASTEXITCODE -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $after
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -169,7 +169,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-wintun.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
-          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1
+          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
           if ($LASTEXITCODE -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $after
           if ($LASTEXITCODE -ne 0) { exit 1 }
