@@ -324,8 +324,14 @@ pub const REPLUG_AFTER: Duration = Duration::from_secs(60);
 /// How long after usbmuxd is reachable again the iPhones it finds were there all along, where
 /// usbmuxd runs from sign-in ([`MuxLife::FromSignIn`]). Apple Devices' AppleMobileDeviceProcess
 /// starts as a per-user startup task, often after the app; it first lists no iPhone and finds
-/// the one plugged in all along about 3 s later (W4 checklist i). The cost: plugging an iPhone
-/// in within this long of Apple Devices starting doesn't open the window.
+/// the one plugged in all along about 3 s later (W4 checklist i). The costs: plugging an iPhone
+/// in within this long of Apple Devices starting doesn't open the window; and an iPhone
+/// unplugged while usbmuxd was away counts as missing only from usbmuxd's first list after it
+/// is back (it can't be told earlier), so plugging it in again within [`REPLUG_AFTER`] of that
+/// list doesn't open the window either, however long usbmuxd was away. The 15 s is an estimate
+/// from one sign-in; a slower Apple Devices start would still open the window. The Windows
+/// service also reports usbmuxd as not reachable until its first look (cg-core's
+/// `MUX_UP_AT_START`), so this applies after a service (re)start too.
 pub const USBMUXD_SETTLE: Duration = Duration::from_secs(15);
 
 /// When usbmuxd runs, which decides what its not being reachable says about the iPhones.
@@ -355,7 +361,7 @@ impl MuxLife {
 pub struct KnownDevices {
     present: BTreeSet<String>,
     missing: BTreeMap<String, Instant>,
-    /// usbmuxd was seen unreachable and has listed nothing since.
+    /// usbmuxd was seen unreachable, and no list has come since.
     mux_away: bool,
     /// When usbmuxd listed iPhones again after being away: within [`USBMUXD_SETTLE`] of it the
     /// iPhones it finds are not plugged in.

@@ -171,6 +171,27 @@ enum Message {
     Shutdown(tokio::sync::oneshot::Sender<()>),
 }
 
+/// Whether usbmuxd counts as reachable before the first look at it. On Windows, Apple Devices'
+/// usbmuxd runs from sign-in, and the app takes the iPhones listed once usbmuxd is reachable
+/// again for ones plugged in all along (`cg_ipc::describe::ui::MuxLife::FromSignIn`): until
+/// the first look has an answer the service says "not reachable", not "no iPhone", so an app
+/// that connects right after the service (re)starts doesn't take the empty list for its
+/// baseline and the iPhone then listed for one just plugged in (W4 item i review). On Linux
+/// usbmuxd starts on plug-in and nothing changes.
+const MUX_UP_AT_START: bool = !cfg!(windows);
+
+/// The snapshot published before the actor has looked at anything.
+fn first_snapshot() -> Snapshot {
+    Snapshot {
+        state: if MUX_UP_AT_START {
+            ConnState::NoPhone
+        } else {
+            ConnState::NoUsbService
+        },
+        ..Snapshot::default()
+    }
+}
+
 #[derive(Clone)]
 pub struct Controller {
     messages: mpsc::Sender<Message>,
@@ -183,7 +204,7 @@ pub struct Controller {
 impl Controller {
     pub fn spawn(config: ControllerConfig) -> Controller {
         let (tx, rx) = mpsc::channel(16);
-        let (snapshot_tx, snapshot) = watch::channel(Snapshot::default());
+        let (snapshot_tx, snapshot) = watch::channel(first_snapshot());
         let time_zone = config.time_zone.clone();
         let history = config
             .health_dir
@@ -384,7 +405,7 @@ impl Actor {
             snapshot,
             mux_events: None,
             next_listen: Instant::now(),
-            mux_up: true,
+            mux_up: MUX_UP_AT_START,
             mux_listed_none: false,
             devices: Vec::new(),
             settings,
@@ -2077,6 +2098,17 @@ mod tests {
         .await;
     }
 
+    #[test]
+    fn before_the_first_look_usbmuxd_is_unknown_on_windows_only() {
+        let first = first_snapshot();
+        if cfg!(windows) {
+            assert_eq!(first.state, ConnState::NoUsbService);
+        } else {
+            assert_eq!(first, Snapshot::default());
+        }
+        assert!(first.devices.is_empty());
+    }
+
     #[tokio::test]
     async fn missing_usbmuxd_is_reported() {
         let backend = FakeBackend::new();
@@ -2220,6 +2252,10 @@ mod tests {
     async fn auto_off_with_no_phone_waits_for_connect() {
         let r = rig_auto(FakePhoneOptions::default(), any_port()).await;
         wait_for(&r.controller, "no phone", |s| s.state == ConnState::NoPhone).await;
+        // The first listen schedules a try, which the next tick (250 ms) drops for want of a
+        // phone; until then a try is in progress and auto off keeps it wanted. (Before the
+        // first listen published anything, the default snapshot already said NoPhone.)
+        tokio::time::sleep(Duration::from_millis(600)).await;
         r.controller
             .send(Command::SetSettings {
                 auto_connect: Some(false),
