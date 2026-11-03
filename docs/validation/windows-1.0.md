@@ -786,3 +786,7 @@ Speed test finished
   - zh、en、es 的下载页都有 Windows 与 Linux 两节、x64 的 SHA-256；两个 Windows 直链、四个 Linux 直链 200。
   - 分享图（`og-*.png`）是 Task 9 在 Windows 上渲染的，按提交的版本部署，没有在 Mac 上重新渲染。
 - **CellProxy**：`windows-1.0` 快进合并进 `main` 并推送（`9be3466..934861b`）。
+- **CellGlide-Desktop**：发布记录提交 `ad872b1` 的 CI（41729769183）通过后，`windows` 快进推送到 `main`（`a4622bb..ad872b1`）。
+- **标签**：`windows-1.0.0`（附注标签）指向提交 C `2eda48e`，已推送；它触发的 `windows-release` 只作存档，不重新上传。
+- **显示器超时**：交流电下恢复为 600 秒（`powercfg /query` 为 `0x00000258`）。
+- **流量**：发布当天的测试（安装、升级、卸载、装回、线上冒烟、诊断、部署）走手机网络合计约 10 MB；没有跑测速。
