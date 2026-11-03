@@ -765,3 +765,24 @@ Speed test finished
 - 提权判断：`Test-Elevated`（Administrators 角色）之外新增共用函数 `Test-TokenElevated`（TokenElevation）。不是管理员但有拆分令牌（例如 Backup Operators）的用户在提权窗口里运行时，卸载 `-Purge` 也不删 `%LOCALAPPDATA%\CellGlide`，安装结束时也经 explorer.exe 启动 App；读不到令牌时按已提权处理。
 - 托盘：Windows 11 把 Enter、Space 变成左键点击；点击时鼠标不在图标上，就按键盘打开面板（焦点显示为键盘焦点，有焦点框）。只有单元测试，没有用真键盘复核（不发合成输入）。
 - Windows 上的 service 在第一次查看 usbmuxd 之前报「usbmuxd 不可达」（之前是「没有 iPhone」），所以 service 刚（重）启动时连上的 App 不会把空列表当基准、再把一直插着的 iPhone 当成新插入。Linux 不变。
+
+## W4 发布（Task 12，2026-11-03）
+
+- **发布构建**：最终评审修复后重跑 workflow_dispatch，运行号 41585930719（https://github.com/kikohz/CellGlide-Desktop/actions/runs/41585930719），**提交 C** `2eda48ed48e09d26628bba773b17d968f4ceaecb`，四个产物齐全。上一节的运行 41570841320 早于收尾修补，不再使用。
+- **两个 zip 的 SHA-256**（上传前后都以它们为准）：
+  - x64 `12a80df169e438b477c47bb24862a3abaee2f4e7003d609dd2d79802d95bc20c`（38031221 字节）
+  - arm64 `f2f932d1b7585e91680aba913d8e6f96e4062022717dddef00826f9ed84dafd1`（37216778 字节，测试版）
+  - `install.ps1` `624fbd17b727c9b906397bbb6f666c4d9c49b397515b16cad18b09176e61b308`，`uninstall.ps1` `9a2ba7bcb76f78923c319dfc6a1e702b6ada27f8c4d78d2756b6bb0fc0784431`
+- **CI zip 上的清单子集**（Step 2，x64，本地源 `http://127.0.0.1:8770`，基线快照当天新拍）：a 安装（用户普通窗口，UAC 一次，`Reinstalling 1.0.0`，doctor 全 ✓，界面未提权）、d 连接、e DNS（泄漏检测「没有泄漏」，断开后 identical）、h′ 七页与面板、托盘菜单、j 升级（`-Unattended`，界面由计划任务在会话 1 重开）、k 用户在「已安装的应用」里卸载（全部清理、数据目录保留、Apple 服务仍在、identical）、a′ 装回：全部通过，快照每次 identical。
+- **诊断服务**：CellProxy `windows-1.0` 部署为 cellglide-diag 版本 `8ed5e607-2421-4691-8768-49abdfefbf1c`（15/15 测试）。Mac、Linux、Windows 三种 UA 发非 JSON 正文都返回 400。
+  - 部署时 wrangler 走隧道失败：它的遥测域名 `sparrow.cloudflare.com` 在手机一侧的 DNS 里是 NXDOMAIN、以该 SNI 的 TLS 被丢弃（我们的解析器不过滤；1.1.1.1 能解析），wrangler 4.149 的 API 调用随之超时。`WRANGLER_SEND_METRICS=false` 后走隧道正常。不是 CellGlide 的缺陷。这次部署时临时断开了隧道。
+- **正式诊断**：经 `cellglide.exe diagnostics --send --yes` 发送一次（与 App 同一个 cg-diag 客户端；没有用合成输入点按钮），code `CG-DUYG7`；随后 `npx wrangler r2 object delete "cellglide-diagnostics/reports/CG-DUYG7.json" --remote`：`Delete complete.`
+- **上传**：`publish-windows.ps1 -Dist dist\windows\1.0.0-ci -Commit <C> -Upload`，六个对象依次上传，HEAD 全部 200、大小一致；下载回来的两个 zip、`latest.json`、两个脚本与本地逐字节相同；`published.sha256` 增加三行。上传前确认 CDN 不缓存 404（`cf-cache-status: DYNAMIC`）。
+- **线上冒烟**（Step 8）：用户在普通窗口运行 `irm https://pkg.cellglide.com/install.ps1 | iex`，安装成功；服务、界面重新启动，doctor 7 项 ✓，已连接；装上的 `cellglide-service.exe` 与发布 zip 里的相同；线上 `latest.json` 与 `$dist\latest.json` 相同；两个 zip 和 `SHA256SUMS` 200；前后快照 identical。
+  - 用户反馈：**浏览器下载 zip 时有警告**。这是 spec §8 已知的情况：未签名的文件从浏览器下载会带网络标记，浏览器和 SmartScreen 对新文件提示「不常下载」。README 推荐一行命令安装（不带网络标记），手动下载时用 `Unblock-File`。要消除只能靠代码签名或积累信誉，不在 1.0 范围。
+- **微软误报申诉**：两种架构各四个二进制（`cellglide-service.exe`、`cellglide.exe`、`app\CellGlide.exe`、`app\cellglide_native.dll`）放在 `dist\windows\wdsi-1.0.0\`，由用户用自己的微软账号提交；提交编号待补。
+- **官网**：`release-windows.json` 取自 CI 数据，更新日志日期定为 2026-11-03，CellProxy 提交 `934861b`。部署为 cellglide-site 版本 `1d6f25f8-7306-449a-9460-39bb5c6606cf`。
+  - 第一次部署（`750aa1e0`）是 Windows 文本模式写出的 CRLF，`appcast.xml` 因此多了 2 字节；改用 LF 重新构建后再部署，线上 `appcast.xml` 与部署前逐字节相同。
+  - zh、en、es 的下载页都有 Windows 与 Linux 两节、x64 的 SHA-256；两个 Windows 直链、四个 Linux 直链 200。
+  - 分享图（`og-*.png`）是 Task 9 在 Windows 上渲染的，按提交的版本部署，没有在 Mac 上重新渲染。
+- **CellProxy**：`windows-1.0` 快进合并进 `main` 并推送（`9be3466..934861b`）。

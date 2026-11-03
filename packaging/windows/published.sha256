@@ -2,3 +2,6 @@
 # each: "<sha256>  windows/<version>/<file>". scripts\publish-windows.ps1 appends a version's lines
 # after a completed upload and refuses to publish different bytes for a version listed here.
 # Published bytes never change. Commit this file after every upload.
+12a80df169e438b477c47bb24862a3abaee2f4e7003d609dd2d79802d95bc20c  windows/1.0.0/CellGlide-1.0.0-windows-x64.zip
+f2f932d1b7585e91680aba913d8e6f96e4062022717dddef00826f9ed84dafd1  windows/1.0.0/CellGlide-1.0.0-windows-arm64.zip
+6480b4f8b3426822e8d380d7893e4ec6b4e6f1f225512256b0f5529d3a242aec  windows/1.0.0/SHA256SUMS
