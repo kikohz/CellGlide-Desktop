@@ -68,13 +68,6 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # The runner image's dockerd listens on 172.x.x.1:53, which the resolver-port test (an exclusive
-          # bind of 0.0.0.0:53) cannot coexist with. Stop it before the first snapshot.
-          Stop-Service docker -ErrorAction SilentlyContinue
-          # Internet Connection Sharing (SharedAccess) holds 0.0.0.0:53 on the arm64 image.
-          Stop-Service SharedAccess -Force -ErrorAction Continue
-          (Get-Service SharedAccess, docker -ErrorAction SilentlyContinue | Format-Table Name, Status | Out-String).Trim()
-          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "UDP 53 still held: $($_.LocalAddress) pid $($_.OwningProcess)" }
           $before = "$env:RUNNER_TEMP\net-before.json"
           $after = "$env:RUNNER_TEMP\net-after.json"
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $before
