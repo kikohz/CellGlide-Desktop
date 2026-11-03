@@ -133,11 +133,14 @@ def write_all(dist: Path, outputs: dict) -> None:
     3. The .tmp files are renamed into place, in order.
     If step 2 or 3 fails, the new files already in place are removed and the .bak files are moved
     back, so the folder ends with either the complete new set or the old files exactly as they
-    were. The .tmp and .bak files are removed in every case (best effort).
+    were. The .tmp files are removed in every case (best effort), and so are the .bak files,
+    except one that could not be moved back: it is then the only copy of the old file, so it is
+    kept and named on stderr.
     """
     temps = []
     backups = []
     placed = []
+    kept = set()
     try:
         for name, text in outputs.items():
             tmp = dist / f"{name}.tmp"
@@ -161,11 +164,13 @@ def write_all(dist: Path, outputs: dict) -> None:
         for bak, final in backups:
             try:
                 os.replace(bak, final)
-            except OSError:
-                pass
+            except OSError as e:
+                kept.add(bak)
+                print(f"error: could not put {final.name} back ({e}); the old file is kept as {bak}",
+                      file=sys.stderr)
         raise
     finally:
-        for path in [t for t, _ in temps] + [b for b, _ in backups]:
+        for path in [t for t, _ in temps] + [b for b, _ in backups if b not in kept]:
             try:
                 if path.exists():
                     path.unlink()

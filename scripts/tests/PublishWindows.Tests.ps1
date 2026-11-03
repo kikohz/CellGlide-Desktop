@@ -142,6 +142,14 @@ Describe 'publish-windows plan and record' {
         $out[0] | Should -BeTrue
         $out[0] | Should -BeOfType [bool]
     }
+    It 'an npx that never ran is a failure, even after a put that succeeded' {
+        # Like npx missing: nothing native runs, so nothing sets $LASTEXITCODE.
+        function npx { Write-Error 'npx not found' }
+        cmd /c exit 0
+        $item = (Get-UploadPlan '1.0.0')[0]
+        $out = @(Invoke-WranglerPut $item 'C:\d' 6>&1)
+        @($out | Where-Object { $_ -is [bool] }) | Should -Be @($false)
+    }
     It 'accepts only a single $true as a successful put' {
         Test-PutResult $true | Should -BeTrue
         Test-PutResult $false | Should -BeFalse

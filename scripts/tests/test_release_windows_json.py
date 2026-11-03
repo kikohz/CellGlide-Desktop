@@ -3,7 +3,7 @@
 #  or: python -I -B scripts/tests/test_release_windows_json.py
 # (python -I -m unittest scripts/tests/<file>.py does not work: -I keeps the current directory off
 # sys.path, so the dotted module name cannot be imported.)
-import hashlib, importlib.util, json, subprocess, sys, tempfile, unittest
+import hashlib, importlib.util, io, json, subprocess, sys, tempfile, unittest
 from unittest import mock
 from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "release-windows-json.py"
@@ -219,6 +219,28 @@ class ReleaseWindowsJson(unittest.TestCase):
         for name in ("SHA256SUMS", "latest.json", "release-windows.json"):
             self.assertEqual((self.dist / name).read_text(encoding="utf-8"), "old " + name, name)
         self.assertEqual([p.name for p in self.dist.iterdir() if p.suffix in (".tmp", ".bak")], [])
+
+    def test_a_backup_that_cannot_be_put_back_is_kept(self):
+        make_dist(self.dist)
+        for name in ("SHA256SUMS", "latest.json", "release-windows.json"):
+            (self.dist / name).write_text("old " + name, encoding="utf-8")
+        real_replace = rwj.os.replace
+        # latest.json's new file fails to go in, and its old one then fails to come back.
+        def restore_fails(src, dst):
+            if Path(src).name in ("latest.json.tmp", "latest.json.bak"):
+                raise OSError("disk full")
+            real_replace(src, dst)
+        with mock.patch.object(rwj.os, "replace", side_effect=restore_fails), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            with self.assertRaises(OSError):
+                rwj.write_all(self.dist, OUTPUTS)
+        # latest.json's old bytes survive in its .bak, which is named; the others are back.
+        self.assertFalse((self.dist / "latest.json").exists())
+        self.assertEqual((self.dist / "latest.json.bak").read_text(encoding="utf-8"), "old latest.json")
+        self.assertIn("latest.json.bak", err.getvalue())
+        for name in ("SHA256SUMS", "release-windows.json"):
+            self.assertEqual((self.dist / name).read_text(encoding="utf-8"), "old " + name, name)
+        self.assertEqual([p.name for p in self.dist.iterdir() if p.suffix in (".tmp", ".bak")], ["latest.json.bak"])
 
     def test_write_all_without_old_files_fails_clean(self):
         make_dist(self.dist)

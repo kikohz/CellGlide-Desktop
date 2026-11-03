@@ -220,6 +220,9 @@ function Invoke-WranglerPut($Item, [string]$Dist) {
     # Its output is captured (never part of the return value) and printed when it fails.
     $ErrorActionPreference = 'Continue'   # native stderr through 2>&1 must not throw
     $npxArgs = Get-WranglerArgs $Item $Dist
+    # When npx cannot start at all, PowerShell leaves $LASTEXITCODE as it was (possibly 0 from
+    # an earlier put); -1 first, so that is never read as success.
+    $global:LASTEXITCODE = -1
     $out = & npx @npxArgs 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) {
