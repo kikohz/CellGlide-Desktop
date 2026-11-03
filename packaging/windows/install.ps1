@@ -867,7 +867,9 @@ function Set-DataDirAcl {
         '/grant:r', "${SidAdmins}:(OI)(CI)F",
         '/grant:r', "NT SERVICE\${ServiceName}:(OI)(CI)M") | Out-Null
     if (Test-ReparsePoint (Get-Item -LiteralPath $DataDir -Force)) { Refuse-ReparsePoint $DataDir }
-    if ($existed -and -not (Test-DataDirAdminOnly $DataDir -OwnersOnly)) { throw $DataDirNotOurs }
+    # Always, also on a folder created just now: ProgramData lets Users add to it until the root
+    # is locked, so a child they made in that window is refused before Lock-DataTree reaches it.
+    if (-not (Test-DataDirAdminOnly $DataDir -OwnersOnly)) { throw $DataDirNotOurs }
     # Only administrators can add to the root now; created here, they are locked below too.
     New-Item -ItemType Directory -Force -Path $health, $logs | Out-Null
     Lock-DataTree $DataDir
