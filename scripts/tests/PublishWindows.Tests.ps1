@@ -8,6 +8,49 @@ BeforeAll { . "$PSScriptRoot\Import-ScriptFunctions.ps1"; . Import-ScriptFunctio
     function Get-Sha([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
     function Write-Lf([string]$Path, [string]$Text) { [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding $false)) }
 
+    # A zip at $Path with these top-level entries (name -> bytes).
+    function New-FakeZip([string]$Path, [hashtable]$Entries) {
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($name in ($Entries.Keys | Sort-Object)) {
+                $s = $zip.CreateEntry($name).Open()
+                try { $s.Write($Entries[$name], 0, $Entries[$name].Length) } finally { $s.Dispose() }
+            }
+        } finally { $zip.Dispose() }
+    }
+
+    # Commits everything in $Root's packaging\ and Cargo.toml (git init first if needed); returns nothing.
+    function New-FakeCommit([string]$Root, [string]$Message) {
+        # git's warnings on stderr must not stop a run under 'Stop'; line endings are kept as written.
+        $ErrorActionPreference = 'Continue'
+        if (-not (Test-Path -LiteralPath (Join-Path $Root '.git'))) {
+            $null = & git -C $Root init -q 2>&1
+            $null = & git -C $Root config core.autocrlf false 2>&1
+        }
+        $null = & git -C $Root add -- Cargo.toml packaging 2>&1
+        $null = & git -C $Root -c user.name=test -c user.email=test@example.invalid commit -q -m $Message 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "git commit in $Root failed" }
+    }
+
+    # Rewrites SHA256SUMS, latest.json and release-windows.json for the zips now in $Dist.
+    function Update-FakeSums([string]$Dist) {
+        $sums = ''; $latest = Get-Content -Raw (Join-Path $Dist 'latest.json') | ConvertFrom-Json
+        $site = Get-Content -Raw (Join-Path $Dist 'release-windows.json') | ConvertFrom-Json
+        foreach ($arch in 'arm64', 'x64') {
+            $name = "CellGlide-1.0.0-windows-$arch.zip"; $path = Join-Path $Dist $name
+            $sha = Get-Sha $path; $size = (Get-Item $path).Length
+            $sums += "$sha  $name`n"
+            $latest.$arch.sha256 = $sha; $latest.$arch.size = $size
+            foreach ($f in $site.files) { if ($f.arch -eq $arch) { $f.sha256 = $sha; $f.size = $size } }
+        }
+        Write-Lf (Join-Path $Dist 'SHA256SUMS') $sums
+        Write-Lf (Join-Path $Dist 'latest.json') (($latest | ConvertTo-Json -Depth 5) + "`n")
+        Write-Lf (Join-Path $Dist 'release-windows.json') (($site | ConvertTo-Json -Depth 5) + "`n")
+    }
+
+    function Get-Head([string]$Root) { $ErrorActionPreference = 'Continue'; (& git -C $Root rev-parse HEAD 2>$null).Trim() }
+
     # A repository with Cargo.toml 1.0.0, the two scripts, the record header and a consistent
     # dist\windows\1.0.0\ made for $Base (as release-windows-json.py writes it).
     function New-FakeRepo([string]$Root, [string]$Base = 'https://pkg.cellglide.com') {
@@ -16,12 +59,14 @@ BeforeAll { . "$PSScriptRoot\Import-ScriptFunctions.ps1"; . Import-ScriptFunctio
         Write-Lf (Join-Path $Root 'packaging\windows\install.ps1') "Write-Host 'install'`n"
         Write-Lf (Join-Path $Root 'packaging\windows\uninstall.ps1') "Write-Host 'uninstall'`n"
         Write-Lf (Join-Path $Root 'packaging\windows\published.sha256') "# header`n"
+        # A git work tree with the scripts committed; its HEAD is "commit C" (Invoke-Fake's -Commit).
+        New-FakeCommit $Root 'C'
         $dist = Join-Path $Root 'dist\windows\1.0.0'
         $latest = [ordered]@{ version = '1.0.0' }
         $files = @()
         foreach ($arch in 'x64', 'arm64') {
             $name = "CellGlide-1.0.0-windows-$arch.zip"
-            [IO.File]::WriteAllBytes((Join-Path $dist $name), [Text.Encoding]::ASCII.GetBytes("zip bytes $arch"))
+            New-FakeZip (Join-Path $dist $name) @{ 'uninstall.ps1' = [IO.File]::ReadAllBytes((Join-Path $Root 'packaging\windows\uninstall.ps1')); 'version.txt' = [Text.Encoding]::ASCII.GetBytes("1.0.0 $arch`n") }
             $entry = [ordered]@{ url = "$Base/windows/1.0.0/$name"; sha256 = (Get-Sha (Join-Path $dist $name)); size = (Get-Item (Join-Path $dist $name)).Length; test_build = ($arch -eq 'arm64') }
             $latest[$arch] = $entry
             $files += [ordered]@{ kind = 'zip'; arch = $arch; url = $entry.url; size = $entry.size; sha256 = $entry.sha256; test_build = $entry.test_build }
@@ -42,7 +87,9 @@ BeforeAll { . "$PSScriptRoot\Import-ScriptFunctions.ps1"; . Import-ScriptFunctio
     #   -FetchStatus    reading that key back answers this status instead of 200/404
     function Invoke-Fake {
         param([string]$Root, [switch]$Upload, [string]$Dist = '', [string]$FailKey = '', [string]$NoisyFailKey = '', [string]$NoisyOkKey = '',
-            [string]$FetchError = '', [hashtable]$FetchStatus = @{}, [hashtable]$WrongLength = @{}, [bool]$Npx = $true)
+            [string]$FetchError = '', [hashtable]$FetchStatus = @{}, [hashtable]$WrongLength = @{}, [bool]$Npx = $true,
+            [string]$Commit = '(head)')
+        if ($Commit -eq '(head)') { $Commit = Get-Head $Root }
         $state = @{ Puts = New-Object Collections.Generic.List[string]; Fetches = New-Object Collections.Generic.List[string]; Bucket = (Join-Path $Root 'bucket')
             FailKey = $FailKey; NoisyFailKey = $NoisyFailKey; NoisyOkKey = $NoisyOkKey; FetchError = $FetchError; FetchStatus = $FetchStatus; WrongLength = $WrongLength }
         $null = New-Item -ItemType Directory -Force $state.Bucket
@@ -72,7 +119,7 @@ BeforeAll { . "$PSScriptRoot\Import-ScriptFunctions.ps1"; . Import-ScriptFunctio
             Copy-Item -LiteralPath $path -Destination $OutFile
             return 200 }.GetNewClosure()
         $npxCheck = if ($Npx) { { $true } } else { { $false } }
-        $out = @(Invoke-PublishWindows -Dist $Dist -Upload:$Upload -Root $Root -HasNpx $npxCheck -Put $put -Fetch $fetch -Head $head 6>&1)
+        $out = @(Invoke-PublishWindows -Dist $Dist -Commit $Commit -Upload:$Upload -Root $Root -HasNpx $npxCheck -Put $put -Fetch $fetch -Head $head 6>&1)
         return [pscustomobject]@{
             Code = $out[-1]
             Text = (@($out | Select-Object -SkipLast 1 | ForEach-Object { "$_" }) -join "`n")
@@ -241,6 +288,79 @@ Describe 'publish-windows run against a fake bucket' {
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'non-ASCII'
         $r.Puts | Should -BeNullOrEmpty
+    }
+    It 'refuses a zip whose uninstall.ps1 differs from packaging\windows\ (another commit''s build)' {
+        $zip = Join-Path $script:DistDir 'CellGlide-1.0.0-windows-arm64.zip'
+        Remove-Item -LiteralPath $zip
+        New-FakeZip $zip @{ 'uninstall.ps1' = [Text.Encoding]::ASCII.GetBytes("Write-Host 'older uninstall'`n") }
+        Update-FakeSums $script:DistDir
+        $r = Invoke-Fake $script:Root
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match ([regex]::Escape("CellGlide-1.0.0-windows-arm64.zip's uninstall.ps1 is not byte-identical"))
+        $r = Invoke-Fake $script:Root -Upload
+        $r.Code | Should -Be 1
+        $r.Puts | Should -BeNullOrEmpty
+    }
+    It 'refuses a zip with no uninstall.ps1, and one carrying a different install.ps1' {
+        $zip = Join-Path $script:DistDir 'CellGlide-1.0.0-windows-x64.zip'
+        Remove-Item -LiteralPath $zip
+        New-FakeZip $zip @{ 'version.txt' = [Text.Encoding]::ASCII.GetBytes("1.0.0`n") }
+        $arm = Join-Path $script:DistDir 'CellGlide-1.0.0-windows-arm64.zip'
+        Remove-Item -LiteralPath $arm
+        New-FakeZip $arm @{ 'uninstall.ps1' = [IO.File]::ReadAllBytes((Join-Path $script:Root 'packaging\windows\uninstall.ps1')); 'install.ps1' = [Text.Encoding]::ASCII.GetBytes("other`n") }
+        Update-FakeSums $script:DistDir
+        $r = Invoke-Fake $script:Root
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'CellGlide-1.0.0-windows-x64.zip has no uninstall.ps1'
+        $r.Text | Should -Match ([regex]::Escape("CellGlide-1.0.0-windows-arm64.zip's install.ps1 is not byte-identical"))
+    }
+    It 'refuses uncommitted changes to the scripts' {
+        Write-Lf (Join-Path $script:Root 'packaging\windows\install.ps1') "Write-Host 'experiment'`n"
+        $r = Invoke-Fake $script:Root -Upload
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'uncommitted changes to the scripts'
+        $r.Puts | Should -BeNullOrEmpty
+        # published.sha256, which the script itself writes, is not a reason.
+        Add-Content -LiteralPath $script:Record -Value '# a note'
+        Write-Lf (Join-Path $script:Root 'packaging\windows\install.ps1') "Write-Host 'install'`n"
+        (Invoke-Fake $script:Root).Code | Should -Be 0
+    }
+    It 'refuses a checkout that is not a git work tree' {
+        Remove-Item -LiteralPath (Join-Path $script:Root '.git') -Recurse -Force
+        $r = Invoke-Fake $script:Root -Commit ''
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'not a git work tree'
+    }
+    It 'needs -Commit to upload, and the scripts as they were at that commit' {
+        $c = Get-Head $script:Root
+        $r = Invoke-Fake $script:Root -Upload -Commit ''
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match '-Upload needs -Commit'
+        $r.Puts | Should -BeNullOrEmpty
+        # A dry run without -Commit is fine, and says what it did not check.
+        $r = Invoke-Fake $script:Root -Commit ''
+        $r.Code | Should -Be 0
+        $r.Text | Should -Match 'not compared with the build commit'
+        # A later commit that changes only other files: still fine.
+        Write-Lf (Join-Path $script:Root 'packaging\windows\published.sha256') "# header`n# docs`n"
+        New-FakeCommit $script:Root 'docs only'
+        (Invoke-Fake $script:Root -Commit $c).Code | Should -Be 0
+        # A later commit that changes install.ps1: the zips' commit C no longer matches.
+        Write-Lf (Join-Path $script:Root 'packaging\windows\install.ps1') "Write-Host 'install v2'`n"
+        New-FakeCommit $script:Root 'changed installer'
+        $r = Invoke-Fake $script:Root -Upload -Commit $c
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match "differs from commit $c"
+        $r.Puts | Should -BeNullOrEmpty
+        # Unknown and malformed commits.
+        (Invoke-Fake $script:Root -Commit ('0' * 40)).Text | Should -Match 'is not in this repository'
+        (Invoke-Fake $script:Root -Commit 'HEAD~1').Text | Should -Match 'is not a commit hash'
+    }
+    It 'prints both scripts'' SHA-256' {
+        $r = Invoke-Fake $script:Root
+        foreach ($s in 'install.ps1', 'uninstall.ps1') {
+            $r.Text | Should -Match ([regex]::Escape("$s SHA-256 $(Get-Sha (Join-Path $script:Root "packaging\windows\$s"))"))
+        }
     }
     It 'refuses, even in a dry run, to change bytes that were published' {
         $sha = Get-Sha (Join-Path $script:DistDir 'CellGlide-1.0.0-windows-x64.zip')

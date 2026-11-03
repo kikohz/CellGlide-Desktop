@@ -1,4 +1,4 @@
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish-windows.ps1 [-Dist <dir>] [-Upload]
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish-windows.ps1 [-Dist <dir>] [-Commit <sha>] [-Upload]
 #
 # Publishes a Windows release to pkg.cellglide.com (Cloudflare R2 bucket cellglide-pkg). Without
 # -Upload (the default) it is a dry run: everything is checked, the upload plan is printed, and
@@ -15,7 +15,19 @@
 #      sha256, size, test_build) and use one base URL; data made with a loopback --base (a local
 #      rehearsal) is reported, and -Upload refuses it;
 #   4. install.ps1 and uninstall.ps1 are taken from packaging\windows\ (copied into -Dist) and are
-#      ASCII only;
+#      ASCII only; their SHA-256 is printed (record it in the validation doc). They are tied to
+#      the build (final review finding 2):
+#      a. each zip's own top-level uninstall.ps1 (and install.ps1, should a zip ever carry one)
+#         must be byte-identical to packaging\windows\'s, so Settings > Installed apps and
+#         "irm .../uninstall.ps1 | iex" run the same script;
+#      b. the checkout must be a git work tree in which packaging\windows\install.ps1 and
+#         uninstall.ps1 have no uncommitted changes (published.sha256, which this script writes,
+#         is not checked);
+#      c. -Commit <sha> is commit C, the commit the CI release run built the zips from
+#         ("gh run view <run> --json headSha -q .headSha"; the artifacts carry no commit of their
+#         own). Both scripts must be the same at <sha> as in this checkout, so later commits
+#         that only change docs are fine. -Upload refuses to run without -Commit; a dry run
+#         checks it when given.
 #   5. packaging\windows\published.sha256 (lines "<hex>  windows/<v>/<file>") either has no lines
 #      for <v>, or records exactly these three versioned files with these hashes: bytes that were
 #      published once are never changed.
@@ -41,6 +53,7 @@
 # Exit code 0 when everything passed, 1 otherwise.
 param(
     [string]$Dist = '',
+    [string]$Commit = '',
     [switch]$Upload
 )
 
@@ -50,6 +63,77 @@ $Wrangler = 'wrangler@4.31.0'
 $Arches = @('x64', 'arm64')
 $ImmutableCache = 'public, max-age=31536000, immutable'
 $TextType = 'text/plain; charset=utf-8'
+
+function Test-ZipScripts([string]$Dist, [string]$Version, [string]$Root) {
+    # Problems (strings) when a zip's top-level uninstall.ps1 or install.ps1 differs from
+    # packaging\windows\'s; uninstall.ps1 must be in every zip.
+    $ErrorActionPreference = 'Stop'
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $problems = @()
+    foreach ($arch in $Arches) {
+        $name = "CellGlide-$Version-windows-$arch.zip"
+        try {
+            $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $Dist $name))
+        } catch {
+            $problems += "$name cannot be opened as a zip: $($_.Exception.Message)"
+            continue
+        }
+        try {
+            foreach ($script in 'uninstall.ps1', 'install.ps1') {
+                $entry = $zip.GetEntry($script)
+                if (-not $entry) {
+                    if ($script -eq 'uninstall.ps1') { $problems += "$name has no uninstall.ps1" }
+                    continue
+                }
+                $stream = $entry.Open()
+                try {
+                    $buffer = New-Object IO.MemoryStream
+                    $stream.CopyTo($buffer)
+                    $inZip = $buffer.ToArray()
+                } finally { $stream.Dispose() }
+                $local = [IO.File]::ReadAllBytes((Join-Path $Root "packaging\windows\$script"))
+                if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$inZip, [byte[]]$local)) {
+                    $problems += "$name's $script is not byte-identical to packaging\windows\$script (the zips were built from another commit)"
+                }
+            }
+        } finally { $zip.Dispose() }
+    }
+    return $problems
+}
+
+function Invoke-Git([string]$Root, [string[]]$GitArgs) {
+    # Runs git in $Root; returns its exit code and output lines.
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = -1
+    $out = @(& git -C $Root @GitArgs 2>&1 | ForEach-Object { "$_" })
+    return [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
+}
+
+function Test-ScriptsCommitted([string]$Root, [string]$Commit) {
+    # Problems (strings) when install.ps1 / uninstall.ps1 are not committed, or (with $Commit)
+    # differ from that commit's.
+    $ErrorActionPreference = 'Stop'
+    $paths = @('packaging/windows/install.ps1', 'packaging/windows/uninstall.ps1')
+    $tree = Invoke-Git $Root @('rev-parse', '--is-inside-work-tree')
+    if ($tree.Code -ne 0 -or ($tree.Out -join '') -ne 'true') {
+        return @("$Root is not a git work tree, so the scripts cannot be tied to a commit")
+    }
+    $problems = @()
+    $status = Invoke-Git $Root (@('status', '--porcelain', '--') + $paths)
+    if ($status.Code -ne 0) { $problems += "git status failed: $($status.Out -join ' ')" }
+    elseif (@($status.Out | Where-Object { $_ }).Count -gt 0) {
+        $problems += "uncommitted changes to the scripts: $((@($status.Out | Where-Object { $_ })) -join '; ')"
+    }
+    if ($Commit) {
+        if ($Commit -notmatch '\A[0-9a-fA-F]{7,40}\z') { return $problems + "-Commit '$Commit' is not a commit hash" }
+        $exists = Invoke-Git $Root @('cat-file', '-e', "$Commit^{commit}")
+        if ($exists.Code -ne 0) { return $problems + "commit $Commit is not in this repository (git fetch?)" }
+        $diff = Invoke-Git $Root (@('diff', '--quiet', $Commit, '--') + $paths)
+        if ($diff.Code -eq 1) { $problems += "install.ps1 or uninstall.ps1 here differs from commit $Commit, which the zips were built from" }
+        elseif ($diff.Code -ne 0) { $problems += "git diff against $Commit failed: $($diff.Out -join ' ')" }
+    }
+    return $problems
+}
 
 function Get-WorkspaceVersion([string]$CargoToml) {
     $ErrorActionPreference = 'Stop'
@@ -295,6 +379,7 @@ function Invoke-PublishWindows {
     # and pkg.cellglide.com.
     param(
         [string]$Dist = '',
+        [string]$Commit = '',
         [switch]$Upload,
         [string]$Root = (Split-Path -Parent $PSScriptRoot),
         [scriptblock]$HasNpx = { [bool](Get-Command npx -ErrorAction SilentlyContinue) },
@@ -354,7 +439,17 @@ function Invoke-PublishWindows {
             $bytes = [IO.File]::ReadAllBytes($source)
             if (-not (Test-AsciiOnly $bytes)) { Write-Host "error: $source has non-ASCII bytes (Windows PowerShell 5.1 would misread it)"; return 1 }
             [IO.File]::WriteAllBytes((Join-Path $Dist $script), $bytes)
+            Write-Host "$script SHA-256 $((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant())"
         }
+        # 4a-c. The scripts are the ones the zips were built with, and committed.
+        $bound = @(Test-ZipScripts $Dist $Version $Root) + @(Test-ScriptsCommitted $Root $Commit)
+        if ($Upload -and -not $Commit) { $bound += '-Upload needs -Commit <sha>: the commit the CI release run built the zips from' }
+        if ($bound.Count -gt 0) {
+            foreach ($p in $bound) { Write-Host "error: $p" }
+            return 1
+        }
+        if ($Commit) { Write-Host "the scripts are committed and the same as at $Commit" }
+        else { Write-Host 'the scripts are committed (no -Commit given: not compared with the build commit)' }
 
         # 5. Published bytes never change.
         $hashes = @{}
@@ -459,5 +554,5 @@ function Invoke-PublishWindows {
     }
 }
 
-$code = Invoke-PublishWindows -Dist $Dist -Upload:$Upload
+$code = Invoke-PublishWindows -Dist $Dist -Commit $Commit -Upload:$Upload
 exit $code
