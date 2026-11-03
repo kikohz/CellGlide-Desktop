@@ -11,7 +11,7 @@ Describe 'Shared functions are identical' {
         $names = 'Test-Elevated', 'Test-TokenElevated', 'Invoke-Native', 'Get-OurAdapter', 'Wait-AdapterGone', 'Stop-OurService', 'Remove-PathWithRetry',
                  'Remove-PhantomDevice', 'Select-ProcessesToStop', 'Test-ReparsePoint', 'Get-ReparsePoints', 'Refuse-ReparsePoint',
                  'Stop-CellGlideProcesses', 'Get-TranscriptBody', 'New-ChildBootstrap', 'Get-FileIdentity', 'Copy-LogToParent',
-                 'New-PrivateWorkDir', 'Remove-StaleWorkDirs'
+                 'New-PrivateWorkDir', 'Remove-StaleWorkDirs', 'Test-AdminSid', 'Test-DataDirAdminOnly'
         foreach ($n in $names) {
             $script:Install.ContainsKey($n) | Should -BeTrue -Because "install.ps1 must define $n"
             $script:Uninstall.ContainsKey($n) | Should -BeTrue -Because "uninstall.ps1 must define $n"

@@ -468,12 +468,15 @@ function Test-AdminSid([string]$Sid) {
     return ($Sid -in 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544' -or $Sid -like 'S-1-5-80-*')
 }
 
-function Test-DataDirAdminOnly([string]$Dir) {
+function Test-DataDirAdminOnly([string]$Dir, [switch]$OwnersOnly) {
     # True when $Dir and everything in it are owned by SYSTEM, Administrators or a service SID
     # and grant write-class rights to nobody else, so no standard user could have planted or can
     # plant anything in it before the elevated purge. C:\ProgramData lets Users create folders,
     # so the owner matters as much as the ACL: a user who pre-created ProgramData\CellGlide owns
     # it, and an owner can always rewrite the ACL. A link anywhere fails too (never followed).
+    # -OwnersOnly (the installer, before it takes a pre-existing folder over): owners and links
+    # only, since a folder an administrator made but never locked still inherits ProgramData's
+    # Users entries.
     $ErrorActionPreference = 'Stop'
     $readOnly = [int][Security.AccessControl.FileSystemRights]'ReadAndExecute, ReadPermissions, Synchronize'
     $pending = New-Object System.Collections.Generic.Stack[string]
@@ -484,7 +487,7 @@ function Test-DataDirAdminOnly([string]$Dir) {
         if (Test-ReparsePoint $item) { return $false }
         $acl = Get-Acl -LiteralPath $path
         if (-not (Test-AdminSid $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value)) { return $false }
-        foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        foreach ($ace in @(if (-not $OwnersOnly) { $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) })) {
             if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
             if (Test-AdminSid $ace.IdentityReference.Value) { continue }
             if (([int]$ace.FileSystemRights -band -bnot $readOnly) -ne 0) { return $false }

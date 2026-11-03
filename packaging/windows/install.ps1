@@ -85,6 +85,7 @@ $AdapterInstanceId = "SWD\Wintun\$AdapterGuid"
 # Well-known SIDs, so the script works on any display language.
 $SidSystem = '*S-1-5-18'
 $SidAdmins = '*S-1-5-32-544'
+$DataDirNotOurs = "$DataDir was not created by an administrator (it, or something in it, is owned by another account, or holds a link). Delete it and run the installer again."
 $SidUsers = '*S-1-5-32-545'
 # The first line of packaging/licenses/windows-end-user-notice.txt, word for word.
 $EndUserNotice = 'CellGlide includes Microsoft Windows App SDK and Windows SDK components that are licensed to you under the Microsoft Software License Terms reproduced in this file (the Windows App SDK terms and the Windows SDK terms); by installing or using CellGlide you agree to those terms for those components.'
@@ -774,6 +775,44 @@ function Set-OurService {
         'SeChangeNotifyPrivilege/SeImpersonatePrivilege/SeLoadDriverPrivilege/SeCreateGlobalPrivilege/SeAuditPrivilege') | Out-Null
 }
 
+function Test-AdminSid([string]$Sid) {
+    # SYSTEM, LocalService, NetworkService, Administrators, or a service SID (S-1-5-80-*): no
+    # standard user can act as any of these.
+    $ErrorActionPreference = 'Stop'
+    return ($Sid -in 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544' -or $Sid -like 'S-1-5-80-*')
+}
+
+function Test-DataDirAdminOnly([string]$Dir, [switch]$OwnersOnly) {
+    # True when $Dir and everything in it are owned by SYSTEM, Administrators or a service SID
+    # and grant write-class rights to nobody else, so no standard user could have planted or can
+    # plant anything in it before the elevated purge. C:\ProgramData lets Users create folders,
+    # so the owner matters as much as the ACL: a user who pre-created ProgramData\CellGlide owns
+    # it, and an owner can always rewrite the ACL. A link anywhere fails too (never followed).
+    # -OwnersOnly (the installer, before it takes a pre-existing folder over): owners and links
+    # only, since a folder an administrator made but never locked still inherits ProgramData's
+    # Users entries.
+    $ErrorActionPreference = 'Stop'
+    $readOnly = [int][Security.AccessControl.FileSystemRights]'ReadAndExecute, ReadPermissions, Synchronize'
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($Dir)
+    while ($pending.Count -gt 0) {
+        $path = $pending.Pop()
+        $item = Get-Item -LiteralPath $path -Force
+        if (Test-ReparsePoint $item) { return $false }
+        $acl = Get-Acl -LiteralPath $path
+        if (-not (Test-AdminSid $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value)) { return $false }
+        foreach ($ace in @(if (-not $OwnersOnly) { $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) })) {
+            if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (Test-AdminSid $ace.IdentityReference.Value) { continue }
+            if (([int]$ace.FileSystemRights -band -bnot $readOnly) -ne 0) { return $false }
+        }
+        if ($item.PSIsContainer) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { $pending.Push($child.FullName) }
+        }
+    }
+    return $true
+}
+
 function Lock-DataItem($item) {
     # Takes ownership of one file or folder and resets its ACL to what it inherits, never
     # recursing (icacls /T would follow a junction). Checked before and after, so a link
@@ -807,9 +846,18 @@ function Set-DataDirAcl {
     $ErrorActionPreference = 'Stop'
     $health = Join-Path $DataDir 'health'
     $logs = Join-Path $DataDir 'logs'
-    if (Test-Path -LiteralPath $DataDir) {
+    # A pre-existing folder must be owned, with everything in it, by SYSTEM, Administrators or a
+    # service SID, and hold no link, before any icacls touches it (final review finding 3): a
+    # standard user who pre-created it owns it and could swap in a junction between a check and
+    # icacls, which follows it. Checked again once the root is locked, when only administrators
+    # can still add to it, so nothing a user made in between is ever locked through.
+    $existed = Test-Path -LiteralPath $DataDir
+    if ($existed) {
         $root = Get-Item -LiteralPath $DataDir -Force
         if (Test-ReparsePoint $root) { Refuse-ReparsePoint $DataDir }
+        # A link is named first (the owner check below also fails on one, without naming it).
+        foreach ($link in @(Get-ReparsePoints $DataDir)) { Refuse-ReparsePoint $link }
+        if (-not (Test-DataDirAdminOnly $DataDir -OwnersOnly)) { throw $DataDirNotOurs }
     } else {
         New-Item -ItemType Directory -Path $DataDir | Out-Null
     }
@@ -819,6 +867,7 @@ function Set-DataDirAcl {
         '/grant:r', "${SidAdmins}:(OI)(CI)F",
         '/grant:r', "NT SERVICE\${ServiceName}:(OI)(CI)M") | Out-Null
     if (Test-ReparsePoint (Get-Item -LiteralPath $DataDir -Force)) { Refuse-ReparsePoint $DataDir }
+    if ($existed -and -not (Test-DataDirAdminOnly $DataDir -OwnersOnly)) { throw $DataDirNotOurs }
     # Only administrators can add to the root now; created here, they are locked below too.
     New-Item -ItemType Directory -Force -Path $health, $logs | Out-Null
     Lock-DataTree $DataDir
@@ -1092,7 +1141,12 @@ function Invoke-CellGlideInstall {
         # Steps 1-3 in the user's own process.
         $base = Resolve-BaseUrl $BaseUrl -AllowLoopback:$AllowLoopback
         if ($base -cne $DefaultBase) { Write-Host "Downloading from a local test source: $base" }
-        if ($ZipPath) { $ZipPath = Resolve-ZipPath $ZipPath }
+        if ($ZipPath) {
+            $ZipPath = Resolve-ZipPath $ZipPath
+            # Printed before the UAC prompt too (the elevated part's own line comes only with its
+            # log, after the install); nothing waits for it: step 1 of the README is the check.
+            Write-Host "Package: $ZipPath, SHA-256 $((Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant())"
+        }
         $machine = Get-NativeMachine
         $arch = ConvertTo-CellGlideArch $machine
         if (-not $arch) {
