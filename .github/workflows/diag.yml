@@ -1,0 +1,21 @@
+name: diag
+on: push
+jobs:
+  d:
+    runs-on: windows-11-arm
+    steps:
+      - shell: powershell
+        run: |
+          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "before: $($_.LocalAddress) pid $($_.OwningProcess)" }
+          Get-Service SharedAccess | Format-List Name, Status, StartType, CanStop, DependentServices, ServicesDependedOn | Out-String
+          "--- Stop-Service"
+          try { Stop-Service SharedAccess -Force -ErrorAction Stop; "stopped" } catch { "ERR: $_" }
+          (Get-Service SharedAccess).Status
+          "--- net stop"
+          net stop SharedAccess /y
+          (Get-Service SharedAccess).Status
+          "--- sc"
+          sc.exe stop SharedAccess
+          sc.exe query SharedAccess
+          Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "after: $($_.LocalAddress) pid $($_.OwningProcess)" }
+          Get-Service | Where-Object { $_.Status -eq 'Running' -and $_.Name -match 'hns|SharedAccess|icssvc|docker' } | Format-Table Name, Status | Out-String
