@@ -104,9 +104,12 @@ jobs:
           $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
           # The test binary the workspace run above built. Through cargo with -p cg-platform or --test,
           # the dev-dependency features of the other crates drop out and ~30-50 crates build again.
+          # (Continue: under Stop, Windows PowerShell turns cargo's stderr lines into a terminating error.)
+          $ErrorActionPreference = 'Continue'
           $exe = @(cargo test --workspace --locked --no-run --message-format=json 2>$null |
             Where-Object { $_ -like '*"name":"windows_privileged"*' -and $_ -like '*"executable":"*' } |
             ForEach-Object { ($_ | ConvertFrom-Json).executable })
+          $ErrorActionPreference = 'Stop'
           if ($exe.Count -ne 1) { throw "expected one windows_privileged test binary, found $($exe.Count)" }
           Push-Location crates\cg-platform
           & $exe[0] --ignored --test-threads=1 --nocapture
