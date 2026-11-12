@@ -71,16 +71,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
+      # bash, not Windows PowerShell: its first start on the arm64 image alone takes about 30 s.
       - name: LLVM (clang) for the ARM64 C build
         if: matrix.arch == 'arm64'
-        shell: powershell
+        shell: bash
         run: |
-          $llvm = 'C:\Program Files\LLVM\bin'
-          if (-not (Test-Path "$llvm\clang.exe")) {
-            choco install llvm -y
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $llvm
+          [ -x '/c/Program Files/LLVM/bin/clang.exe' ] || choco install llvm -y
+          echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.arch }}-rust
@@ -105,7 +102,8 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-wintun.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
-          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
+          # --workspace, as above: -p cg-platform alone resolves features differently and rebuilds ~50 crates.
+          cargo test --workspace --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
           if ($LASTEXITCODE -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $after
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -131,16 +129,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.99.0
+      # bash, not Windows PowerShell: its first start on the arm64 image alone takes about 30 s.
       - name: LLVM (clang) for the ARM64 C build
         if: matrix.arch == 'arm64'
-        shell: powershell
+        shell: bash
         run: |
-          $llvm = 'C:\Program Files\LLVM\bin'
-          if (-not (Test-Path "$llvm\clang.exe")) {
-            choco install llvm -y
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $llvm
+          [ -x '/c/Program Files/LLVM/bin/clang.exe' ] || choco install llvm -y
+          echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.arch }}-app
@@ -148,8 +143,13 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: windows/global.json
-          cache: true
-          cache-dependency-path: windows/*/packages.lock.json
+      # NuGet packages, per architecture: setup-dotnet's own cache key leaves the architecture out, so
+      # x64 and arm64 (different runtime packs) would fight over one entry. A restore without it takes
+      # about 45 s.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('windows/*/packages.lock.json', 'windows/global.json') }}
       - name: Pester 5.5 to 5.x (Windows PowerShell may carry 3.4)
         if: matrix.arch == 'x64'
         shell: powershell
