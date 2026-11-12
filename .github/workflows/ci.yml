@@ -1,14 +1,28 @@
 name: ci
 on:
   push:
+    # Commits that only touch Markdown or docs/ build nothing. No branch protection requires these
+    # checks today; if one ever does, a skipped run would leave the check pending, so require a job
+    # that always runs instead. (Path filters never apply to tag pushes.)
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+# A newer push to a branch or PR cancels the run still going for it (push and pull_request runs of
+# one branch share the group). Never on main or a tag: every commit there runs to the end.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 # Nothing here writes to the repository; artifacts need no token permission.
 permissions:
   contents: read
 
 jobs:
+  # Everything that comes out the same on every OS runs here, once: formatting, the Linux build,
+  # the Rust license lists (Linux and Windows; cargo-about reads the target lists from the configs),
+  # the Windows icons and the release-data scripts.
   linux:
     runs-on: ubuntu-24.04
     steps:
@@ -19,103 +33,46 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
+      - name: cargo-about 0.9.2 (prebuilt, checked)
+        run: |
+          set -euo pipefail
+          name=cargo-about-0.9.2-x86_64-unknown-linux-musl
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/$name.tar.gz"
+          echo "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-about" ~/.cargo/bin/cargo-about
+          cargo about --version
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: bash scripts/update-licenses.sh --check
+      - run: python3 -I scripts/gen-windows-icons.py --check
       # By file path: scripts/tests has no __init__.py, so discovery does not find it.
       - run: python3 -m unittest scripts/tests/test_release_linux_json.py
       - run: python3 -m unittest scripts/tests/test_release_windows_json.py
 
-  windows-x64:
-    runs-on: windows-latest
+  # The Rust side on Windows: the workspace tests and the privileged wintun test. Clippy once (x64):
+  # no code depends on the architecture.
+  windows-rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+          - arch: arm64
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
     steps:
+      # No submodules: hev-socks5-tunnel is built on Linux only (crates/hev-sys/build.rs).
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: windows-x64
-      - uses: actions/setup-dotnet@v5
-        with:
-          global-json-file: windows/global.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Pester 5.5 to 5.x (Windows PowerShell may carry 3.4)
-        shell: powershell
-        run: |
-          $ok = Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' -and $_.Version -lt [version]'6.0.0' }
-          if (-not $ok) {
-            Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
-          }
-          Get-Module -ListAvailable Pester | Select-Object Version, ModuleBase
-      - name: cargo-about 0.9.2 (cache)
-        id: about-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-about.exe
-          key: cargo-about-0.9.2-${{ runner.arch }}
-      - name: cargo-about 0.9.2 (install)
-        if: steps.about-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-about --version 0.9.2 --locked --features cli
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-      - run: python -m unittest scripts/tests/test_release_windows_json.py
-      - name: network-snapshot script tests
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\tests\test-network-snapshot.ps1
-      - name: Privileged wintun test (hosted runners are administrators)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # dockerd on the runner image listens on 172.x.x.1:53, which blocks the resolver-port test's
-          # exclusive hold of 0.0.0.0:53. Stop it so that test runs for real (the arm64 image has none).
-          Stop-Service docker -ErrorAction SilentlyContinue
-          $before = "$env:RUNNER_TEMP\net-before.json"
-          $after = "$env:RUNNER_TEMP\net-after.json"
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $before
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-wintun.ps1
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
-          cargo test -p cg-platform --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $after
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Compare $before $after
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Core checks and app publish
-        shell: powershell
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1 -Publish
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Package and install round trip
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $ver = (Get-ChildItem dist\windows -Directory | Select-Object -First 1).Name
-          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\$ver\CellGlide-$ver-windows-x64.zip"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-  windows-arm64:
-    runs-on: windows-11-arm
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@1.99.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: windows-arm64
+          components: clippy
       - name: LLVM (clang) for the ARM64 C build
+        if: matrix.arch == 'arm64'
         shell: powershell
         run: |
           $llvm = 'C:\Program Files\LLVM\bin'
@@ -124,46 +81,22 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
           Add-Content -Path $env:GITHUB_PATH -Value $llvm
-          & "$llvm\clang.exe" --version
-      - uses: actions/setup-dotnet@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          global-json-file: windows/global.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Pester 5.5 to 5.x (Windows PowerShell may carry 3.4)
-        shell: powershell
-        run: |
-          $ok = Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' -and $_.Version -lt [version]'6.0.0' }
-          if (-not $ok) {
-            Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
-          }
-          Get-Module -ListAvailable Pester | Select-Object Version, ModuleBase
-      - name: cargo-about 0.9.2 (cache)
-        id: about-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-about.exe
-          key: cargo-about-0.9.2-${{ runner.arch }}
-      - name: cargo-about 0.9.2 (install)
-        if: steps.about-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-about --version 0.9.2 --locked --features cli
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+          key: windows-${{ matrix.arch }}-rust
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
+      - if: matrix.arch == 'x64'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: python -m unittest scripts/tests/test_release_windows_json.py
-      - name: network-snapshot script tests
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\tests\test-network-snapshot.ps1
       - name: Privileged wintun test (hosted runners are administrators)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # The runner image's dockerd listens on 172.x.x.1:53, which the resolver-port test (an exclusive
-          # bind of 0.0.0.0:53) cannot coexist with. Stop it before the first snapshot.
+          # dockerd on the x64 image listens on 172.x.x.1:53, which blocks the resolver-port test's
+          # exclusive hold of 0.0.0.0:53; stop it so that test runs for real. On the arm64 image Internet
+          # Connection Sharing holds 0.0.0.0:53 and cannot be stopped; resolver_port_taken then prints
+          # SKIPPED (shown by --nocapture). Say who holds it.
           Stop-Service docker -ErrorAction SilentlyContinue
-          # Internet Connection Sharing (SharedAccess) holds 0.0.0.0:53 on the arm64 image and cannot be
-          # stopped there; resolver_port_taken then prints SKIPPED (shown by --nocapture). Say who holds it.
           Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object { "UDP 53 still held: $($_.LocalAddress) pid $($_.OwningProcess)" }
           $before = "$env:RUNNER_TEMP\net-before.json"
           $after = "$env:RUNNER_TEMP\net-after.json"
@@ -178,41 +111,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Compare $before $after
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Core checks and app publish
-        shell: powershell
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1 -Publish
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Package and install round trip
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch arm64
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $ver = (Get-ChildItem dist\windows -Directory | Select-Object -First 1).Name
-          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\$ver\CellGlide-$ver-windows-arm64.zip"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-  windows-release:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/windows-')
-    needs: [windows-x64, windows-arm64]
+  # The app and the package on Windows: C# build and tests against this architecture's DLL, the
+  # package (build-windows.ps1 publishes the app; it checks what check-windows-core -Publish did) and
+  # an install round trip of that very zip. On a manual run or a windows-* tag, that tested zip is the
+  # release artifact. The scripts' Pester tests and the NuGet licenses run once (x64).
+  windows-app:
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             os: windows-latest
+            skip: icons,rust-licenses
           - arch: arm64
             os: windows-11-arm
+            skip: icons,rust-licenses,nuget-licenses,scripts
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: windows-${{ matrix.arch }}
       - name: LLVM (clang) for the ARM64 C build
         if: matrix.arch == 'arm64'
         shell: powershell
@@ -223,19 +141,44 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
           Add-Content -Path $env:GITHUB_PATH -Value $llvm
-          & "$llvm\clang.exe" --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}-app
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: windows/global.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Build the package
+          cache: true
+          cache-dependency-path: windows/*/packages.lock.json
+      - name: Pester 5.5 to 5.x (Windows PowerShell may carry 3.4)
+        if: matrix.arch == 'x64'
         shell: powershell
         run: |
+          $ok = Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' -and $_.Version -lt [version]'6.0.0' }
+          if (-not $ok) {
+            Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Get-Module -ListAvailable Pester | Select-Object Version, ModuleBase
+      - name: network-snapshot script tests
+        if: matrix.arch == 'x64'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\tests\test-network-snapshot.ps1
+      - name: Core checks
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-windows-core.ps1 -Skip ${{ matrix.skip }}
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Package and install round trip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch ${{ matrix.arch }}
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - uses: actions/upload-artifact@v4
+          $ver = (Get-ChildItem dist\windows -Directory | Select-Object -First 1).Name
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\tests\install-roundtrip.ps1 -Zip "dist\windows\$ver\CellGlide-$ver-windows-${{ matrix.arch }}.zip"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/windows-')
+        uses: actions/upload-artifact@v4
         with:
           name: CellGlide-windows-${{ matrix.arch }}
           path: |
@@ -243,7 +186,8 @@ jobs:
             dist/windows/*/SHA256SUMS.${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/upload-artifact@v4
+      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/windows-')
+        uses: actions/upload-artifact@v4
         with:
           name: CellGlide-windows-${{ matrix.arch }}-symbols
           path: dist/windows/*/CellGlide-*-windows-${{ matrix.arch }}-symbols.zip
@@ -264,5 +208,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
       - run: cargo build -p cg-platform --examples --tests --locked
       - run: sudo -E env "PATH=$PATH" cargo test -p cg-platform --test privileged --locked -- --ignored --test-threads=1

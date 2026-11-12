@@ -11,8 +11,7 @@
 #      are current, every license is allowed or reviewed, every shipped component has its text);
 #   6. scripts/gen-windows-icons.py --check (the committed .ico files are what the script makes).
 #   7. scripts/update-licenses.sh --check in Git's bash (the Rust license lists are current, and
-#      render-about.py still renders as cargo-about 0.9.2 does); skipped on CI until W4 Task 11 puts
-#      cargo-about on the runner.
+#      render-about.py still renders as cargo-about 0.9.2 does).
 #   8. scripts/test-windows-scripts.ps1: the Pester 5 tests of the Windows scripts (scripts/tests and
 #      packaging/windows/tests *.Tests.ps1; 'Elevated' ones only from an administrator shell).
 # Step 4 also checks that a Release build defaults to target\release's DLL and refuses target\debug's,
@@ -24,14 +23,26 @@
 # cellglide_native.dll (same SHA-256) and no onnxruntime*.dll or DirectML*.dll, and that the
 # shipped DLL has no debug-only diagnostics override (no CELLGLIDE_DIAG_TARGET string; not 'localhost',
 # which the license texts the DLL embeds may contain).
+# -Skip leaves out checks that come out the same on every machine, for CI jobs that run them
+# elsewhere (once, on one runner): nuget-licenses (step 5), icons (6), rust-licenses (7) and
+# scripts (8). Steps 1-4 always run: they exercise this machine's DLL and .NET runtime.
 # The dotnet steps run inside windows\ so that windows\global.json (SDK pin, test runner) applies.
 param(
     [switch]$Release,
-    [switch]$Publish
+    [switch]$Publish,
+    # Names, or one comma-separated string (powershell -File passes 'a,b' as one argument).
+    [string[]]$Skip = @()
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+$Skip = @($Skip | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($name in $Skip) {
+    if ($name -notin 'nuget-licenses', 'icons', 'rust-licenses', 'scripts') {
+        Write-Host "FAILED: -Skip $name is not one of nuget-licenses, icons, rust-licenses, scripts."
+        exit 1
+    }
+}
 . (Join-Path $PSScriptRoot 'dev-env.ps1')
 
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
@@ -109,62 +120,69 @@ try {
         Pop-Location
     }
 
-    Invoke-Step 'NuGet license script tests' {
-        powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests\test-check-nuget-licenses.ps1')
-    }
+    if ($Skip -contains 'nuget-licenses') {
+        Write-Host '==> NuGet license script tests and NuGet licenses: skipped (-Skip nuget-licenses)'
+    } else {
+        Invoke-Step 'NuGet license script tests' {
+            powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests\test-check-nuget-licenses.ps1')
+        }
 
-    Invoke-Step 'NuGet licenses' {
-        powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'check-nuget-licenses.ps1') -Check
+        Invoke-Step 'NuGet licenses' {
+            powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'check-nuget-licenses.ps1') -Check
+        }
     }
 
     # The committed .ico files are what scripts/gen-windows-icons.py makes (pure Python, the same on
     # every machine). Python 3: the py launcher, else python3 or python on PATH (not the Store stubs
-    # in WindowsApps), else the newest per-user install.
+    # in WindowsApps), else the newest per-user install. Looked for only when a Python step runs.
     $python = $null
-    $pyLauncher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pyLauncher) {
-        $python = @($pyLauncher.Source, '-3')
-    } else {
-        $found = Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue |
-            Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
-        if (-not $found) {
-            $found = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python3*\python.exe') -ErrorAction SilentlyContinue |
-                Sort-Object FullName -Descending | Select-Object -First 1
+    if (-not ($Skip -contains 'icons' -and $Skip -contains 'rust-licenses')) {
+        $pyLauncher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pyLauncher) {
+            $python = @($pyLauncher.Source, '-3')
+        } else {
+            $found = Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue |
+                Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
+            if (-not $found) {
+                $found = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python3*\python.exe') -ErrorAction SilentlyContinue |
+                    Sort-Object FullName -Descending | Select-Object -First 1
+            }
+            if ($found) { $python = @($(if ($found.Source) { $found.Source } else { $found.FullName })) }
         }
-        if ($found) { $python = @($(if ($found.Source) { $found.Source } else { $found.FullName })) }
+        if (-not $python) {
+            Write-Host 'FAILED: Python 3 is needed to check the icons and the Rust license lists.'
+            exit 1
+        }
     }
-    if (-not $python) {
-        Write-Host 'FAILED: Python 3 is needed to check the icons (scripts/gen-windows-icons.py --check).'
-        exit 1
-    }
-    Invoke-Step 'Windows icons match scripts/gen-windows-icons.py' {
-        $exe = $python[0]
-        $pre = @($python | Select-Object -Skip 1)
-        & $exe @pre -I (Join-Path $PSScriptRoot 'gen-windows-icons.py') --check
+    if ($Skip -contains 'icons') {
+        Write-Host '==> Windows icons: skipped (-Skip icons)'
+    } else {
+        Invoke-Step 'Windows icons match scripts/gen-windows-icons.py' {
+            $exe = $python[0]
+            $pre = @($python | Select-Object -Skip 1)
+            & $exe @pre -I (Join-Path $PSScriptRoot 'gen-windows-icons.py') --check
+        }
     }
 
     # The Rust license lists (the Windows one is embedded in cellglide_native.dll) are what
     # scripts/update-licenses.sh generates; its --check also runs render-about.py --self-test. It needs
-    # Git's bash and cargo-about 0.9.2. The CI runner has no cargo-about yet (W4 Task 11 installs it
-    # and runs this there), so on CI alone a missing cargo-about is reported and skipped; anywhere else
-    # it fails.
-    $gitCmd = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    $bash = $null
-    if ($gitCmd) {
-        foreach ($rel in '..\bin\bash.exe', '..\..\bin\bash.exe') {
-            $candidate = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $gitCmd.Source) $rel))
-            if (Test-Path $candidate) { $bash = $candidate; break }
-        }
-    }
-    $haveAbout = $null -ne (Get-Command cargo-about -CommandType Application -ErrorAction SilentlyContinue)
-    if ($env:CI -eq 'true' -and -not $haveAbout) {
-        Write-Host '==> Rust license lists: SKIPPED on CI (no cargo-about on the runner yet; W4 Task 11 adds it)'
+    # Git's bash and cargo-about 0.9.2. CI runs it on Linux and passes -Skip rust-licenses here.
+    if ($Skip -contains 'rust-licenses') {
+        Write-Host '==> Rust license lists: skipped (-Skip rust-licenses)'
     } else {
+        $gitCmd = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $bash = $null
+        if ($gitCmd) {
+            foreach ($rel in '..\bin\bash.exe', '..\..\bin\bash.exe') {
+                $candidate = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $gitCmd.Source) $rel))
+                if (Test-Path $candidate) { $bash = $candidate; break }
+            }
+        }
         if (-not $bash) {
             Write-Host "FAILED: Git's bash.exe is needed for scripts/update-licenses.sh --check (not found next to git)."
             exit 1
         }
-        if (-not $haveAbout) {
+        if (-not (Get-Command cargo-about -CommandType Application -ErrorAction SilentlyContinue)) {
             Write-Host 'FAILED: cargo-about 0.9.2 is needed for scripts/update-licenses.sh --check (cargo install --locked --version 0.9.2 cargo-about --features cli).'
             exit 1
         }
@@ -179,8 +197,12 @@ try {
         }
     }
 
-    Invoke-Step 'Pester tests of the Windows scripts (scripts/test-windows-scripts.ps1)' {
-        powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-windows-scripts.ps1')
+    if ($Skip -contains 'scripts') {
+        Write-Host '==> Pester tests of the Windows scripts: skipped (-Skip scripts)'
+    } else {
+        Invoke-Step 'Pester tests of the Windows scripts (scripts/test-windows-scripts.ps1)' {
+            powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-windows-scripts.ps1')
+        }
     }
 
     if ($Publish) {
