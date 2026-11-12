@@ -102,9 +102,17 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-wintun.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:CELLGLIDE_WINTUN_DLL = (Resolve-Path target\debug\wintun.dll).Path
-          # --workspace, as above: -p cg-platform alone resolves features differently and rebuilds ~50 crates.
-          cargo test --workspace --test windows_privileged --locked -- --ignored --test-threads=1 --nocapture
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The test binary the workspace run above built. Through cargo with -p cg-platform or --test,
+          # the dev-dependency features of the other crates drop out and ~30-50 crates build again.
+          $exe = @(cargo test --workspace --locked --no-run --message-format=json 2>$null |
+            Where-Object { $_ -like '*"name":"windows_privileged"*' -and $_ -like '*"executable":"*' } |
+            ForEach-Object { ($_ | ConvertFrom-Json).executable })
+          if ($exe.Count -ne 1) { throw "expected one windows_privileged test binary, found $($exe.Count)" }
+          Push-Location crates\cg-platform
+          & $exe[0] --ignored --test-threads=1 --nocapture
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Out $after
           if ($LASTEXITCODE -ne 0) { exit 1 }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\network-snapshot.ps1 -Compare $before $after
@@ -143,10 +151,11 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: windows/global.json
-      # NuGet packages, per architecture: setup-dotnet's own cache key leaves the architecture out, so
-      # x64 and arm64 (different runtime packs) would fight over one entry. A restore without it takes
-      # about 45 s.
-      - uses: actions/cache@v4
+      # NuGet packages, x64 only: there the 1.2 GB come back in about 20 s against a 45 s restore; the
+      # arm64 runner downloads caches at a third of the speed and gained nothing (58 s against 48 s).
+      # Not setup-dotnet's own cache: its key leaves the architecture out.
+      - if: matrix.arch == 'x64'
+        uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('windows/*/packages.lock.json', 'windows/global.json') }}
