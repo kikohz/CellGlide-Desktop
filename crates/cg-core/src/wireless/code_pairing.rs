@@ -255,6 +255,8 @@ where
         &transcript,
     ));
     let _ = write_text(&mut writer, &f).await;
+    // Close gracefully, as the Swift side does; the pairing is already saved either way.
+    let _ = writer.shutdown().await;
     Ok(paired)
 }
 
@@ -428,8 +430,59 @@ mod tests {
         report
     }
 
+    /// Wraps the computer's end of the stream and, when the first byte of the F line is written,
+    /// records whether `save` had already run. This is a fact about the order of the calls
+    /// inside `run`, so it holds on any runtime, unlike reading the flag on the phone's side.
+    struct SpyStream {
+        inner: DuplexStream,
+        saved: Arc<AtomicBool>,
+        saved_at_f: Arc<std::sync::Mutex<Option<bool>>>,
+    }
+
+    impl AsyncRead for SpyStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for SpyStream {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            if buf.starts_with(b"F ") {
+                let mut seen = self.saved_at_f.lock().unwrap();
+                if seen.is_none() {
+                    *seen = Some(self.saved.load(Ordering::SeqCst));
+                }
+            }
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
     #[derive(Default)]
     struct Probe {
+        /// Whether `save` had run when `run` first wrote the F line (None: F never written).
+        saved_at_f_write: Arc<std::sync::Mutex<Option<bool>>>,
         confirm_calls: AtomicUsize,
         shown_code: std::sync::Mutex<Option<String>>,
         save_calls: AtomicUsize,
@@ -481,6 +534,11 @@ mod tests {
     ) -> Outcome {
         let probe = Arc::new(Probe::default());
         let phone_task = tokio::spawn(fake_phone(phone_end, phone, probe.saved.clone()));
+        let computer_end = SpyStream {
+            inner: computer_end,
+            saved: probe.saved.clone(),
+            saved_at_f: probe.saved_at_f_write.clone(),
+        };
         let p = probe.clone();
         let q = probe.clone();
         let started = Instant::now();
@@ -554,6 +612,7 @@ mod tests {
             o.probe.saved_key.lock().unwrap().unwrap(),
             *paired.long_term_key.as_bytes()
         );
+        assert_eq!(*o.probe.saved_at_f_write.lock().unwrap(), Some(true));
         assert_eq!(o.phone.saved_when_f_arrived, Some(true));
         assert_eq!(o.phone.f_valid, Some(true));
         assert_eq!(confirm_calls(&o), 1);

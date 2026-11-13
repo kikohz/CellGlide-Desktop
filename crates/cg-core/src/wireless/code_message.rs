@@ -32,8 +32,9 @@ use super::pairing::{Key, NONCE_LENGTH, proof_key};
 pub const MAX_LINE_LENGTH: usize = 512;
 /// The computer waits this long for the phone's next line.
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(60);
-/// The phone waits this long for the computer's first line (M).
-pub const FIRST_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The phone waits this long for the computer's first line (M). Phone side: tests only.
+#[cfg(test)]
+pub(crate) const FIRST_STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The computer's window for both users' answers and the phone's OK, counted from when it shows
 /// the code (right after P).
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(75);
@@ -123,7 +124,8 @@ fn fixed<const N: usize>(text: &str) -> Option<[u8; N]> {
     decode_base64url(text)?.try_into().ok()
 }
 
-pub fn commitment(commitment: &[u8; 32], phone_id: &str) -> String {
+#[cfg(test)]
+pub(crate) fn commitment(commitment: &[u8; 32], phone_id: &str) -> String {
     format!("C {} {phone_id}\n", base64url(commitment))
 }
 
@@ -148,14 +150,16 @@ pub fn computer(
     )
 }
 
-pub struct ComputerLine {
+#[cfg(test)]
+pub(crate) struct ComputerLine {
     pub public_key: [u8; 32],
     pub nonce: [u8; NONCE_LENGTH],
     pub computer_id: String,
     pub computer_name: String,
 }
 
-pub fn parse_computer(line: &str) -> Option<ComputerLine> {
+#[cfg(test)]
+pub(crate) fn parse_computer(line: &str) -> Option<ComputerLine> {
     let parts = fields(line, "M", 4)?;
     if !is_token(parts[2]) {
         return None;
@@ -168,7 +172,8 @@ pub fn parse_computer(line: &str) -> Option<ComputerLine> {
     })
 }
 
-pub fn phone(public_key: &[u8; 32], nonce: &[u8; NONCE_LENGTH]) -> String {
+#[cfg(test)]
+pub(crate) fn phone(public_key: &[u8; 32], nonce: &[u8; NONCE_LENGTH]) -> String {
     format!("P {} {}\n", base64url(public_key), base64url(nonce))
 }
 
@@ -178,11 +183,13 @@ pub fn parse_phone(line: &str) -> Option<([u8; 32], [u8; NONCE_LENGTH])> {
 }
 
 /// The part of the OK line the phone's proof covers (it goes into the transcript first).
-pub fn allowed_signed(identity: &str, phone_name: &str) -> String {
+#[cfg(test)]
+pub(crate) fn allowed_signed(identity: &str, phone_name: &str) -> String {
     format!("OK {identity} {}\n", encode_name(phone_name))
 }
 
-pub fn allowed(identity: &str, phone_name: &str, proof: &[u8; 32]) -> String {
+#[cfg(test)]
+pub(crate) fn allowed(identity: &str, phone_name: &str, proof: &[u8; 32]) -> String {
     let signed = allowed_signed(identity, phone_name);
     format!("{} {}\n", signed.trim_end_matches('\n'), base64url(proof))
 }
@@ -209,7 +216,8 @@ pub fn finished(proof: &[u8; 32]) -> String {
     format!("F {}\n", base64url(proof))
 }
 
-pub fn parse_finished(line: &str) -> Option<[u8; 32]> {
+#[cfg(test)]
+pub(crate) fn parse_finished(line: &str) -> Option<[u8; 32]> {
     fixed(fields(line, "F", 1)?[0])
 }
 
@@ -448,6 +456,20 @@ mod tests {
         let proof = proof(Side::Phone, &key, &sample_transcript());
         assert_eq!(hex(&proof), PINNED_PHONE_PROOF);
     }
+
+    /// Same inputs as above, computer side; computed independently with Python hashlib/hmac:
+    ///   proofKey = HKDF-SHA256(ikm = bytes(0x40 + i for i in 0..32), salt = 32 zero bytes, info "CG2 pairing proof")
+    ///   digest   = SHA256("C x y" + newline)
+    ///   proof    = HMAC-SHA256(proofKey, "CG1 mac ok" || digest)
+    #[test]
+    fn computer_proof_matches_an_independent_computation() {
+        let key = Key::from_bytes(b32(0x40));
+        let proof = proof(Side::Computer, &key, &sample_transcript());
+        assert_eq!(hex(&proof), PINNED_COMPUTER_PROOF);
+    }
+
+    const PINNED_COMPUTER_PROOF: &str =
+        "bc8a5b9bf34967d01564c1105bc84286e1d470c690acd50ede78138f6a9b8708";
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
