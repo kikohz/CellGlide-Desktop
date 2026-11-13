@@ -19,6 +19,9 @@ pub mod capability {
     pub const UDP_OVER_USB: &str = "udp-over-usb-v1";
     pub const DNS_FORWARD: &str = "dns-forward-v1";
     pub const SESSION_WATCH: &str = "session-watch-v1";
+    /// The wireless backup link (pairing, access point, TLS-PSK); `wireless-v1` is an older
+    /// protocol this computer does not speak.
+    pub const WIRELESS: &str = "wireless-v2";
 }
 
 pub const HELLO_REQUEST: &[u8] =
@@ -333,6 +336,17 @@ mod tests {
         assert!(hello.has(capability::UDP_OVER_USB));
         assert!(!hello.has(capability::SESSION_WATCH));
         assert!(!hello.dns_enabled());
+    }
+
+    #[test]
+    fn wireless_capability_is_v2_only() {
+        assert_eq!(capability::WIRELESS, "wireless-v2");
+        let v2: Hello = serde_json::from_str(&hello_json(r#""socks5-tcp","wireless-v2""#)).unwrap();
+        assert!(v2.has(capability::WIRELESS));
+        let v1: Hello = serde_json::from_str(&hello_json(r#""socks5-tcp","wireless-v1""#)).unwrap();
+        assert!(!v1.has(capability::WIRELESS));
+        let none: Hello = serde_json::from_str(&hello_json(r#""socks5-tcp""#)).unwrap();
+        assert!(!none.has(capability::WIRELESS));
     }
 
     #[test]

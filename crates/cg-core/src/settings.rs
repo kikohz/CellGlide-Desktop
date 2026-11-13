@@ -17,6 +17,8 @@ pub struct Stored {
     pub chosen_serial: Option<String>,
     /// Windows' strict DNS while connected; on unless the user turned it off.
     pub strict_dns: bool,
+    /// The wireless backup link (off until the user turns it on; off in older files).
+    pub wireless_enabled: bool,
     pub last_versions: LastVersions,
 }
 
@@ -35,6 +37,7 @@ impl Default for Stored {
             user_disconnected: false,
             chosen_serial: None,
             strict_dns: true,
+            wireless_enabled: false,
             last_versions: LastVersions::default(),
         }
     }
@@ -202,6 +205,27 @@ mod tests {
         let store = SettingsStore::load(path(&dir));
         assert!(store.get().strict_dns);
         assert!(!store.get().auto_connect);
+    }
+
+    /// A file from before the wireless switch reads it as off; the switch survives a rewrite.
+    #[test]
+    fn wireless_is_off_in_old_files_and_persists() {
+        assert!(!Stored::default().wireless_enabled);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(path(&dir).parent().unwrap()).unwrap();
+        std::fs::write(
+            path(&dir),
+            "{\"version\": 1, \"auto_connect\": false, \"strict_dns\": false}",
+        )
+        .unwrap();
+        let mut store = SettingsStore::load(path(&dir));
+        assert!(!store.get().wireless_enabled);
+        store.update(|s| s.wireless_enabled = true);
+        let again = SettingsStore::load(path(&dir));
+        assert!(again.get().wireless_enabled);
+        assert!(!again.get().auto_connect);
+        let written = std::fs::read_to_string(path(&dir)).unwrap();
+        assert!(written.contains("\"wireless_enabled\": true"), "{written}");
     }
 
     #[test]
