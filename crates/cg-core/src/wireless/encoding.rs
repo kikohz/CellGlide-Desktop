@@ -45,6 +45,16 @@ pub fn is_token(text: &str) -> bool {
         && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// Names the key store keeps its own bookkeeping under; a pairing's identity must never
+/// collide with one.
+const RESERVED_ACCOUNTS: [&str; 4] = ["records", "local-id", "usb-devices", "stale"];
+
+/// A PSK identity the key store accepts as a key's account: a plain token that is never one
+/// of the bookkeeping accounts.
+pub fn is_valid_identity(identity: &str) -> bool {
+    is_token(identity) && !RESERVED_ACCOUNTS.contains(&identity)
+}
+
 /// Control characters dropped, cut on a character boundary to `MAX_NAME_BYTES`.
 pub fn clean_name(name: &str) -> String {
     let mut result = String::new();
@@ -121,6 +131,18 @@ mod tests {
         assert!(!is_token("a_b"));
         assert!(!is_token("a b"));
         assert!(!is_token("é"));
+    }
+
+    #[test]
+    fn identities_are_tokens_that_avoid_bookkeeping_accounts() {
+        assert!(is_valid_identity("2F9C1A4E-0B7D-4E55-9A3C-123456789ABC"));
+        for reserved in ["records", "local-id", "usb-devices", "stale"] {
+            assert!(!is_valid_identity(reserved), "{reserved}");
+        }
+        assert!(is_valid_identity("records2"));
+        assert!(!is_valid_identity(""));
+        assert!(!is_valid_identity("bad/id"));
+        assert!(!is_valid_identity(&"a".repeat(65)));
     }
 
     #[test]

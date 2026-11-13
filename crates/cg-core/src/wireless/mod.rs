@@ -2,6 +2,7 @@
 //! platform-neutral protocol logic that must match the phone's implementation byte for byte;
 //! the OS-specific parts (access point, discovery, TLS) live in `cg-platform`.
 
+pub mod cable;
 pub mod encoding;
 pub mod pairing;
 pub mod request;
