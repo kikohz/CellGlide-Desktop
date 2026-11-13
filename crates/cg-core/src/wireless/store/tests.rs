@@ -384,6 +384,18 @@ fn usb_devices_map_to_phones_and_persist() {
     assert_eq!(open(dir.path()).phone_id("S1"), Some(PEER2.to_string()));
 }
 
+#[test]
+fn usb_serials_lists_the_devices_seen_as_a_phone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    assert!(store.usb_serials(PEER).is_empty());
+    store.remember_phone("S2", PEER).unwrap();
+    store.remember_phone("S1", PEER).unwrap();
+    store.remember_phone("S3", PEER2).unwrap();
+    assert_eq!(store.usb_serials(PEER), ["S1", "S2"]);
+    assert_eq!(store.usb_serials(PEER2), ["S3"]);
+}
+
 fn ssid_ok(ssid: &str) -> bool {
     ssid.strip_prefix("CellGlide-").is_some_and(|rest| {
         rest.len() == 4

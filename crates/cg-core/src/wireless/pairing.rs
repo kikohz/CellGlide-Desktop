@@ -68,11 +68,16 @@ pub struct Session {
     nonce: [u8; NONCE_LENGTH],
 }
 
-/// The outcome of a completed key agreement.
-#[derive(Debug)]
+/// The outcome of a completed key agreement. Its `Debug` shows neither the code nor the key.
 pub struct Agreed {
     pub code: String,
     pub long_term_key: Key,
+}
+
+impl std::fmt::Debug for Agreed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Agreed").finish_non_exhaustive()
+    }
 }
 
 impl Session {
@@ -86,8 +91,10 @@ impl Session {
         Session::with_values(role, *secret, nonce)
     }
 
-    #[cfg(test)]
-    pub(crate) fn fixed(role: Role, secret: [u8; 32], nonce: [u8; NONCE_LENGTH]) -> Session {
+    /// A session with chosen values, for a test's stand-in for the other side.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fixed(role: Role, secret: [u8; 32], nonce: [u8; NONCE_LENGTH]) -> Session {
         Session::with_values(role, secret, nonce)
     }
 
@@ -229,6 +236,18 @@ mod tests {
     }
 
     const LONG_TERM: &str = "16cc58fa39be78a73899d87b0caeaa45f12d6d9ac0314973df3ec6d0a3ea3c43";
+
+    #[test]
+    fn agreed_debug_shows_neither_the_code_nor_the_key() {
+        let agreed = computer()
+            .agree(&phone().public_key(), &phone().nonce())
+            .unwrap();
+        let text = format!("{agreed:?}");
+        assert_eq!(text, "Agreed { .. }");
+        assert!(!text.contains(&agreed.code));
+        let pretty = format!("{agreed:#?}");
+        assert!(!pretty.contains(&agreed.code), "{pretty}");
+    }
 
     #[test]
     fn public_keys_and_commitment_match_the_phone_vectors() {

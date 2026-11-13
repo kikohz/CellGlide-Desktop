@@ -14,7 +14,7 @@
 //! the new long-term key over a label and that hash, so the proofs bind what the code does not:
 //! ids, names and the identity. The computer's side of the wire is `computer`, `parse_phone`,
 //! `parse_commitment`, `parse_answer` and `finished`; the others serve the phone's side (the
-//! tests' stand-in for it).
+//! tests' stand-in for it) and exist only for tests and the `testing` feature.
 
 use std::time::Duration;
 
@@ -32,9 +32,11 @@ use super::pairing::{Key, NONCE_LENGTH, proof_key};
 pub const MAX_LINE_LENGTH: usize = 512;
 /// The computer waits this long for the phone's next line.
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(60);
-/// The phone waits this long for the computer's first line (M). Phone side: tests only.
-#[cfg(test)]
-pub(crate) const FIRST_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The phone waits this long for the computer's first line (M). Phone side: tests only (here, and in
+/// other crates through the `testing` feature).
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub const FIRST_STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The computer's window for both users' answers and the phone's OK, counted from when it shows
 /// the code (right after P).
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(75);
@@ -124,8 +126,9 @@ fn fixed<const N: usize>(text: &str) -> Option<[u8; N]> {
     decode_base64url(text)?.try_into().ok()
 }
 
-#[cfg(test)]
-pub(crate) fn commitment(commitment: &[u8; 32], phone_id: &str) -> String {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn commitment(commitment: &[u8; 32], phone_id: &str) -> String {
     format!("C {} {phone_id}\n", base64url(commitment))
 }
 
@@ -150,16 +153,18 @@ pub fn computer(
     )
 }
 
-#[cfg(test)]
-pub(crate) struct ComputerLine {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub struct ComputerLine {
     pub public_key: [u8; 32],
     pub nonce: [u8; NONCE_LENGTH],
     pub computer_id: String,
     pub computer_name: String,
 }
 
-#[cfg(test)]
-pub(crate) fn parse_computer(line: &str) -> Option<ComputerLine> {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn parse_computer(line: &str) -> Option<ComputerLine> {
     let parts = fields(line, "M", 4)?;
     if !is_token(parts[2]) {
         return None;
@@ -172,8 +177,9 @@ pub(crate) fn parse_computer(line: &str) -> Option<ComputerLine> {
     })
 }
 
-#[cfg(test)]
-pub(crate) fn phone(public_key: &[u8; 32], nonce: &[u8; NONCE_LENGTH]) -> String {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn phone(public_key: &[u8; 32], nonce: &[u8; NONCE_LENGTH]) -> String {
     format!("P {} {}\n", base64url(public_key), base64url(nonce))
 }
 
@@ -183,13 +189,15 @@ pub fn parse_phone(line: &str) -> Option<([u8; 32], [u8; NONCE_LENGTH])> {
 }
 
 /// The part of the OK line the phone's proof covers (it goes into the transcript first).
-#[cfg(test)]
-pub(crate) fn allowed_signed(identity: &str, phone_name: &str) -> String {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn allowed_signed(identity: &str, phone_name: &str) -> String {
     format!("OK {identity} {}\n", encode_name(phone_name))
 }
 
-#[cfg(test)]
-pub(crate) fn allowed(identity: &str, phone_name: &str, proof: &[u8; 32]) -> String {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn allowed(identity: &str, phone_name: &str, proof: &[u8; 32]) -> String {
     let signed = allowed_signed(identity, phone_name);
     format!("{} {}\n", signed.trim_end_matches('\n'), base64url(proof))
 }
@@ -216,8 +224,9 @@ pub fn finished(proof: &[u8; 32]) -> String {
     format!("F {}\n", base64url(proof))
 }
 
-#[cfg(test)]
-pub(crate) fn parse_finished(line: &str) -> Option<[u8; 32]> {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn parse_finished(line: &str) -> Option<[u8; 32]> {
     fixed(fields(line, "F", 1)?[0])
 }
 

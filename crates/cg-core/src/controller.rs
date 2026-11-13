@@ -1204,7 +1204,7 @@ impl Actor {
         };
         let hello = active.hello.clone();
         let serial = active.device.serial.clone();
-        let name = self.config.computer_name.clone().unwrap_or_default();
+        let name = crate::wireless::computer_name(self.config.computer_name.as_deref());
         active.tasks.spawn(async move {
             match cable_pairing::pair_if_needed(&phone, &hello, &serial, enabled, &name, &store)
                 .await
@@ -1214,6 +1214,12 @@ impl Actor {
                 }
                 Ok(cable_pairing::Outcome::AlreadyPaired) => {
                     tracing::info!("wireless: already paired");
+                }
+                Ok(cable_pairing::Outcome::KnownButNoKey) => {
+                    tracing::warn!(
+                        "wireless: the phone has a pairing this computer lacks; remove it on \
+                         the phone to pair again"
+                    );
                 }
                 Ok(cable_pairing::Outcome::Skipped) => {
                     tracing::info!("wireless: cable pairing skipped");
@@ -3635,22 +3641,33 @@ mod tests {
             }
         }
 
-        async fn until(what: &str, mut done: impl FnMut() -> bool) {
-            for _ in 0..300 {
-                if done() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("timed out waiting for {what}");
+        async fn until(what: &str, done: impl FnMut() -> bool) {
+            eventually(what, Duration::from_secs(8), done).await;
         }
 
-        async fn settle() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        /// Captures the actor's log on this thread: the cable pairing task logs its outcome
+        /// last, so a line here means the attempt has finished.
+        fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
+            let captured = Captured::default();
+            let writer = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .finish();
+            (captured, tracing::subscriber::set_default(subscriber))
+        }
+
+        async fn logged(captured: &Captured, level: &str, text: &str, count: usize) {
+            until(&format!("{count} × {level} {text:?}"), || {
+                captured.lines(level, text) >= count
+            })
+            .await;
         }
 
         #[tokio::test]
         async fn a_connected_session_pairs_once_over_the_cable() {
+            let (log, _guard) = capture();
             let w = wireless_rig(
                 options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
                 true,
@@ -3678,7 +3695,8 @@ mod tests {
                 connected(s) && w.r.backend.started() == 2
             })
             .await;
-            settle().await;
+            // The second session's attempt has decided.
+            logged(&log, "INFO", "wireless: already paired", 1).await;
             assert_eq!(w.r.phone.cable_connections(), 1);
         }
 
@@ -3711,6 +3729,7 @@ mod tests {
                 ),
             ];
             for (caps, setting, forced, with_store) in cases {
+                let (log, _guard) = capture();
                 let w = wireless_rig(
                     options(CableBehaviour::Reply(new_line()), caps),
                     setting,
@@ -3719,7 +3738,11 @@ mod tests {
                 )
                 .await;
                 connect_and_wait(&w.r, "connected", connected).await;
-                settle().await;
+                if with_store {
+                    logged(&log, "INFO", "wireless: cable pairing skipped", 1).await;
+                }
+                // Without a store no attempt is started at all, and that is decided before the
+                // session is published as connected.
                 assert_eq!(w.r.phone.cable_connections(), 0);
                 assert!(w.store.records().is_empty());
             }
@@ -3732,13 +3755,14 @@ mod tests {
                 CableBehaviour::Reply(format!("{PHONE_ID} {IDENTITY} AAAA")),
                 CableBehaviour::Refuse,
             ] {
+                let (log, _guard) = capture();
                 let refused = cable == CableBehaviour::Refuse;
                 let w = wireless_rig(options(cable, WIRELESS_CAPS), true, false, true).await;
                 connect_and_wait(&w.r, "connected", connected).await;
                 if !refused {
                     until("the attempt", || w.r.phone.cable_connections() == 1).await;
                 }
-                settle().await;
+                logged(&log, "WARN", "wireless: cable pairing failed", 1).await;
                 let snapshot = w.r.controller.snapshot();
                 assert!(connected(&snapshot), "{:?}", snapshot.state);
                 assert!(w.store.records().is_empty());
@@ -3758,7 +3782,7 @@ mod tests {
             .await;
             connect_and_wait(&w.r, "connected", connected).await;
             until("the attempt", || w.r.phone.open_cable_connections() == 1).await;
-            settle().await;
+            // Connected while the attempt waits on the phone.
             assert!(connected(&w.r.controller.snapshot()));
             // The session ends: the attempt's connection goes with it.
             w.r.controller.send(Command::Disconnect).await.unwrap();
@@ -3766,6 +3790,26 @@ mod tests {
                 w.r.phone.open_cable_connections() == 0
             })
             .await;
+            assert!(w.store.records().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_known_reply_without_a_pairing_here_is_logged_as_such() {
+            let (log, _guard) = capture();
+            let w = wireless_rig(
+                options(
+                    CableBehaviour::Reply(format!("CG1 KNOWN {PHONE_ID}")),
+                    WIRELESS_CAPS,
+                ),
+                true,
+                false,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            logged(&log, "WARN", "has a pairing this computer lacks", 1).await;
+            assert_eq!(log.lines("INFO", "already paired"), 0);
+            assert!(connected(&w.r.controller.snapshot()));
             assert!(w.store.records().is_empty());
         }
     }

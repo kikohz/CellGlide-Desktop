@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 use super::cable::{self, MAX_REPLY, REPLY_TIMEOUT, Reply};
 use super::encoding::display_name;
@@ -22,8 +23,6 @@ use cg_protocol::phone::Hello;
 
 /// What the phone is called when it sends no usable name.
 const FALLBACK_PHONE_NAME: &str = "iPhone";
-/// What this computer is called when the caller has no name (the phone rejects an empty one).
-const FALLBACK_COMPUTER_NAME: &str = "Windows PC";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -31,6 +30,10 @@ pub enum Outcome {
     AlreadyPaired,
     /// A new pairing was saved.
     Paired(Record),
+    /// The phone said `KNOWN`, but this computer has no pairing (or no key) for that phone: the
+    /// phone keeps a pairing this computer lost, and won't send the key again. Removing it on
+    /// the phone lets the two pair again. Only which phone this USB device is was remembered.
+    KnownButNoKey,
     /// The switch is off, or the phone can't do wireless: nothing was opened.
     Skipped,
 }
@@ -50,18 +53,12 @@ pub async fn pair_if_needed(
     // phone still has it, a new key replaces it. `records()` also calls a record stale when its
     // key is missing.
     if let Some(phone_id) = store.phone_id(usb_serial)
-        && store
-            .records()
-            .iter()
-            .any(|r| r.peer_id == phone_id && !r.stale)
+        && has_good_record(store, &phone_id)
     {
         return Ok(Outcome::AlreadyPaired);
     }
-    let name = match computer_name.trim() {
-        "" => FALLBACK_COMPUTER_NAME,
-        name => name,
-    };
-    let request = cable::request(&store.local_id(), name);
+    let name = super::computer_name(Some(computer_name));
+    let request = cable::request(&store.local_id(), &name);
 
     let mut stream = phone.open(CABLE_PAIRING_PORT).await?;
     stream.write_all(request.as_bytes()).await?;
@@ -76,10 +73,32 @@ pub async fn pair_if_needed(
         .ok()
         .and_then(cable::parse_reply)
         .ok_or_else(|| CoreError::Pairing("the phone's reply was malformed".into()))?;
+    let phone_id = match &reply {
+        Reply::Known { phone_id } | Reply::New { phone_id, .. } => phone_id.clone(),
+    };
+    // Another USB device already is this phone, with a good pairing: a device claiming to be
+    // it must not take over (or replace) that pairing. Nothing is saved or changed.
+    if has_good_record(store, &phone_id)
+        && store
+            .usb_serials(&phone_id)
+            .iter()
+            .any(|serial| serial != usb_serial)
+    {
+        return Err(CoreError::Pairing(
+            "the phone named in the reply is already paired through another USB device".into(),
+        ));
+    }
     match reply {
         // The phone doesn't send the key twice: remember which phone this is.
         Reply::Known { phone_id } => {
             store.remember_phone(usb_serial, &phone_id)?;
+            let has_key = store
+                .records()
+                .iter()
+                .any(|r| r.peer_id == phone_id && store.key(&r.identity).is_some());
+            if !has_key {
+                return Ok(Outcome::KnownButNoKey);
+            }
             store.set_stale(&phone_id, false)?;
             Ok(Outcome::AlreadyPaired)
         }
@@ -108,6 +127,14 @@ pub async fn pair_if_needed(
     }
 }
 
+/// A pairing with `phone_id` that is not stale and whose key is present.
+fn has_good_record(store: &WirelessStore, phone_id: &str) -> bool {
+    store
+        .records()
+        .iter()
+        .any(|r| r.peer_id == phone_id && !r.stale)
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -115,9 +142,11 @@ fn unix_now() -> u64 {
 }
 
 /// One line without its newline, read a byte at a time so nothing beyond it is consumed.
-/// A line that reaches `MAX_REPLY` bytes is an error.
-async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
-    let mut line = Vec::new();
+/// A line that reaches `MAX_REPLY` bytes is an error. The line can carry the key, so it is
+/// wiped when dropped, and allocated once at full size so no partial copy is left behind by a
+/// reallocation.
+async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Zeroizing<Vec<u8>>> {
+    let mut line = Zeroizing::new(Vec::with_capacity(MAX_REPLY));
     loop {
         let byte = stream.read_u8().await?;
         if byte == b'\n' {
@@ -303,7 +332,7 @@ mod tests {
     async fn a_known_reply_for_a_computer_with_no_record_only_remembers_the_phone() {
         let r = rig(CableBehaviour::Reply(format!("CG1 KNOWN {PHONE_ID}"))).await;
         let outcome = pair(&r, true, &wireless_hello()).await.unwrap();
-        assert_eq!(outcome, Outcome::AlreadyPaired);
+        assert_eq!(outcome, Outcome::KnownButNoKey);
         assert_eq!(r.store.phone_id(SERIAL), Some(PHONE_ID.to_string()));
         assert!(r.store.records().is_empty());
         // No record to rely on, so the next session asks again.
@@ -365,5 +394,116 @@ mod tests {
         let r = rig(CableBehaviour::Reply(new_line("records", 7, "iPhone"))).await;
         assert!(pair(&r, true, &wireless_hello()).await.is_err());
         nothing_saved(&r);
+    }
+
+    #[tokio::test]
+    async fn a_known_reply_for_a_record_whose_key_is_missing_is_known_but_no_key() {
+        struct Refuses;
+        impl crate::wireless::store::SecretStore for Refuses {
+            fn protect(&self, plain: &[u8]) -> std::io::Result<Vec<u8>> {
+                PlainSecrets.protect(plain)
+            }
+            fn unprotect(&self, _: &[u8]) -> std::io::Result<Vec<u8>> {
+                Err(std::io::Error::other("wrong machine"))
+            }
+        }
+        let mut r = rig(CableBehaviour::Reply(new_line(IDENTITY, 7, "iPhone"))).await;
+        pair(&r, true, &wireless_hello()).await.unwrap();
+        // The key file can't be opened any more (another machine's, say): the record stays,
+        // its key is gone.
+        r.store = WirelessStore::open(r._dir.path(), Arc::new(Refuses)).unwrap();
+        assert!(r.store.records()[0].stale);
+        r.phone
+            .set_cable(CableBehaviour::Reply(format!("CG1 KNOWN {PHONE_ID}")));
+        let outcome = pair(&r, true, &wireless_hello()).await.unwrap();
+        assert_eq!(outcome, Outcome::KnownButNoKey);
+        assert_eq!(r.phone.cable_connections(), 2);
+        assert!(r.store.records()[0].stale, "still unusable");
+        assert!(r.store.key(IDENTITY).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_known_reply_with_the_key_present_is_still_already_paired() {
+        let r = rig(CableBehaviour::Reply(new_line(IDENTITY, 7, "iPhone"))).await;
+        pair(&r, true, &wireless_hello()).await.unwrap();
+        r.store.set_stale(PHONE_ID, true).unwrap();
+        r.phone
+            .set_cable(CableBehaviour::Reply(format!("CG1 KNOWN {PHONE_ID}")));
+        assert_eq!(
+            pair(&r, true, &wireless_hello()).await.unwrap(),
+            Outcome::AlreadyPaired
+        );
+    }
+
+    const OTHER_SERIAL: &str = "bbbb";
+
+    /// The store as it was after pairing through `SERIAL`, for comparing after a refusal.
+    fn snapshot(r: &Rig) -> (Vec<Record>, Option<String>, Option<String>, Vec<String>) {
+        (
+            r.store.records(),
+            r.store.phone_id(SERIAL),
+            r.store.phone_id(OTHER_SERIAL),
+            r.store.usb_serials(PHONE_ID),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_reply_naming_a_phone_paired_through_another_usb_device_is_refused() {
+        for second in [
+            format!("CG1 KNOWN {PHONE_ID}"),
+            new_line(IDENTITY2, 9, "Not Eve"),
+        ] {
+            let r = rig(CableBehaviour::Reply(new_line(IDENTITY, 7, "Eve iPhone"))).await;
+            pair(&r, true, &wireless_hello()).await.unwrap();
+            let before = snapshot(&r);
+            r.phone.set_cable(CableBehaviour::Reply(second.clone()));
+            let error = pair_if_needed(
+                &r.handle,
+                &wireless_hello(),
+                OTHER_SERIAL,
+                true,
+                "Desk PC",
+                &r.store,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, CoreError::Pairing(_)), "{second}: {error}");
+            assert_eq!(snapshot(&r), before, "{second}: nothing changed");
+            assert_eq!(r.store.phone_id(OTHER_SERIAL), None);
+            assert_eq!(r.store.key(IDENTITY).unwrap().as_bytes(), &[7u8; 32]);
+            assert!(r.store.key(IDENTITY2).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_phone_whose_pairing_through_another_usb_device_is_stale_can_pair_again() {
+        let r = rig(CableBehaviour::Reply(new_line(IDENTITY, 7, "iPhone"))).await;
+        pair(&r, true, &wireless_hello()).await.unwrap();
+        r.store.set_stale(PHONE_ID, true).unwrap();
+        r.phone
+            .set_cable(CableBehaviour::Reply(new_line(IDENTITY2, 9, "iPhone")));
+        let outcome = pair_if_needed(
+            &r.handle,
+            &wireless_hello(),
+            OTHER_SERIAL,
+            true,
+            "Desk PC",
+            &r.store,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Paired(_)), "{outcome:?}");
+        assert_eq!(r.store.phone_id(OTHER_SERIAL), Some(PHONE_ID.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_name_with_only_control_characters_is_sent_as_windows_pc() {
+        let r = rig(CableBehaviour::Reply(new_line(IDENTITY, 7, "iPhone"))).await;
+        pair_named(&r, true, &wireless_hello(), "\u{0}\n\u{7f}")
+            .await
+            .unwrap();
+        closed(&r).await;
+        let expected = cable::request(&r.store.local_id(), "Windows PC").into_bytes();
+        assert_eq!(r.phone.cable_requests(), vec![expected]);
     }
 }

@@ -172,7 +172,9 @@ where
 /// instance name): a `C` line naming another phone aborts. `confirm` shows the 6-digit code and
 /// returns whether this computer's user says it matches the phone's; dropping its future must
 /// withdraw the question. `save` is called once, only after both users agreed and the phone's
-/// proof checked out, and before `F` is sent; if it fails nothing is sent.
+/// proof checked out, and before `F` is sent; if it fails nothing is sent. Callers pass the name
+/// through `wireless::computer_name`; an empty one is replaced the same way here anyway, because
+/// the phone refuses an `M` line with an empty name and counts it toward its lockout.
 pub async fn run<S, C, Fut, V>(
     stream: S,
     expected_phone_id: &str,
@@ -206,7 +208,7 @@ where
         &session.public_key(),
         &session.nonce(),
         computer_id,
-        computer_name,
+        &super::computer_name(Some(computer_name)),
     );
     transcript.add(&m);
     write_text(&mut writer, &m).await?;
@@ -324,6 +326,8 @@ mod tests {
         /// How long after sending C the phone had M (virtual time).
         m_after: Option<Duration>,
         code: Option<String>,
+        /// The computer's name as the phone decoded it from M.
+        computer_name: Option<String>,
         /// None: no F arrived.
         f_valid: Option<bool>,
         saved_when_f_arrived: Option<bool>,
@@ -382,6 +386,7 @@ mod tests {
         let Some(m) = message::parse_computer(m_line.trim_end_matches('\n')) else {
             return report;
         };
+        report.computer_name = Some(m.computer_name.clone());
         if p.silent_after_m {
             until_closed(&mut r).await;
             return report;
@@ -532,6 +537,27 @@ mod tests {
         expected: &str,
         save_fails: bool,
     ) -> Outcome {
+        pair_named_over(
+            computer_end,
+            phone_end,
+            phone,
+            confirm,
+            expected,
+            save_fails,
+            "Elok’s PC",
+        )
+        .await
+    }
+
+    async fn pair_named_over(
+        computer_end: DuplexStream,
+        phone_end: DuplexStream,
+        phone: Phone,
+        confirm: Confirm,
+        expected: &str,
+        save_fails: bool,
+        computer_name: &str,
+    ) -> Outcome {
         let probe = Arc::new(Probe::default());
         let phone_task = tokio::spawn(fake_phone(phone_end, phone, probe.saved.clone()));
         let computer_end = SpyStream {
@@ -546,7 +572,7 @@ mod tests {
             computer_end,
             expected,
             COMPUTER_ID,
-            "Elok’s PC",
+            computer_name,
             move |code: String| async move {
                 p.confirm_calls.fetch_add(1, Ordering::SeqCst);
                 *p.shown_code.lock().unwrap() = Some(code);
@@ -616,6 +642,38 @@ mod tests {
         assert_eq!(o.phone.saved_when_f_arrived, Some(true));
         assert_eq!(o.phone.f_valid, Some(true));
         assert_eq!(confirm_calls(&o), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn m_carries_the_computer_name() {
+        let o = pair(Phone::new(Reply::Allow), Confirm::Yes).await;
+        assert!(o.result.is_ok());
+        assert_eq!(o.phone.computer_name.as_deref(), Some("Elok’s PC"));
+    }
+
+    /// The phone refuses an M line with an empty name and counts it toward its lockout: an
+    /// empty name, or one that cleans to nothing, goes out as the fallback and pairing works.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_computer_name_goes_out_as_windows_pc() {
+        for name in ["", "   ", "\u{0}\n\u{7f}"] {
+            let (computer_end, phone_end) = duplex(4096);
+            let o = pair_named_over(
+                computer_end,
+                phone_end,
+                Phone::new(Reply::Allow),
+                Confirm::Yes,
+                PHONE_ID,
+                false,
+                name,
+            )
+            .await;
+            assert!(o.result.is_ok(), "{name:?}");
+            assert_eq!(
+                o.phone.computer_name.as_deref(),
+                Some("Windows PC"),
+                "{name:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

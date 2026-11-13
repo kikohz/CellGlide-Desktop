@@ -303,4 +303,102 @@ mod tests {
         );
         assert_eq!(check_suite(None), Err(TlsError::WrongSuite));
     }
+
+    /// Code pairing end to end over this TLS on the pairing channel, against a stand-in phone
+    /// built from cg-core's phone-side helpers (its `testing` feature): both sides show the same
+    /// code, the phone gets a valid F, and the computer keeps the key the phone derived.
+    #[tokio::test]
+    async fn code_pairing_runs_over_the_pairing_channel() {
+        use cg_core::wireless::code_message::{self as message, Side, Transcript};
+        use cg_core::wireless::code_pairing;
+        use cg_core::wireless::pairing::{PAIRING_IDENTITY, Role, Session, pairing_channel_key};
+
+        const PHONE_ID: &str = "4961212D-61DD-4BD0-9FE9-8989FB6B8952";
+        const IDENTITY: &str = "9B2E0F5A-7C3D-4E1B-A6D4-5F8C2B1E7A90";
+        let channel_key = *pairing_channel_key().as_bytes();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut builder = SslContextBuilder::new(SslMethod::tls_server()).unwrap();
+        restrict(&mut builder).unwrap();
+        builder.set_psk_server_callback(move |_ssl, identity, psk_out| {
+            if identity == Some(PAIRING_IDENTITY.as_bytes()) {
+                psk_out[..32].copy_from_slice(&channel_key);
+                Ok(32)
+            } else {
+                Ok(0)
+            }
+        });
+        let context = builder.build();
+        let phone = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = SslStream::new(Ssl::new(&context).unwrap(), tcp).unwrap();
+            Pin::new(&mut stream).accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "CG1 PAIR\n");
+
+            let session = Session::fixed(Role::Phone, [0x11; 32], [0x22; 16]);
+            let mut transcript = Transcript::new();
+            let c = message::commitment(&session.commitment(), PHONE_ID);
+            transcript.add(&c);
+            reader.get_mut().write_all(c.as_bytes()).await.unwrap();
+
+            let mut m = String::new();
+            reader.read_line(&mut m).await.unwrap();
+            transcript.add(&m);
+            let computer = message::parse_computer(m.trim_end_matches('\n')).unwrap();
+            let p = message::phone(&session.public_key(), &session.nonce());
+            transcript.add(&p);
+            reader.get_mut().write_all(p.as_bytes()).await.unwrap();
+            let agreed = session
+                .agree(&computer.public_key, &computer.nonce)
+                .unwrap();
+
+            let signed = message::allowed_signed(IDENTITY, "Eve iPhone");
+            transcript.add(&signed);
+            let proof = message::proof(Side::Phone, &agreed.long_term_key, &transcript);
+            let ok = message::allowed(IDENTITY, "Eve iPhone", &proof);
+            reader.get_mut().write_all(ok.as_bytes()).await.unwrap();
+
+            let mut f = String::new();
+            tokio::time::timeout(message::FIRST_STEP_TIMEOUT, reader.read_line(&mut f))
+                .await
+                .unwrap()
+                .unwrap();
+            let computer_proof = message::parse_finished(f.trim_end_matches('\n')).unwrap();
+            assert!(message::verify(
+                &computer_proof,
+                Side::Computer,
+                &agreed.long_term_key,
+                &transcript
+            ));
+            (computer.computer_name, agreed.code, agreed.long_term_key)
+        });
+
+        let stream = connect(address, PAIRING_IDENTITY, &channel_key)
+            .await
+            .unwrap();
+        let shown = std::sync::Mutex::new(None);
+        let paired = code_pairing::run(
+            stream,
+            PHONE_ID,
+            "7C1E5B52-2D6A-4A0F-8F3B-0A9D5E4C1B22",
+            "Desk PC",
+            |code| {
+                *shown.lock().unwrap() = Some(code);
+                async { true }
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let (computer_name, phone_code, phone_key) = phone.await.unwrap();
+        assert_eq!(computer_name, "Desk PC");
+        assert_eq!(shown.into_inner().unwrap(), Some(phone_code));
+        assert_eq!(paired.phone_id, PHONE_ID);
+        assert_eq!(paired.identity, IDENTITY);
+        assert_eq!(paired.long_term_key, phone_key);
+    }
 }

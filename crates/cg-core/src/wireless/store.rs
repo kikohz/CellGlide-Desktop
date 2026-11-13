@@ -291,6 +291,17 @@ impl WirelessStore {
         self.lock().persisted.usb_devices.get(usb_serial).cloned()
     }
 
+    /// The USB devices last seen as `phone_id`, in serial order.
+    pub fn usb_serials(&self, phone_id: &str) -> Vec<String> {
+        self.lock()
+            .persisted
+            .usb_devices
+            .iter()
+            .filter(|(_, phone)| *phone == phone_id)
+            .map(|(serial, _)| serial.clone())
+            .collect()
+    }
+
     /// The access point's network name and passphrase, made on first use and then kept.
     pub fn access_point(&self) -> io::Result<(String, String)> {
         let mut state = self.lock();
