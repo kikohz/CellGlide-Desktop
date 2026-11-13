@@ -205,10 +205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = WirelessStore::open(dir.path(), Arc::new(PlainSecrets)).unwrap();
         Rig {
-            handle: Phone {
-                endpoint: mux.endpoint(),
-                device: device(SERIAL, 1),
-            },
+            handle: Phone::usb(mux.endpoint(), device(SERIAL, 1)),
             _mux: mux,
             phone,
             _dir: dir,

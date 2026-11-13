@@ -223,12 +223,9 @@ mod tests {
             },
         )
         .await;
-        let fwd = Forwarder::start(Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        })
-        .await
-        .unwrap();
+        let fwd = Forwarder::start(Phone::usb(mux.endpoint(), device("aaaa", 1)))
+            .await
+            .unwrap();
         let started = std::time::Instant::now();
         assert!(!HttpsProbe::cloudflare().check(fwd.port()).await);
         assert!(started.elapsed() < Duration::from_secs(2));

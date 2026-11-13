@@ -315,7 +315,8 @@ struct Active {
     tasks: TaskGuard,
     /// Sends the battery to the phone app; its connection closes with the session.
     reporter: Reporter,
-    device: Device,
+    /// The phone and the link this session uses.
+    phone: Phone,
     hello: Hello,
     dns: DnsMode,
     /// As the tunnel reported it once finished.
@@ -480,9 +481,7 @@ impl Actor {
 
     /// The current session uses a different phone than `serial`.
     fn active_is_other(&self, serial: &str) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.device.serial != serial)
+        self.active.as_ref().is_some_and(|a| a.phone.id() != serial)
     }
 
     fn chosen(&self) -> Option<&str> {
@@ -590,10 +589,7 @@ impl Actor {
             {
                 continue;
             }
-            let phone = Phone {
-                endpoint: self.config.endpoint.clone(),
-                device: device.clone(),
-            };
+            let phone = Phone::usb(self.config.endpoint.clone(), device.clone());
             let serial = device.serial.clone();
             let tx = events.clone();
             // Tagged, so a slow answer about an earlier plug-in of this serial is ignored.
@@ -645,7 +641,12 @@ impl Actor {
                     self.monitor.usb(false, Timestamp::now());
                 }
                 self.devices.retain(|d| d.mux_id != id);
-                if self.active.as_ref().is_some_and(|a| a.device.mux_id == id) {
+                if self
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.phone.usb_device())
+                    .is_some_and(|d| d.mux_id == id)
+                {
                     self.teardown().await;
                     self.phone_ended_session();
                     self.last_error = Some(Reason::PhoneGone);
@@ -906,16 +907,10 @@ impl Actor {
 
     fn full_check(&self) -> impl Future<Output = FullCheck> + Send + use<> {
         // Copy what the awaits need: the actor holds a tunnel that is not Sync.
-        let target = self.active.as_ref().map(|a| {
-            (
-                Phone {
-                    endpoint: self.config.endpoint.clone(),
-                    device: a.device.clone(),
-                },
-                a.hello.session_id.clone(),
-                a.checks.port(),
-            )
-        });
+        let target = self
+            .active
+            .as_ref()
+            .map(|a| (a.phone.clone(), a.hello.session_id.clone(), a.checks.port()));
         let probe = self.config.exit_probe.clone();
         async move {
             let Some((phone, session_id, port)) = target else {
@@ -1039,10 +1034,7 @@ impl Actor {
     }
 
     async fn establish(&mut self, device: Device, events: &mpsc::Sender<Event>) -> Result<Active> {
-        let phone = Phone {
-            endpoint: self.config.endpoint.clone(),
-            device: device.clone(),
-        };
+        let phone = Phone::usb(self.config.endpoint.clone(), device);
         let hello = phone::read_hello(&phone).await?;
         hello.validate()?;
         if !hello.has(capability::UDP_OVER_USB) {
@@ -1057,7 +1049,8 @@ impl Actor {
                 .config
                 .sysfs_root
                 .as_deref()
-                .and_then(|root| crate::usb_speed::link_speed(root, &device.serial));
+                .zip(phone.usb_device())
+                .and_then(|(root, device)| crate::usb_speed::link_speed(root, &device.serial));
             let ended: Ended = phone::watch(
                 &phone,
                 &hello.session_id,
@@ -1156,7 +1149,7 @@ impl Actor {
             .0
             .push(spawn_metrics(phone.clone(), generation, events.clone()));
         tasks.0.push(spawn_status(
-            phone,
+            phone.clone(),
             generation,
             hello.dns_enabled(),
             events.clone(),
@@ -1166,7 +1159,7 @@ impl Actor {
         Ok(Active {
             tasks,
             reporter,
-            device,
+            phone,
             hello,
             dns,
             strict_dns,
@@ -1198,12 +1191,13 @@ impl Actor {
             return;
         };
         let enabled = self.settings.get().wireless_enabled || self.config.wireless_forced;
-        let phone = Phone {
-            endpoint: self.config.endpoint.clone(),
-            device: active.device.clone(),
+        // Cable pairing is for the USB link only.
+        let Some(device) = active.phone.usb_device() else {
+            return;
         };
+        let serial = device.serial.clone();
+        let phone = active.phone.clone();
         let hello = active.hello.clone();
-        let serial = active.device.serial.clone();
         let name = crate::wireless::computer_name(self.config.computer_name.as_deref());
         active.tasks.spawn(async move {
             match cable_pairing::pair_if_needed(&phone, &hello, &serial, enabled, &name, &store)
@@ -1330,7 +1324,7 @@ impl Actor {
             selected: self
                 .active
                 .as_ref()
-                .map(|a| a.device.serial.clone())
+                .map(|a| a.phone.id())
                 .or_else(|| stored.chosen_serial.clone()),
             wants_connection: self.wants(),
             phone: self.feed.card(std::time::Instant::now(), self.usb.as_ref()),

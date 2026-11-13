@@ -3,7 +3,7 @@
 
 use crate::lockdown::{self, LockdownInfo, Relay};
 use crate::mux::MuxStream;
-use crate::phone::Phone;
+use crate::phone::{Link, Phone};
 use crate::retry::backoff;
 use crate::{CoreError, Result};
 use cg_ipc::phone::{BatteryReading, UsbPhone};
@@ -170,7 +170,10 @@ async fn read_once(phone: &Phone, open: &mut Option<(Relay, LockdownInfo)>) -> R
     let (mut relay, info) = match open.take() {
         Some(opened) => opened,
         None => {
-            let pairing = lockdown::pairing(&phone.endpoint, &phone.device.serial).await?;
+            let Link::Usb { endpoint, device } = &phone.link else {
+                return Err(CoreError::Lockdown("lockdown needs the USB link".into()));
+            };
+            let pairing = lockdown::pairing(endpoint, &device.serial).await?;
             lockdown::open_relay(phone, &pairing).await?
         }
     };
@@ -191,7 +194,11 @@ async fn read_once(phone: &Phone, open: &mut Option<(Relay, LockdownInfo)>) -> R
 /// good read, `None` for each failure, which also waits out the shared backoff. One relay
 /// connection serves all reads; after an error it is dropped and opened again. Stopping
 /// (receiver closed, or the task aborted) drops the relay, closing its socket and TLS session.
+/// Lockdown is reached only over the cable: on the wireless link this returns at once.
 pub async fn watch(phone: Phone, tx: mpsc::Sender<Option<UsbPhone>>) {
+    if phone.usb_device().is_none() {
+        return;
+    }
     let mut open: Option<(Relay, LockdownInfo)> = None;
     let mut failures = 0u32;
     let mut logged = false;
@@ -588,5 +595,20 @@ mod tests {
         };
         assert_eq!(super::report(&no_sims).unwrap().sims, None);
         assert_eq!(super::report(&UsbPhone::default()), None);
+    }
+
+    /// Lockdown is USB only: on the wireless link the watcher ends at once, opening nothing.
+    #[tokio::test]
+    async fn watch_on_the_wireless_link_reads_nothing() {
+        let link = crate::testing::FakeWirelessLink::echo("ABC").await;
+        let (tx, mut rx) = mpsc::channel(4);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            watch(Phone::wireless(link.clone()), tx),
+        )
+        .await
+        .expect("returns at once");
+        assert!(rx.recv().await.is_none(), "nothing sent");
+        assert!(link.opened().is_empty());
     }
 }

@@ -95,10 +95,7 @@ mod tests {
         let mux = FakeMux::start().await;
         mux.attach(device("aaaa", 1));
         let fake = FakePhone::start(&mux, FakePhoneOptions::default()).await;
-        let doh = DohUpstream::new(Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        });
+        let doh = DohUpstream::new(Phone::usb(mux.endpoint(), device("aaaa", 1)));
         for id in 0..3u8 {
             let query = vec![0, id, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
             let answer = doh.exchange(query.clone()).await.unwrap();
@@ -111,10 +108,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_phone_gives_none() {
         let mux = FakeMux::start().await;
-        let doh = DohUpstream::new(Phone {
-            endpoint: mux.endpoint(),
-            device: device("gone", 9),
-        });
+        let doh = DohUpstream::new(Phone::usb(mux.endpoint(), device("gone", 9)));
         assert!(doh.exchange(vec![0; 17]).await.is_none());
     }
 }

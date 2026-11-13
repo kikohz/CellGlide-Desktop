@@ -8,6 +8,7 @@ pub mod code_message;
 pub mod code_pairing;
 pub mod encoding;
 pub mod pairing;
+pub mod ports;
 pub mod request;
 pub mod store;
 

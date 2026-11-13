@@ -1,6 +1,7 @@
 //! The phone app's control services: hello, session watch, status and metrics.
 
 use crate::mux::{self, MuxEndpoint, MuxStream};
+use crate::wireless::ports::WirelessLink;
 use crate::{CoreError, Result};
 use cg_protocol::ProtocolError;
 use cg_protocol::mux::Device;
@@ -8,8 +9,10 @@ use cg_protocol::phone::{
     HELLO_REQUEST, Hello, MAX_HELLO_BODY, MAX_HTTP_HEAD, MAX_METRICS_LINE, MAX_STATUS_LINE,
     PhoneMetrics, SharingStatus, StatusSequence, parse_http_head, port, watch_request,
 };
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -21,15 +24,75 @@ pub const METRICS_SILENCE: Duration = Duration::from_secs(5);
 
 pub type Ended = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// How the computer reaches the phone: usbmuxd over the cable, or the wireless link. Either
+/// way `Phone::open` gives a stream to one of the phone's ports.
+#[derive(Clone)]
+pub enum Link {
+    Usb {
+        endpoint: MuxEndpoint,
+        device: Device,
+    },
+    Wireless(Arc<dyn WirelessLink>),
+}
+
+impl fmt::Debug for Link {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Link::Usb { endpoint, device } => f
+                .debug_struct("Usb")
+                .field("endpoint", endpoint)
+                .field("device", device)
+                .finish(),
+            Link::Wireless(link) => f.debug_tuple("Wireless").field(&link.phone_id()).finish(),
+        }
+    }
+}
+
+/// One phone and the link to it. Cheap to clone (the wireless link is shared).
 #[derive(Clone, Debug)]
 pub struct Phone {
-    pub endpoint: MuxEndpoint,
-    pub device: Device,
+    pub link: Link,
 }
 
 impl Phone {
+    pub fn usb(endpoint: MuxEndpoint, device: Device) -> Phone {
+        Phone {
+            link: Link::Usb { endpoint, device },
+        }
+    }
+
+    pub fn wireless(link: Arc<dyn WirelessLink>) -> Phone {
+        Phone {
+            link: Link::Wireless(link),
+        }
+    }
+
     pub async fn open(&self, port: u16) -> Result<MuxStream> {
-        mux::connect(&self.endpoint, self.device.mux_id, port).await
+        match &self.link {
+            Link::Usb { endpoint, device } => mux::connect(endpoint, device.mux_id, port).await,
+            Link::Wireless(link) => link.open(port).await,
+        }
+    }
+
+    /// What the phone is known by: its USB serial, or `wireless:<phoneID>`.
+    pub fn id(&self) -> String {
+        match &self.link {
+            Link::Usb { device, .. } => device.serial.clone(),
+            Link::Wireless(link) => format!("wireless:{}", link.phone_id()),
+        }
+    }
+
+    /// The usbmuxd device, for what only works over the cable (lockdown, link speed, cable
+    /// pairing); `None` on the wireless link.
+    pub fn usb_device(&self) -> Option<&Device> {
+        match &self.link {
+            Link::Usb { device, .. } => Some(device),
+            Link::Wireless(_) => None,
+        }
+    }
+
+    pub fn is_wireless(&self) -> bool {
+        matches!(self.link, Link::Wireless(_))
     }
 }
 
@@ -131,7 +194,8 @@ pub async fn metrics_stream(phone: Phone, tx: mpsc::Sender<PhoneMetrics>) -> Res
 mod tests {
     use super::*;
     use crate::testing::{
-        FakeMux, FakePhone, FakePhoneOptions, SESSION_A, SESSION_B, device, hello_json,
+        FakeMux, FakePhone, FakePhoneOptions, FakeWirelessLink, SESSION_A, SESSION_B, device,
+        hello_json,
     };
     use std::time::Duration;
 
@@ -139,10 +203,7 @@ mod tests {
         let mux = FakeMux::start().await;
         mux.attach(device("aaaa", 1));
         let fake = FakePhone::start(&mux, options).await;
-        let phone = Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        };
+        let phone = Phone::usb(mux.endpoint(), device("aaaa", 1));
         (mux, fake, phone)
     }
 
@@ -213,5 +274,42 @@ mod tests {
         let m = rx.recv().await.unwrap();
         assert_eq!(m.battery, Some(0.5));
         assert_eq!(m.download, Some(2048.0));
+    }
+
+    #[test]
+    fn a_usb_phone_is_known_by_its_serial() {
+        let phone = Phone::usb(crate::testing::missing_mux(), device("aaaa", 7));
+        assert_eq!(phone.id(), "aaaa");
+        assert_eq!(phone.usb_device(), Some(&device("aaaa", 7)));
+        assert!(!phone.is_wireless());
+    }
+
+    #[tokio::test]
+    async fn a_wireless_phone_has_its_own_id_and_no_usb_device() {
+        let phone = Phone::wireless(FakeWirelessLink::echo("ABC").await);
+        assert_eq!(phone.id(), "wireless:ABC");
+        assert_eq!(phone.usb_device(), None);
+        assert!(phone.is_wireless());
+        assert_eq!(phone.clone().id(), "wireless:ABC");
+    }
+
+    #[tokio::test]
+    async fn open_on_a_wireless_phone_goes_through_its_link() {
+        let link = FakeWirelessLink::echo("ABC").await;
+        let phone = Phone::wireless(link.clone());
+        let mut stream = phone.open(8088).await.unwrap();
+        assert_eq!(link.opened(), [8088]);
+        stream.write_all(b"ping").await.unwrap();
+        let mut back = [0u8; 4];
+        stream.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"ping");
+    }
+
+    #[tokio::test]
+    async fn open_on_a_usb_phone_goes_through_usbmuxd() {
+        let (mux, _fake, phone) = setup(FakePhoneOptions::default()).await;
+        assert!(phone.open(port::CONTROL).await.is_ok());
+        let unknown = Phone::usb(mux.endpoint(), device("zzzz", 9));
+        assert!(unknown.open(port::CONTROL).await.is_err(), "no such device");
     }
 }

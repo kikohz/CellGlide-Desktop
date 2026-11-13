@@ -2,12 +2,14 @@
 
 pub mod battery_fixtures;
 mod fake_backend;
+mod fake_link;
 mod fake_lockdown;
 mod fake_mux;
 mod fake_phone;
 mod fake_probe;
 
 pub use fake_backend::{FakeBackend, FinishCall, SharedFake};
+pub use fake_link::FakeWirelessLink;
 pub use fake_lockdown::{
     DEVICE_CERT_PEM, DEVICE_KEY_PEM, FAKE_RELAY_PORT, FIXTURE_HOST_ID, FIXTURE_SYSTEM_BUID,
     FakeLockdown, HOST_CERT_PEM, HOST_KEY_PEM, fixture_pair_record, host_cert_der,

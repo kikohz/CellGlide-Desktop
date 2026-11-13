@@ -71,12 +71,10 @@ async fn main() -> ExitCode {
         println!("usbmuxd: no matching USB iPhone");
         return ExitCode::FAILURE;
     };
-    let phone = Phone {
-        endpoint: endpoint.clone(),
-        device,
-    };
+    let serial = device.serial.clone();
+    let phone = Phone::usb(endpoint.clone(), device);
 
-    let pairing = match lockdown::pairing(&endpoint, &phone.device.serial).await {
+    let pairing = match lockdown::pairing(&endpoint, &serial).await {
         Ok(pairing) => {
             println!("pair record: ok");
             Some(pairing)

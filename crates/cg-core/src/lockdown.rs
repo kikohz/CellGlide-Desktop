@@ -241,6 +241,10 @@ fn reply_error(reply: &Dictionary) -> &str {
 /// The phone's name and model identifier, asked of lockdown without a session (it answers
 /// these even before pairing). Any failure leaves both unknown. The name is never logged.
 pub async fn describe(phone: &Phone) -> PhoneLabel {
+    // Lockdown is reached only over the cable.
+    if phone.usb_device().is_none() {
+        return PhoneLabel::default();
+    }
     let read = async {
         let mut channel = Channel::Plain(phone.open(lockdown::PORT).await?);
         let name = string(channel.value("DeviceName").await?);
@@ -453,10 +457,7 @@ mod tests {
             },
         )
         .await;
-        let phone = Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        };
+        let phone = Phone::usb(mux.endpoint(), device("aaaa", 1));
         (mux, fake, phone)
     }
 
@@ -500,10 +501,7 @@ mod tests {
         // No lockdownd at all: both unknown, no error.
         let mux = FakeMux::start().await;
         mux.attach(device("aaaa", 1));
-        let silent = Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        };
+        let silent = Phone::usb(mux.endpoint(), device("aaaa", 1));
         assert_eq!(describe(&silent).await, PhoneLabel::default());
     }
 
@@ -640,5 +638,14 @@ mod tests {
         let pairing = pairing(&mux.endpoint(), "aaaa").await.unwrap();
         let (mut relay, _) = open_relay(&p, &pairing).await.unwrap();
         assert!(relay.battery().await.is_err());
+    }
+
+    /// Lockdown is USB only: a wireless phone is not asked, and its label stays unknown.
+    #[tokio::test]
+    async fn describe_on_the_wireless_link_asks_nothing() {
+        let link = crate::testing::FakeWirelessLink::echo("ABC").await;
+        let label = describe(&Phone::wireless(link.clone())).await;
+        assert_eq!(label, PhoneLabel::default());
+        assert!(link.opened().is_empty());
     }
 }

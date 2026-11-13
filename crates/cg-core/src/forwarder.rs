@@ -189,12 +189,9 @@ mod tests {
         let mux = FakeMux::start().await;
         mux.attach(device("aaaa", 1));
         let fake = FakePhone::start(&mux, options).await;
-        let fwd = Forwarder::start(Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        })
-        .await
-        .unwrap();
+        let fwd = Forwarder::start(Phone::usb(mux.endpoint(), device("aaaa", 1)))
+            .await
+            .unwrap();
         (mux, fake, fwd)
     }
 
@@ -347,10 +344,7 @@ mod tests {
         let mux = FakeMux::start().await;
         mux.attach(device("aaaa", 1));
         let _fake = FakePhone::start(&mux, FakePhoneOptions::default()).await;
-        let phone = Phone {
-            endpoint: mux.endpoint(),
-            device: device("aaaa", 1),
-        };
+        let phone = Phone::usb(mux.endpoint(), device("aaaa", 1));
         let fwd = Forwarder::start_with(phone, Duration::from_millis(200))
             .await
             .unwrap();
