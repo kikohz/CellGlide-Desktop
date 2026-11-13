@@ -31,11 +31,26 @@ zeroize.workspace = true
 cg-netstack.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+# The wireless link: TLS 1.2 with ECDHE-PSK-CHACHA20-POLY1305, which neither SChannel nor rustls
+# offer; OpenSSL is built from source and linked statically.
+openssl.workspace = true
+tokio-openssl.workspace = true
+socket2.workspace = true
 windows = { workspace = true, features = [
+    "Devices_Enumeration",
+    "Devices_WiFiDirect",
+    "Foundation",
+    "Foundation_Collections",
+    "Networking",
+    "Networking_Connectivity",
+    "Networking_NetworkOperators",
+    "Security_Credentials",
     "Win32_Foundation",
+    "Win32_NetworkManagement_Dns",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_Rras",
+    "Win32_NetworkManagement_WiFi",
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Networking_WinSock",
     "Win32_Security",
@@ -52,3 +67,7 @@ cg-netstack = { workspace = true, features = ["testkit"] }
 cg-core = { workspace = true, features = ["testing"] }
 cg-ipc.workspace = true
 tokio.workspace = true
+# examples/wireless_gate.rs: the hello request, local timestamps, the library's log lines.
+cg-protocol.workspace = true
+jiff.workspace = true
+tracing-subscriber.workspace = true

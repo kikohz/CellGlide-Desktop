@@ -2,6 +2,7 @@
 
 pub mod bypass;
 pub mod ip;
+pub mod mdns_parse;
 pub mod resolved;
 
 #[cfg(target_os = "linux")]

@@ -40,6 +40,7 @@ jiff = { version = "0.2", features = ["serde"] }
 ksni = "0.3"
 libc = "0.2"
 nix = { version = "0.31", features = ["user", "fs", "hostname"] }
+openssl = { version = "0.10.82", features = ["vendored"] }
 plist = "1.10"
 rust-i18n = "4.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -52,7 +53,8 @@ subtle = "2.6"
 tempfile = "3"
 thiserror = "2.0"
 tokio = { version = "1.53", features = ["full"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-openssl = "0.6.5"
+tokio-rustls ={ version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-appender = "0.2.5"
