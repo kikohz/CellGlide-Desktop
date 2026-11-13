@@ -12,7 +12,7 @@
 | LocalSystem 身份下在接入点上发现 iPhone | 通过（两种做法都能找到；系统接口不稳定，见下） |
 | LocalSystem 身份下用 vendored OpenSSL 完成配对通道握手 | 通过 |
 | x64 CI 编过并通过带 `wireless` 的测试 | 通过（运行 43505868400） |
-| ARM64 CI 编过并通过带 `wireless` 的测试 | **未通过**：OpenSSL 编过（10 分 57 秒），测试程序启动即 `STATUS_ACCESS_VIOLATION`，原因在查 |
+| ARM64 CI 编过并通过带 `wireless` 的测试 | **未通过**：OpenSSL 编过（10 分 57 秒），凡是做真实 TLS 握手的测试都以 `STATUS_ACCESS_VIOLATION` 崩溃，见「ARM64」一节 |
 | 插线自动配对，配来的密钥能在无线上用 | 通过 |
 
 ## 接入点、发现、握手
@@ -58,6 +58,15 @@
 - `C:\ProgramData\CellGlide\wireless.json` 和 `wireless-keys.bin` 保留（1.0.0 的服务不读它们）；iPhone 的「已配对」列表里有这台电脑。
 - Strawberry Perl 装在 `C:\Strawberry`（编 OpenSSL 用）。
 - 计划任务 `CellGlideGate` 已删除。
+
+## ARM64（未解决）
+
+三轮 CI 诊断（运行 43509372741、43509856663、43512265357）查到的：
+
+- 不做 TLS 握手的 48 个测试在 ARM64 上都过，包括 WLAN、WinRT 的；4 个做真实握手的测试全部崩溃。
+- 崩溃点在 OpenSSL 里：`tls_parse_all_extensions+0x10`，读连接对象时指针值是 1。调用栈在**测试用的服务端**（`tokio_openssl` 的 `accept`，解析 ClientHello）。产品里只用客户端，客户端一侧是否也会崩溃还不知道。
+- ARM64 上 OpenSSL 的构建：`VC-WIN64-ARM`、`no-asm`、MSVC 14.51（Visual Studio 18）`/O2`。
+- 怀疑是 MSVC 在 ARM64 上把 OpenSSL 编错了，没有证实。
 
 ## 待办
 
