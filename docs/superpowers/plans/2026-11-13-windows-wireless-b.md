@@ -36,6 +36,7 @@
 3. 任何结束路径之后接入点都已关闭：用户取消、300 秒超时、配对被拒、60 秒重连失败、睡眠、切 USB、关开关、服务关闭、任务被 abort。
 4. 使用者只关写的一半时，TLS 连接不发 close_notify、不断开，回复能读完；整个关闭时直接断 TCP。
 5. 验证码配对进行中，用户取消、手机离开、开关被关、插上线，都不留下保存了一半的配对，也不留下卡住的「等待确认」状态。
+6. 接入点上的恶意设备（知道接入点密码）冒用真手机的实例名：不得让电脑把好的配对标成过期，更不得借此自动走验证码配对替换它（计划 A 终审 Important 2）。
 
 ---
 
@@ -65,10 +66,12 @@
 - Produces:
   - `policy::WAIT_FOR_PHONE = 300 s`、`RETRY_EVERY = 2 s`、`RETRY_FOR = 60 s`、`FRESH_PAIRING_GRACE = 10 s`、`DIAL_TIMEOUT = 4 s`。
   - `policy::pick(found: &[FoundPhone], records: &[Record]) -> Pick`，`Pick::{None, Paired { phone: FoundPhone, record: Record }, Unpaired(FoundPhone), SeveralUnpaired}`：有已配对的选它（多台取 `created_at` 最新的；过期的记录按未配对处理但只针对那台手机）；否则恰好一台就是 `Unpaired`；多台未配对是 `SeveralUnpaired`。
-  - `policy::after_dial_failure(error: &DialError, since_pairing: Option<Duration>) -> Next`，`Next::{Retry, EndStale, EndFailed}`：unknown identity 且配对不到 10 秒 → `Retry`；unknown identity → `EndStale`；其余 → `Retry`（由 60 秒窗口兜底）。
+  - `policy::after_dial_failure(error: &DialError, since_pairing: Option<Duration>, unknown_before: Option<Duration>) -> Next`，`Next::{Retry, EndStale, EndFailed}`：unknown identity 且配对不到 10 秒 → `Retry`；unknown identity 但这是本次会话里第一次（`unknown_before` 为 `None`）或距上一次不到 5 秒 → `Retry`；同一地址相隔至少 5 秒两次 unknown identity → `EndStale`；其余 → `Retry`（由 60 秒窗口兜底）。
+  - `pick` 的歧义规则：同一实例名出现在两个以上地址 → `Pick::Ambiguous`，不拨号、不配对，等下一轮；已配对的手机曾在某个地址连上过时，优先拨那个地址。
+  - **不自动替换好配对**：一条记录在本次 `ConnectWireless` 开始时不是过期的，那么即使会话里被标成过期，本次也不进入验证码配对；只有用户再次点「无线连接」时才会对它走配对。
   - `HealthTiming::wireless()`、`HealthWatchTiming::wireless()`、`JudgeConfig::wireless()`（数值见 Global Constraints）；`health` 里新增「弱」：`weak(median_of_last_5_handshakes: Duration) -> bool`，阈值 1150 ms，只在无线档启用。
 
-- [ ] **Step 1: 写失败的测试**：`pick` 的每个分支（含「两台已配对取最新」「过期记录的手机走未配对」「一台已配对加一台陌生的选已配对的」）；`after_dial_failure` 的三种结果；无线档的每个数值；5 次握手 `[200,300,1200,1300,1400]` 算弱、`[200,300,400,1300,1400]` 不算。
+- [ ] **Step 1: 写失败的测试**：`pick` 的每个分支（含「两台已配对取最新」「过期记录的手机走未配对」「一台已配对加一台陌生的选已配对的」「同名两地址是 Ambiguous」）；`after_dial_failure` 的两次 unknown 规则；`after_dial_failure` 的三种结果；无线档的每个数值；5 次握手 `[200,300,1200,1300,1400]` 算弱、`[200,300,400,1300,1400]` 不算。
 - [ ] **Step 2–3:** 实现，通过，Commit。
 
 ### Task 3: 假的接入点、发现、拨号与无线版假手机
@@ -85,6 +88,7 @@
   - `Dialer` trait：`fn dial(&self, to: SocketAddr, identity: &str, psk: &Key) -> BoxFuture<Result<MuxStream, DialError>>`；`DialError::{UnknownIdentity, Timeout, Io(String)}`。返回的流必须满足 Review Focus 4。
   - `struct WirelessPorts { access_point: Arc<dyn AccessPoint>, browser: Arc<dyn Browser>, dialer: Arc<dyn Dialer> }`；`ControllerConfig.wireless_ports: Option<WirelessPorts>`。
   - `ports::TlsLink`：`WirelessLink` 的实现，持有 `(SocketAddr, identity, link_key, Arc<dyn Dialer>)`，`open(port)` = `dial` 后写 `Request::Data(port).line()`，整个过程受 `DIAL_TIMEOUT` 限制。
+- 计划 A 里只在 `#[cfg(test)]` 下存在的手机端辅助函数（`code_message` 的 `commitment`、`phone`、`allowed`、`allowed_signed`、`parse_computer`、`parse_finished`、`FIRST_STEP_TIMEOUT`，以及 `pairing::Session::fixed`）改成 `#[cfg(any(test, feature = "testing"))]`，否则 `testing/` 里的假手机在别的 crate 里编不过。（若在「计划 A 终审修复」里已改，跳过。）
 - Produces（测试用）：`FakeWireless`：可脚本化的三件套（接入点启动失败、`lost`、手机在第几轮被发现、几台手机、拨号结果），拨号成功时把流接到 `FakePhone` 的对应端口（先读走并核对 `CG1 DATA <port>\n` 或 `CG1 PAIR\n`；`PAIR` 接到一个用 `code_message` 写的假手机配对端）。记录：接入点开关次数、当前是否开着、每次拨号的身份。
 
 - [ ] **Step 1:** 测试：`TlsLink::open` 写出的第一行正确、超时受限、端口不在白名单时不拨号直接报错；`FakeWireless` 自身的记录功能。
@@ -150,6 +154,8 @@
   - 两台未配对手机 → `SeveralPhones`；其中一台消失后自动继续配对。
   - 过期记录：对**那台**手机走配对，成功后旧 identity 的密钥没了。
   - 没有 `Pairing` 阶段时 `ConfirmCode` 被拒（`BadRequest`），不改变任何状态。
+  - `C` 行的 phoneID 与发现到的实例名不同 → `PairingFailed`，没发出 `M`、没保存。
+  - 冒充者场景：已配对手机的实例名由一个只回 unknown identity 的假设备广播（真手机不在）→ 会话失败但记录**没有**被标过期（只有一次 unknown，或不足 5 秒）；同一实例名两个地址 → 不拨号；被标过期的记录在同一次 `ConnectWireless` 里不进入配对。
 - [ ] **Step 2–3:** 实现，通过，Commit。
 
 ### Task 6: Windows 上的三个实现并接进服务
@@ -163,12 +169,16 @@
   - 接入点：包住计划 A 的 `AccessPoint`；`lost()` 由发布者的 `StatusChanged` 变成 `Aborted` 触发（补上计划 A 留的缺口）；`ApFailure` 从 `ApError` 映射（`InUse { mobile_hotspot: true }` → `MobileHotspotOn`）。
   - 发现：`mdns::browse_with(Method::Raw, ..)` 放在 `spawn_blocking` 里。
   - 拨号：`wireless_tls::connect` 的超时改为参数；返回一个包装流 `HalfCloseSafe`：`poll_shutdown` 只记下「写已结束」并返回 `Ok`，不调用 `SSL_shutdown`、不关 TCP 写端；Drop 时把套接字设为 `SO_LINGER 0` 直接断开。
+- 阻塞调用都放进 `spawn_blocking`：`AccessPoint::start`（最多 10 秒）、接入点的 Drop（WinRT `Stop`/`Close`）、发现；控制器里对 `WirelessStore` 的 `access_point()`、`save`、`set_stale` 调用也不放在控制器自己的任务上。
+- 发现默认用 `Method::Raw`（真机上更可靠），不再先试 System。
+- `TlsLink` 只接受 `LinkKey`（新的 newtype，只能由 `pairing::link_key(&Key)` 生成），不接受长期密钥本身。
 - `cg-service` 在 Windows 上打开 `cg-platform/wireless`，`config.wireless_ports = Some(ports())`；链接参数 `/ignore:4099` 加到 `cg-service` 的 build.rs；删除 `CELLGLIDE_WIRELESS` 环境变量和 `wireless_forced`（开关从任务 7 的 IPC 来）。
 - 许可清单带 feature 重新生成（Rust 的 openssl 各 crate 会回到清单里）。
 
 - [ ] **Step 1:** 测试（回环，`wireless` feature）：`HalfCloseSafe`：客户端写完请求后 `shutdown()`，本地 OpenSSL 服务端随后发的回复能完整读到，服务端没有收到 close_notify；Drop 后服务端读到连接重置或 EOF。`ApError` → `ApFailure` 的映射表。拨号超时参数生效。
 - [ ] **Step 2:** 实现；`cargo build -p cg-service --release --locked` 通过，记下服务程序大小的变化。
-- [ ] **Step 3:** **ARM64：** 本任务依赖计划 A 遗留的 ARM64 上 OpenSSL 握手崩溃得到解决（见 `docs/validation/windows-1.1-gate.md`「ARM64」）。如果到这一步仍未解决：ARM64 的服务构建**不打开** `wireless` feature，`wireless_ports = None`，界面按「这台电脑不支持」处理，并在报告里写明；不要在 ARM64 上发布会崩溃的握手代码。
+- [ ] **Step 3: ARM64 的发布构建。** ARM64 上 OpenSSL 必须用 clang-cl 编（MSVC 14.51 会编错，见 `docs/validation/windows-1.1-gate.md`「ARM64」；`cg-platform/build.rs` 会拦下错误的配置）。`scripts/build-windows.ps1` 构建 ARM64 时设置 `CC=<repo>\scripts\openssl-clang-cl.cmd` 和 `CC_aarch64_pc_windows_msvc=clang-cl`，并在找不到 clang-cl 时给出清楚的错误；说明 ARM64 发布包是在 ARM64 机器上构建（CI 的 windows-app arm64 任务）还是从 x64 交叉编译，并让那条路径在 CI 里被构建过。
+- [ ] **Step 3b: 真机验证码配对（主持人和用户）。** 给 `wireless_gate` 加 `--pair`：完整跑一遍验证码配对（在终端里输入「一致」），不保存任何东西；用 iPhone 真跑一次，确认两边验证码相同、iPhone 的允许弹窗出现、`OK` 的证明能验证、发出 `F` 后 iPhone 显示配对成功。之后在 iPhone 上移除这台电脑。结果记进 `docs/validation/windows-1.1-gate.md`。这一步在任务 7 之前做。
 - [ ] **Step 4:** Commit，推送，x64 和 ARM64 的 CI 都绿。
 
 ### Task 7: IPC
@@ -186,6 +196,7 @@
   - `Snapshot.wireless_offered: bool`：开关打开、平台有实现、没有活动会话、没有 USB 手机时为真（界面据此显示按钮）。
   - `ConnState::Connected` 加 `wireless: bool`（`#[serde(default)]`）。
   - `describe`：`wireless_line(&Snapshot) -> Option<String>`、`wireless_steps(ssid, passphrase) -> [String; 3]`、`wireless_failure_text(&WirelessFailure) -> String`；键 `wireless.*`（文案取自设计 §4，中英各一份）。
+- `wireless_offered` 和 `WirelessInfo.available` 要求平台实现**和**配对存储都在；存储打不开时 `available` 给出原因（新的 `WirelessUnavailable` 原因之一），而不是静默不显示。
 - 打开开关时（`SetSettings { wireless: Some(true) }`）做一次能力探测：`access_point.start` 后立刻关；失败则开关保持关并回 `Response::Error`，原因是新的 `Reason::WirelessUnavailable { cause: ApFailure }`。
 
 - [ ] **Step 1:** 测试：新旧 JSON 兼容（没有新字段的版本 6 快照能读）；每个新 `Request` 的权限；只读客户端拿不到 `WirelessInfo`；`Reason::all()`、`KEYS`、两种语言齐全（现有的完整性测试会强制）；`wireless_offered` 的每个条件；开开关时探测失败的路径；`ForgetPhone` 正在用的那台 → 先结束会话再删。
@@ -222,7 +233,7 @@
 
 - doctor：开关打开时才列「这台电脑能开无线接入点」；探测方式同任务 7；无线会话进行中不探测，直接报可用。
 - 快照脚本：拍快照时把描述匹配 `Microsoft Wi-Fi Direct Virtual Adapter*` 的网卡的别名和 GUID 写进快照的新字段 `excluded`；`Test-Excluded` 除 cellglide0 外也排除两份快照里 `excluded` 的并集。测试：注入这类网卡的 DNS、接口、路由、注册表条目，期望 `identical`；没有 `excluded` 字段的旧快照仍可比较。
-- 卸载脚本：普通卸载也删除 `C:\ProgramData\CellGlide\wireless.json`、`wireless-keys.bin`、`wireless-keys.bin.bad`（用现有的不跟随链接的删除函数），其余数据照旧保留；Pester 测试补上。
+- 卸载脚本：普通卸载也删除 `C:\ProgramData\CellGlide\wireless.json`、`wireless-keys.bin`、`wireless-keys.bin.bad`，以及崩溃可能留下的 `wireless.json.tmp`、`wireless-keys.bin.tmp`（用现有的不跟随链接的删除函数），其余数据照旧保留；Pester 测试补上。
 - AGENTS.md：加入设计 §11 的条款，并把「This is the only system-wide network effect allowed」改成与接入点并列。**这一步改之前由主持人向用户确认。**
 - 设计文档：把与代码不符的几处改正（两种语言；接入点名和密码在 `WirelessStore`；健康档是新加的；发现以 Raw 为主；iPhone 被其他已记住的 Wi‑Fi 抢走是已知限制）。
 - [ ] 各自的测试通过，Commit。
