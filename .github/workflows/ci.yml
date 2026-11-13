@@ -94,20 +94,21 @@ jobs:
           cargo test -p cg-platform --features wireless --locked --no-run 2>&1 | grep -v LNK4099 | tail -5
           exe=$(cargo test -p cg-platform --features wireless --locked --no-run --message-format=json 2>/dev/null | jq -r 'select(.profile.test==true and .target.name=="cg_platform" and (.target.kind|index("lib"))) | .executable')
           echo "exe=$exe"
-          for f in target/debug/build/openssl-sys-*/output; do grep -v "^cargo:rerun" "$f" | head -40; done
-          find target/debug/build -name configuration.h -path '*openssl*' -exec grep -n "define OPENSSL_NO_ASM\|OPENSSL_SYS\|define OPENSSL_CONFIGURED" {} +
-          find target/debug/build -name makefile -path '*openssl*' | head -3 | while read m; do grep -in "^CC=\|^CFLAGS=\|^PLATFORM=\|^AS=\|^CNF_CFLAGS=\|^LIB_CFLAGS=\|^CNF_CPPFLAGS=" "$m"; done
-          where cl clang clang-cl nasm 2>&1 | head
-          "$exe" --test-threads=1 --nocapture windows::wireless_tls; echo "serial exit=$?"
-          for t in handshakes_and_echoes_a_line an_unknown_identity_is_reported_as_such the_wrong_key_is_not_an_unknown_identity a_server_without_the_suite_fails_the_handshake nothing_listening_is_an_io_error suite_check; do
-            "$exe" --exact "windows::wireless_tls::tests::$t" --nocapture; echo "TEST $t exit=$?"
-          done
-          ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/" 2>&1
-          cdb=$(ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/arm64/cdb.exe" "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe" 2>/dev/null | head -1)
-          echo "cdb=$cdb"
-          if [ -n "$cdb" ]; then
-            "$cdb" -G -lines -y "srv*C:\\symcache*https://msdl.microsoft.com/download/symbols" -c "g;.echo AFTER_G;.ecxr;r;kn 60;.echo DONE;q" "$(cygpath -w "$exe")" --test-threads=1 --nocapture windows::wireless_tls 2>&1 | tail -150
-          fi
+          vsw="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vsw" -all -products '*' -property catalog_productDisplayVersion
+          for d in "$("$vsw" -latest -products '*' -property installationPath | tr -d '\r')"; do ls "$(cygpath -u "$d")/VC/Tools/MSVC"; done
+          clang-cl --version | head -1
+          # Variant runs, in parallel (nmake builds OpenSSL on one core): clang-cl, and cl with /Od.
+          ( export CC=clang-cl CFLAGS_aarch64_pc_windows_msvc=' ' CXXFLAGS_aarch64_pc_windows_msvc=' '
+            cargo test -p cg-platform --features wireless --locked --target-dir target/v-clang windows::wireless_tls -- --test-threads=1 > /tmp/v-clang.log 2>&1; echo "VARIANT clang-cl exit=$?" >> /tmp/v-clang.log ) &
+          ( export CFLAGS='/W3 /wd4090 /nologo /Od' CFLAGS_aarch64_pc_windows_msvc=' ' CXXFLAGS_aarch64_pc_windows_msvc=' '
+            cargo test -p cg-platform --features wireless --locked --target-dir target/v-od windows::wireless_tls -- --test-threads=1 > /tmp/v-od.log 2>&1; echo "VARIANT cl-Od exit=$?" >> /tmp/v-od.log ) &
+          cdb="/c/Program Files (x86)/Windows Kits/10/Debuggers/arm64/cdb.exe"
+          mod=$(basename "$exe" .exe | tr '-' '_')
+          "$cdb" -G -lines -c "g;.echo AFTER_AV;r;u @pc-0x40 @pc+0x40;.echo UF;uf ${mod}!tls_parse_all_extensions;.echo STACK;dps @sp L200;.echo DONE;q" "$(cygpath -w "$exe")" --exact windows::wireless_tls::tests::handshakes_and_echoes_a_line 2>&1 | grep -v "ModLoad\|NatVis" | tail -400
+          wait
+          for v in clang od; do echo "=== variant $v"; grep -v LNK4099 /tmp/v-$v.log | grep -v "^\s*Compiling" | tail -40; done
+          for d in target/v-clang target/v-od; do find $d/debug/build -name makefile -path '*openssl*' | head -1 | while read m; do grep -in "^CC=\|^CFLAGS=" "$m"; done; done
           exit 1
       # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); off elsewhere until the service uses it.
       - if: matrix.arch == 'x64'
