@@ -12,7 +12,7 @@
 | LocalSystem 身份下在接入点上发现 iPhone | 通过（两种做法都能找到；系统接口不稳定，见下） |
 | LocalSystem 身份下用 vendored OpenSSL 完成配对通道握手 | 通过 |
 | x64 CI 编过并通过带 `wireless` 的测试 | 通过（运行 43505868400） |
-| ARM64 CI 编过并通过带 `wireless` 的测试 | **未通过**：OpenSSL 编过（10 分 57 秒），凡是做真实 TLS 握手的测试都以 `STATUS_ACCESS_VIOLATION` 崩溃，见「ARM64」一节 |
+| ARM64 CI 编过并通过带 `wireless` 的测试 | 通过（运行 43522575450，OpenSSL 改用 clang-cl 编，见「ARM64」一节） |
 | 插线自动配对，配来的密钥能在无线上用 | 通过 |
 
 ## 接入点、发现、握手
@@ -70,16 +70,15 @@
 - Strawberry Perl 装在 `C:\Strawberry`（编 OpenSSL 用）。
 - 计划任务 `CellGlideGate` 已删除。
 
-## ARM64（未解决）
+## ARM64（已解决，提交 0f4b4a8）
 
-三轮 CI 诊断（运行 43509372741、43509856663、43512265357）查到的：
-
-- 不做 TLS 握手的 48 个测试在 ARM64 上都过，包括 WLAN、WinRT 的；4 个做真实握手的测试全部崩溃。
-- 崩溃点在 OpenSSL 里：`tls_parse_all_extensions+0x10`，读连接对象时指针值是 1。调用栈在**测试用的服务端**（`tokio_openssl` 的 `accept`，解析 ClientHello）。产品里只用客户端，客户端一侧是否也会崩溃还不知道。
-- ARM64 上 OpenSSL 的构建：`VC-WIN64-ARM`、`no-asm`、MSVC 14.51（Visual Studio 18）`/O2`。
-- 怀疑是 MSVC 在 ARM64 上把 OpenSSL 编错了，没有证实。
+- 现象：ARM64 上凡是做真实 TLS 握手的测试都以 `STATUS_ACCESS_VIOLATION` 崩溃；不做握手的 48 个测试都过。
+- 不只是测试的问题：用我们的客户端去连外部的 `openssl s_server`，在 ARM64 上同样崩溃，所以产品里的客户端路径也会崩。
+- 崩溃点在 OpenSSL 里（`tls_parse_all_extensions` 入口，连接指针的值是 1）。同一份 OpenSSL 源码，用 MSVC 14.51（Visual Studio 18）`/O2` 编就崩；用 `/Od` 或 clang-cl 编，7 个握手测试全过。结论：MSVC 14.51 的 ARM64 编译器把 OpenSSL 编错了。本机用 MSVC 14.44 交叉编出的那处调用是正确的，所以很可能是 14.51 的退化，但没有在 ARM64 上运行验证过。
+- 修复：ARM64 上用 clang-cl 编 vendored OpenSSL（`scripts/openssl-clang-cl.cmd`，由 `CC` 指定）。`crates/cg-platform/build.rs` 在 ARM64 目标上打开 `wireless` 而 `CC` 不是这个包装脚本时直接拒绝构建，避免不小心编出会崩溃的版本。
+- 绿的运行 43522575450：`windows-rust (arm64)` 24 分 23 秒（其中 13 分 47 秒是因为 `CC` 变了重编 OpenSSL，之后有缓存），`windows-rust (x64)` 5 分 42 秒；两边带 `wireless` 的 54 个测试全过，LNK4099 警告为 0。
+- 留给计划 B：发布脚本 `scripts/build-windows.ps1` 在 ARM64 上打开 `wireless` 时要设同样的两个环境变量（`CC`、`CC_aarch64_pc_windows_msvc`）。
 
 ## 待办
 
-- ARM64 CI 的崩溃查明并修复后，把结果和两种架构的 CI 时间补到这里。
 - CI 的 x64 运行器上 OpenSSL 是否用了汇编（nasm）还没确认；ARM64 不用 nasm。
