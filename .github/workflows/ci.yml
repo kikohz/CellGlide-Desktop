@@ -82,6 +82,54 @@ jobs:
         with:
           key: windows-${{ matrix.arch }}-rust
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
+      - name: TEMP arm64 wireless crash diagnostics (round 4)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $t = $env:RUNNER_TEMP
+          Get-Command perl | Select-Object -ExpandProperty Source
+          # Variants first, in the background: cl with /Od (CPPFLAGS: read by Configure, not by cc-rs),
+          # and clang-cl through a wrapper that leaves an empty ossl_static.pdb for install_dev.
+          Set-Content "$t\clcl.cmd" -Encoding ascii -Value "@clang-cl %*`r`n@if errorlevel 1 exit /b 1`r`n@if not exist ossl_static.pdb type nul > ossl_static.pdb`r`n"
+          $env:CPPFLAGS = '/Od'
+          $pOd = Start-Process cargo -ArgumentList 'test -p cg-platform --features wireless --locked --target-dir target\v-od windows::wireless_tls -- --test-threads=1' -NoNewWindow -PassThru -RedirectStandardOutput "$t\od.out" -RedirectStandardError "$t\od.err"
+          $null = $pOd.Handle
+          Remove-Item Env:CPPFLAGS
+          $env:CC = "$t\clcl.cmd"; $env:CC_aarch64_pc_windows_msvc = 'clang-cl'
+          $pCl = Start-Process cargo -ArgumentList 'test -p cg-platform --features wireless --locked --target-dir target\v-clang windows::wireless_tls -- --test-threads=1' -NoNewWindow -PassThru -RedirectStandardOutput "$t\cl.out" -RedirectStandardError "$t\cl.err"
+          $null = $pCl.Handle
+          Remove-Item Env:CC, Env:CC_aarch64_pc_windows_msvc
+          # The default build (cl /O2), as shipped.
+          cargo test -p cg-platform --features wireless --locked --no-run 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -notmatch 'LNK4099' } | Select-Object -Last 5
+          $exe = @(cargo test -p cg-platform --features wireless --locked --no-run --message-format=json 2>$null |
+            Where-Object { $_ -like '*"name":"cg_platform"*' -and $_ -like '*"executable":"*' } |
+            ForEach-Object { ($_ | ConvertFrom-Json).executable })[0]
+          "exe=$exe"
+          # (a) Our client against an external OpenSSL server (Git's openssl.exe).
+          $ossl = 'C:\Program Files\Git\usr\bin\openssl.exe'
+          & $ossl version -a | Select-Object -First 3
+          $psk = '07' * 32
+          $sargs = "s_server -accept 127.0.0.1:45433 -nocert -tls1_2 -cipher ECDHE-PSK-CHACHA20-POLY1305 -psk_identity known -psk $psk -naccept 1 -rev"
+          $srv = Start-Process $ossl -ArgumentList $sargs -NoNewWindow -PassThru -RedirectStandardOutput "$t\srv.out" -RedirectStandardError "$t\srv.err"
+          Start-Sleep 3
+          $env:CG_TLS_EXTERNAL_PORT = '45433'
+          & $exe --ignored --exact windows::wireless_tls::tests::temp_external_server --nocapture
+          "EXTERNAL client test exit=$LASTEXITCODE"
+          Start-Sleep 1
+          "--- s_server stdout"; Get-Content "$t\srv.out"; "--- s_server stderr"; Get-Content "$t\srv.err"
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\cdb.exe'
+          $mod = [IO.Path]::GetFileNameWithoutExtension($exe) -replace '-','_'
+          # (b) The in-process server crash, untruncated: registers, code at pc, the function, the caller.
+          & $cdb -G -lines -c "g;.echo AFTER_AV;r;.echo U_PC;u @pc-0x40 @pc+0x40;.echo UF;uf ${mod}!tls_parse_all_extensions;.echo LN_LR;ln @lr;.echo K;kn 25;.echo DPS;dps @sp L180;.echo UF_POST;uf ${mod}!tls_post_process_client_hello;.echo UF_PROC;uf /c ${mod}!tls_process_client_hello;.echo DONE;q" $exe --exact windows::wireless_tls::tests::handshakes_and_echoes_a_line 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -notmatch 'ModLoad|NatVis' }
+          $pOd.WaitForExit(); $pCl.WaitForExit()
+          foreach ($v in 'od','cl') {
+            "=== variant $v"
+            Get-Content "$t\$v.err","$t\$v.out" | Where-Object { $_ -notmatch 'LNK4099|^\s+Compiling' } | Select-Object -Last 45
+          }
+          "VARIANT cl-/Od exit=$($pOd.ExitCode)"; "VARIANT clang-cl exit=$($pCl.ExitCode)"
+          Get-ChildItem target\v-od, target\v-clang -Recurse -Filter makefile -ErrorAction SilentlyContinue | Where-Object FullName -like '*openssl*' | ForEach-Object { $_.FullName; Select-String -Path $_.FullName -Pattern '^CC=|^CFLAGS=|^CPPFLAGS=' }
+          exit 1
       # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); off elsewhere until the service uses it.
       - if: matrix.arch == 'x64'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
