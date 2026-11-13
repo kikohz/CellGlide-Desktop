@@ -21,6 +21,7 @@ cg-ffi = { path = "crates/cg-ffi" }
 cg-netstack = { path = "crates/cg-netstack" }
 hev-sys = { path = "crates/hev-sys" }
 anyhow = "1.0"
+base64 = "0.23"
 bytes = "1.12"
 cc = "1.8"
 etherparse = "0.21"

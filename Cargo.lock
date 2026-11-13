@@ -561,6 +561,7 @@ dependencies = [
 name = "cg-core"
 version = "1.0.0"
 dependencies = [
+ "base64",
  "bytes",
  "cg-ipc",
  "cg-protocol",

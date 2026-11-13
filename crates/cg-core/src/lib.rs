@@ -20,6 +20,7 @@ pub mod tunnel;
 mod udp;
 mod udp_bridge;
 pub mod usb_speed;
+pub mod wireless;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

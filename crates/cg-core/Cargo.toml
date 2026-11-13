@@ -13,6 +13,7 @@ workspace = true
 testing = ["dep:tempfile"]
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 cg-ipc.workspace = true
 cg-protocol.workspace = true
