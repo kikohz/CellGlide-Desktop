@@ -49,6 +49,9 @@ impl fmt::Display for TlsError {
 
 impl std::error::Error for TlsError {}
 
+/// Note on the returned `TlsStream`: its `poll_shutdown` sends close_notify and shuts the TCP write
+/// side; the session layer must not let a half-closing user trigger it (design §8.1).
+///
 /// Connects to the phone at `address` and completes the handshake as `identity` with `psk`.
 /// The caller sends its request line right away (the phone's 5 s budget).
 pub async fn connect(

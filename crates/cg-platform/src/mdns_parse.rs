@@ -179,8 +179,12 @@ fn read_name(packet: &[u8], mut offset: usize) -> Option<(String, usize)> {
     }
 }
 
+/// The most records `merge` keeps; further new ones are dropped, so a noisy device cannot grow
+/// the set (and the follow-up queries built from it) without bound.
+pub const MAX_RECORDS: usize = 512;
+
 /// Adds `new` to `known`: a record already known is not added twice (its TTL is refreshed), and
-/// a record with TTL 0 (a "goodbye") removes the one it names.
+/// a record with TTL 0 (a "goodbye") removes the one it names. At most `MAX_RECORDS` are kept.
 pub fn merge(known: &mut Vec<Record>, new: Vec<Record>) {
     for record in new {
         let same = |r: &Record| {
@@ -190,7 +194,7 @@ pub fn merge(known: &mut Vec<Record>, new: Vec<Record>) {
             known.retain(|r| !same(r));
         } else if let Some(existing) = known.iter_mut().find(|r| same(r)) {
             existing.ttl = record.ttl;
-        } else {
+        } else if known.len() < MAX_RECORDS {
             known.push(record);
         }
     }
@@ -495,6 +499,31 @@ mod tests {
         let goodbye = parse_response(&phone_answer([192, 168, 137, 205], 0));
         merge(&mut known, goodbye.into_iter().take(1).collect());
         assert!(assemble(&known, SERVICE, LOCAL).is_empty());
+    }
+
+    #[test]
+    fn merging_caps_the_record_set() {
+        let noisy = |from: usize, to: usize| -> Vec<Record> {
+            (from..to)
+                .map(|i| Record {
+                    name: format!("host{i}.local"),
+                    ttl: 120,
+                    data: RecordData::A(Ipv4Addr::new(10, 0, 0, 1)),
+                })
+                .collect()
+        };
+        let mut known = Vec::new();
+        merge(&mut known, noisy(0, MAX_RECORDS + 100));
+        assert_eq!(known.len(), MAX_RECORDS);
+        // Known records still refresh, and a goodbye still removes one and makes room.
+        merge(&mut known, noisy(0, 1));
+        assert_eq!(known.len(), MAX_RECORDS);
+        let mut bye = noisy(0, 1);
+        bye[0].ttl = 0;
+        merge(&mut known, bye);
+        assert_eq!(known.len(), MAX_RECORDS - 1);
+        merge(&mut known, noisy(MAX_RECORDS + 100, MAX_RECORDS + 102));
+        assert_eq!(known.len(), MAX_RECORDS);
     }
 
     #[test]

@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The wireless link (Windows only): access point, mDNS discovery, TLS-PSK client. Off by default.
+wireless = ["dep:openssl", "dep:tokio-openssl"]
+
 [dependencies]
 cg-core.workspace = true
 tracing.workspace = true
@@ -32,9 +36,10 @@ cg-netstack.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 # The wireless link: TLS 1.2 with ECDHE-PSK-CHACHA20-POLY1305, which neither SChannel nor rustls
-# offer; OpenSSL is built from source and linked statically.
-openssl.workspace = true
-tokio-openssl.workspace = true
+# offer; OpenSSL is built from source and linked statically. Optional (feature `wireless`), so
+# binaries that do not use it do not carry it.
+openssl = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
 socket2.workspace = true
 windows = { workspace = true, features = [
     "Devices_Enumeration",
@@ -71,3 +76,7 @@ tokio.workspace = true
 cg-protocol.workspace = true
 jiff.workspace = true
 tracing-subscriber.workspace = true
+
+[[example]]
+name = "wireless_gate"
+required-features = ["wireless"]

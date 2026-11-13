@@ -98,7 +98,7 @@ fn browse_raw(local: Ipv4Addr, timeout: Duration) -> io::Result<Vec<FoundPhone>>
     let deadline = Instant::now() + timeout;
     let mut known = Vec::new();
     let mut next_query = Instant::now();
-    let mut buffer = vec![0u8; 9000];
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let now = Instant::now();
         if now >= deadline {
@@ -132,7 +132,8 @@ fn browse_raw(local: Ipv4Addr, timeout: Duration) -> io::Result<Vec<FoundPhone>>
                         | io::ErrorKind::TimedOut
                         | io::ErrorKind::ConnectionReset
                 ) => {}
-            Err(error) => return Err(error),
+            // A datagram that did not fit (WSAEMSGSIZE) or any other per-datagram error is skipped.
+            Err(error) => tracing::debug!("mDNS: receive error skipped: {error}"),
         }
     }
     Ok(assemble(&known, &service, IpAddr::V4(local)))

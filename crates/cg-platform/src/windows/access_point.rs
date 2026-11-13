@@ -77,6 +77,8 @@ struct Client {
     remote: IpAddr,
 }
 
+/// Not observed yet: a later `Aborted` (the radio turned off after start). The session layer must
+/// add a status signal for it (plan B).
 pub struct AccessPoint {
     publisher: WiFiDirectAdvertisementPublisher,
     status_token: i64,

@@ -32,7 +32,8 @@
 # window: iced, ksni); so cargo-about runs once per shipped crate with --format json and
 # scripts/render-about.py merges the runs as cargo-about groups a single one (checked on every run:
 # render-about.py --self-test against cargo-about's own about.hbs output for cg-ffi). No hev, no
-# lwIP, no C notices: hev-socks5-tunnel is not built on Windows (cg-netstack forwards there).
+# lwIP, no hev C notices: hev-socks5-tunnel is not built on Windows (cg-netstack forwards there).
+# After the crates comes OpenSSL's own license text (the vendored C library, from openssl-src).
 #
 # Release checklist (M5): re-run this after any Cargo.lock change, which includes a version
 # bump of a workspace crate (the workspace version is recorded in Cargo.lock), and commit the
@@ -71,6 +72,21 @@ about_version=$(cargo about --version 2>/dev/null) ||
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+# The C library behind the openssl crate (feature `wireless` of cg-platform) is built from the
+# openssl-src crate, a build dependency that cargo-about skips (--all-features: the feature is off
+# by default, so without it the package is not in the graph); its own license (Apache-2.0) is
+# appended to the Windows list. cargo metadata resolves every target, so this works on Linux too.
+openssl_manifest=$(cargo metadata --format-version 1 --locked --all-features |
+  "${py[@]}" -I -c 'import json, sys
+for p in json.load(sys.stdin)["packages"]:
+    if p["name"] == "openssl-src":
+        print(p["manifest_path"])
+        break') || die "cargo metadata failed"
+[ -n "$openssl_manifest" ] || die "the openssl-src package is not in the dependency graph"
+openssl_license="$(dirname "$openssl_manifest")/openssl/LICENSE.txt"
+openssl_license=$(printf '%s' "$openssl_license" | tr '\' '/')
+[ -f "$openssl_license" ] || die "OpenSSL's license not found at $openssl_license (cargo fetch?)"
 
 cargo about generate --workspace --locked \
   --config packaging/licenses/about.toml packaging/licenses/about.hbs -o "$work/linux-crates.txt"
@@ -132,6 +148,11 @@ hev=crates/hev-sys/hev
   echo "CellGlide third-party licenses (Rust crates, Windows)"
   echo
   cat "$work/windows-crates.txt"
+  echo "================================================================================"
+  echo "OpenSSL (statically linked into builds with the wireless feature)"
+  echo
+  cat "$openssl_license"
+  echo
 } | sed 's/\r$//' >"$work/windows.txt"
 
 # Some crates ship their license file with CRLF line endings; both lists keep LF only (the `sed`

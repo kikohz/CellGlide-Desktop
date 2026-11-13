@@ -82,9 +82,13 @@ jobs:
         with:
           key: windows-${{ matrix.arch }}-rust
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
+      # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); off elsewhere until the service uses it.
       - if: matrix.arch == 'x64'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: matrix.arch == 'x64'
+        run: cargo clippy -p cg-platform --features wireless --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: cargo test -p cg-platform --features wireless --locked
       - name: Privileged wintun test (hosted runners are administrators)
         shell: powershell
         run: |
