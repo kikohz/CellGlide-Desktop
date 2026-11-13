@@ -714,10 +714,12 @@ pub(crate) mod tests {
             let mut hello = [0u8; 64];
             let _ = tcp.read(&mut hello).await;
             let _ = tcp
-                .write_all(b"HTTP/1.1 400 Bad Request
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request
 Content-Length: 0
 
-")
+",
+                )
                 .await;
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
