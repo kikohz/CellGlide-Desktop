@@ -27,6 +27,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+zeroize.workspace = true
 cg-netstack.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -38,6 +39,7 @@ windows = { workspace = true, features = [
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Networking_WinSock",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Rpc",

@@ -8,6 +8,7 @@ pub mod code_pairing;
 pub mod encoding;
 pub mod pairing;
 pub mod request;
+pub mod store;
 
 /// Bonjour service type the phone advertises.
 pub const SERVICE_TYPE: &str = "_cellglide-p2p._tcp";

@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -105,14 +105,26 @@ impl SettingsStore {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        {
-            let mut file = fs::File::create(&tmp)?;
-            file.write_all(&serde_json::to_vec_pretty(&self.current).map_err(io::Error::other)?)?;
-            file.sync_all()?;
-        }
-        fs::rename(&tmp, path)
+        write_atomic(
+            path,
+            &serde_json::to_vec_pretty(&self.current).map_err(io::Error::other)?,
+        )
     }
+}
+
+/// Writes `bytes` to a temporary file next to `path`, flushes it to disk and renames it over
+/// `path`, so a crash leaves either the old file or the new one, never half of one. The
+/// directory must exist (the Windows data directory's ACL is what protects the file).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
