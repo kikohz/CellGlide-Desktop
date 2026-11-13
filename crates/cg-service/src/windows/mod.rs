@@ -15,6 +15,7 @@ use crate::server;
 use anyhow::Context;
 use cg_core::controller::{Controller, ControllerConfig, SettingsSource};
 use cg_core::mux::MuxEndpoint;
+use cg_core::wireless::store::WirelessStore;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,23 @@ pub fn data_dir() -> PathBuf {
     system::program_data()
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
         .join("CellGlide")
+}
+
+/// The wireless pairing store in `data`, sealed with DPAPI. The directory's ACL is the
+/// installer's: it is never created here (the store would give it default permissions), so a
+/// missing directory, like a store that won't open, only turns the feature off.
+fn open_wireless_store(data: &std::path::Path) -> Option<Arc<WirelessStore>> {
+    if !data.is_dir() {
+        tracing::warn!("wireless pairing is off: {} does not exist", data.display());
+        return None;
+    }
+    match WirelessStore::open(data, Arc::new(cg_platform::windows::secrets::Dpapi)) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            tracing::warn!("wireless pairing is off: the pairing store won't open: {error}");
+            None
+        }
+    }
 }
 
 /// Where `cellglide-service.exe` (and `wintun.dll` beside it) is installed.
@@ -75,6 +93,11 @@ pub async fn run(
     config.settings = SettingsSource::File(data.join("settings.json"));
     config.health_dir = Some(data.join("health"));
     config.computer_name = system::computer_name();
+    config.wireless = open_wireless_store(&data);
+    // Temporary switch until the wireless setting has a UI (a later plan): `CELLGLIDE_WIRELESS=1`
+    // in the service's environment turns pairing over the cable on. Read once, here; cg-core
+    // never reads the environment.
+    config.wireless_forced = std::env::var_os("CELLGLIDE_WIRELESS").is_some_and(|v| v == "1");
     let sources = Sources {
         log: LogSource::Files(data.join("logs")),
         root: PathBuf::new(),

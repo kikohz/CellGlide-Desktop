@@ -31,6 +31,9 @@ pub enum CoreError {
     /// Lockdown or the diagnostics relay said no; text for logs only.
     #[error("lockdown: {0}")]
     Lockdown(String),
+    /// The wireless cable pairing exchange went wrong; text for logs only (never the reply).
+    #[error("cable pairing: {0}")]
+    Pairing(String),
 }
 
 impl CoreError {
@@ -57,6 +60,9 @@ impl CoreError {
             CoreError::ShuttingDown => Reason::ShuttingDown,
             CoreError::Lockdown(detail) => Reason::Internal {
                 detail: format!("lockdown: {detail}"),
+            },
+            CoreError::Pairing(detail) => Reason::Internal {
+                detail: format!("cable pairing: {detail}"),
             },
         }
     }

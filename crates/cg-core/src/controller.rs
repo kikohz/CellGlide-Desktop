@@ -20,6 +20,8 @@ use crate::tunnel::{
     DnsPlan, FALLBACK_DNS, RESOLVER, ResolverOrder, RunningTunnel, TunnelBackend, TunnelNotice,
     TunnelPlan,
 };
+use crate::wireless::cable_pairing;
+use crate::wireless::store::WirelessStore;
 use crate::{CoreError, Result};
 use cg_ipc::health::{DayStart, EventKind, HistoryDay};
 use cg_ipc::phone::{PhoneLabel, UsbPhone};
@@ -62,6 +64,11 @@ pub struct ControllerConfig {
     pub health_dir: Option<PathBuf>,
     /// The zone whose local days name the timeline's files.
     pub time_zone: TimeZone,
+    /// Where wireless pairings are kept; `None` means the feature is absent and nothing wireless
+    /// is attempted.
+    pub wireless: Option<Arc<WirelessStore>>,
+    /// The service forces the wireless switch on, whatever the stored setting says.
+    pub wireless_forced: bool,
 }
 
 /// How often the timeline's checks run, as the Mac's `HealthController`.
@@ -141,6 +148,8 @@ impl ControllerConfig {
             tunnel_probe: Arc::new(CaptiveProbe::apple()),
             health_dir: None,
             time_zone: TimeZone::system(),
+            wireless: None,
+            wireless_forced: false,
         }
     }
 }
@@ -995,7 +1004,8 @@ impl Actor {
         let result = self.establish(device, events).await;
         self.connecting = false;
         match result {
-            Ok(active) => {
+            Ok(mut active) => {
+                self.start_cable_pairing(&mut active);
                 let now = Timestamp::now();
                 self.monitor.tunnel_started(&active.hello.session_id, now);
                 if active.dns == DnsMode::Unmanaged {
@@ -1177,6 +1187,40 @@ impl Actor {
             channel_running: false,
             tunnel_running: false,
         })
+    }
+
+    /// Wireless pairing over the cable, once for this session, in a task of its own that
+    /// belongs to the session (it ends with it, so a phone that never answers is not left
+    /// holding a connection). Nothing here can delay or fail the session: the result is only
+    /// logged, and never the key or the reply.
+    fn start_cable_pairing(&self, active: &mut Active) {
+        let Some(store) = self.config.wireless.clone() else {
+            return;
+        };
+        let enabled = self.settings.get().wireless_enabled || self.config.wireless_forced;
+        let phone = Phone {
+            endpoint: self.config.endpoint.clone(),
+            device: active.device.clone(),
+        };
+        let hello = active.hello.clone();
+        let serial = active.device.serial.clone();
+        let name = self.config.computer_name.clone().unwrap_or_default();
+        active.tasks.spawn(async move {
+            match cable_pairing::pair_if_needed(&phone, &hello, &serial, enabled, &name, &store)
+                .await
+            {
+                Ok(cable_pairing::Outcome::Paired(_)) => {
+                    tracing::info!("wireless: paired over the cable");
+                }
+                Ok(cable_pairing::Outcome::AlreadyPaired) => {
+                    tracing::info!("wireless: already paired");
+                }
+                Ok(cable_pairing::Outcome::Skipped) => {
+                    tracing::info!("wireless: cable pairing skipped");
+                }
+                Err(error) => tracing::warn!("wireless: cable pairing failed: {error}"),
+            }
+        });
     }
 
     /// The strict DNS switch while connected: the running tunnel turns its rules on or off
@@ -3522,5 +3566,207 @@ mod tests {
         assert_eq!(page.start, DayStart::default());
         assert_eq!(page.days.len(), 7);
         assert_eq!(page.days.last(), Some(&page.day));
+    }
+
+    mod cable_pairing {
+        use super::*;
+        use crate::testing::CableBehaviour;
+        use crate::wireless::store::{PlainSecrets, WirelessStore};
+        use base64::Engine as _;
+
+        const PHONE_ID: &str = "4961212D-61DD-4BD0-9FE9-8989FB6B8952";
+        const IDENTITY: &str = "9B2E0F5A-7C3D-4E1B-A6D4-5F8C2B1E7A90";
+
+        fn new_line() -> String {
+            format!(
+                "{PHONE_ID} {IDENTITY} {} {}",
+                base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+                crate::wireless::encoding::encode_name("Eve iPhone")
+            )
+        }
+
+        fn options(cable: CableBehaviour, caps: &[&str]) -> FakePhoneOptions {
+            FakePhoneOptions {
+                hello: hello_json(caps, true, SESSION_A),
+                cable,
+                ..FakePhoneOptions::default()
+            }
+        }
+
+        const WIRELESS_CAPS: &[&str] = &[
+            "socks5-tcp",
+            "udp-over-usb-v1",
+            "dns-forward-v1",
+            "session-watch-v1",
+            "wireless-v2",
+        ];
+
+        struct Wireless {
+            r: Rig,
+            store: Arc<WirelessStore>,
+            _dir: tempfile::TempDir,
+        }
+
+        /// A rig with a store; `setting` is the stored switch, `forced` the service's override.
+        async fn wireless_rig(
+            options: FakePhoneOptions,
+            setting: bool,
+            forced: bool,
+            with_store: bool,
+        ) -> Wireless {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(WirelessStore::open(dir.path(), Arc::new(PlainSecrets)).unwrap());
+            let shared = store.clone();
+            let r = rig_config(options, any_port(), quiet_timing(), |config| {
+                config.settings = SettingsSource::Memory(Stored {
+                    auto_connect: false,
+                    wireless_enabled: setting,
+                    ..Stored::default()
+                });
+                config.wireless = with_store.then_some(shared);
+                config.wireless_forced = forced;
+                config.computer_name = Some("Desk PC".into());
+            })
+            .await;
+            Wireless {
+                r,
+                store,
+                _dir: dir,
+            }
+        }
+
+        async fn until(what: &str, mut done: impl FnMut() -> bool) {
+            for _ in 0..300 {
+                if done() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {what}");
+        }
+
+        async fn settle() {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        #[tokio::test]
+        async fn a_connected_session_pairs_once_over_the_cable() {
+            let w = wireless_rig(
+                options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
+                true,
+                false,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            until("the pairing", || w.store.records().len() == 1).await;
+            let record = &w.store.records()[0];
+            assert_eq!(record.method, crate::wireless::store::Method::Cable);
+            assert_eq!(w.store.phone_id("aaaa"), Some(PHONE_ID.to_string()));
+            assert_eq!(
+                w.r.phone.cable_requests().len(),
+                1,
+                "one connection for the session"
+            );
+            // Another session on the same cable asks nothing.
+            w.r.controller.send(Command::Disconnect).await.unwrap();
+            w.r.controller
+                .send(Command::Connect { serial: None })
+                .await
+                .unwrap();
+            wait_for(&w.r.controller, "reconnected", |s| {
+                connected(s) && w.r.backend.started() == 2
+            })
+            .await;
+            settle().await;
+            assert_eq!(w.r.phone.cable_connections(), 1);
+        }
+
+        #[tokio::test]
+        async fn the_service_override_enables_it_when_the_setting_is_off() {
+            let w = wireless_rig(
+                options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
+                false,
+                true,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            until("the pairing", || w.store.records().len() == 1).await;
+        }
+
+        #[tokio::test]
+        async fn nothing_is_attempted_without_the_switch_the_store_or_the_capability() {
+            let cases = [
+                // Setting off, not forced.
+                (WIRELESS_CAPS, false, false, true),
+                // No store: the feature is absent.
+                (WIRELESS_CAPS, true, true, false),
+                // A phone without wireless-v2.
+                (
+                    &["socks5-tcp", "udp-over-usb-v1", "session-watch-v1"][..],
+                    true,
+                    false,
+                    true,
+                ),
+            ];
+            for (caps, setting, forced, with_store) in cases {
+                let w = wireless_rig(
+                    options(CableBehaviour::Reply(new_line()), caps),
+                    setting,
+                    forced,
+                    with_store,
+                )
+                .await;
+                connect_and_wait(&w.r, "connected", connected).await;
+                settle().await;
+                assert_eq!(w.r.phone.cable_connections(), 0);
+                assert!(w.store.records().is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn failures_leave_the_usb_session_connected_and_save_nothing() {
+            for cable in [
+                CableBehaviour::Reply("garbage".into()),
+                CableBehaviour::Reply(format!("{PHONE_ID} {IDENTITY} AAAA")),
+                CableBehaviour::Refuse,
+            ] {
+                let refused = cable == CableBehaviour::Refuse;
+                let w = wireless_rig(options(cable, WIRELESS_CAPS), true, false, true).await;
+                connect_and_wait(&w.r, "connected", connected).await;
+                if !refused {
+                    until("the attempt", || w.r.phone.cable_connections() == 1).await;
+                }
+                settle().await;
+                let snapshot = w.r.controller.snapshot();
+                assert!(connected(&snapshot), "{:?}", snapshot.state);
+                assert!(w.store.records().is_empty());
+                assert_eq!(w.store.phone_id("aaaa"), None);
+                assert_eq!(w.r.backend.started(), 1, "the session was not rebuilt");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_silent_phone_does_not_hold_the_session_and_the_attempt_ends_with_it() {
+            let w = wireless_rig(
+                options(CableBehaviour::Silent, WIRELESS_CAPS),
+                true,
+                false,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            until("the attempt", || w.r.phone.open_cable_connections() == 1).await;
+            settle().await;
+            assert!(connected(&w.r.controller.snapshot()));
+            // The session ends: the attempt's connection goes with it.
+            w.r.controller.send(Command::Disconnect).await.unwrap();
+            until("the connection to close", || {
+                w.r.phone.open_cable_connections() == 0
+            })
+            .await;
+            assert!(w.store.records().is_empty());
+        }
     }
 }

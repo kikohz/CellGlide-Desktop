@@ -1,5 +1,6 @@
 use super::FakeMux;
 use super::fake_lockdown::{self, FakeLockdown, Observed};
+use crate::wireless::CABLE_PAIRING_PORT;
 use cg_protocol::phone::port;
 use rustls::pki_types::CertificateDer;
 use serde_json::{Value, json};
@@ -20,6 +21,17 @@ pub fn hello_json(caps: &[&str], dns_enabled: bool, session_id: &str) -> Value {
     })
 }
 
+/// How the fake phone treats a connection to the cable pairing port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CableBehaviour {
+    /// The port is not served: connecting fails.
+    Refuse,
+    /// Reads the request line, answers with this line (a newline is added), closes.
+    Reply(String),
+    /// Reads the request line and never answers.
+    Silent,
+}
+
 pub struct FakePhoneOptions {
     pub hello: Value,
     /// Whether SOCKS CONNECT succeeds (the phone's own way out works).
@@ -30,6 +42,9 @@ pub struct FakePhoneOptions {
     pub lockdown: Option<FakeLockdown>,
     /// Whether the phone app listens on 8091 for the computer's battery reports.
     pub battery_port_open: bool,
+    /// What the cable pairing port (8092) does; refused by default, as a phone whose app does
+    /// not serve it.
+    pub cable: CableBehaviour,
 }
 
 impl Default for FakePhoneOptions {
@@ -51,6 +66,7 @@ impl Default for FakePhoneOptions {
             udp_ok: true,
             lockdown: None,
             battery_port_open: true,
+            cable: CableBehaviour::Refuse,
         }
     }
 }
@@ -71,6 +87,13 @@ struct Shared {
     battery_lines: Mutex<Vec<String>>,
     /// 8091 connections that are still open.
     battery_connections: AtomicUsize,
+    cable: Mutex<CableBehaviour>,
+    /// Connections ever made to the cable pairing port.
+    cable_connections: AtomicUsize,
+    /// Cable pairing connections that are still open.
+    cable_open: AtomicUsize,
+    /// Every byte received on the cable pairing port, one entry per connection.
+    cable_received: Mutex<Vec<Vec<u8>>>,
 }
 
 /// The phone app's loopback services behind a FakeMux.
@@ -109,6 +132,10 @@ impl FakePhone {
             last_watch: Mutex::new(None),
             battery_lines: Mutex::new(Vec::new()),
             battery_connections: AtomicUsize::new(0),
+            cable: Mutex::new(options.cable.clone()),
+            cable_connections: AtomicUsize::new(0),
+            cable_open: AtomicUsize::new(0),
+            cable_received: Mutex::new(Vec::new()),
         });
         for (port, handler) in [
             (
@@ -127,6 +154,11 @@ impl FakePhone {
             let (listener, addr) = bind().await;
             mux.route(port::BATTERY, addr);
             tokio::spawn(serve_on(listener, shared.clone(), battery_sink));
+        }
+        if options.cable != CableBehaviour::Refuse {
+            let (listener, addr) = bind().await;
+            mux.route(CABLE_PAIRING_PORT, addr);
+            tokio::spawn(serve_on(listener, shared.clone(), cable_pairing));
         }
         let lockdown = match options.lockdown {
             Some(lockdown) => Some(fake_lockdown::start(mux, lockdown).await),
@@ -158,6 +190,26 @@ impl FakePhone {
     /// 8091 connections still open.
     pub fn battery_connections(&self) -> usize {
         self.shared.battery_connections.load(Ordering::SeqCst)
+    }
+
+    /// Changes what the cable pairing port does for connections made from now on.
+    pub fn set_cable(&self, behaviour: CableBehaviour) {
+        *self.shared.cable.lock().unwrap() = behaviour;
+    }
+
+    /// Connections ever made to the cable pairing port.
+    pub fn cable_connections(&self) -> usize {
+        self.shared.cable_connections.load(Ordering::SeqCst)
+    }
+
+    /// Cable pairing connections still open.
+    pub fn open_cable_connections(&self) -> usize {
+        self.shared.cable_open.load(Ordering::SeqCst)
+    }
+
+    /// Every byte each cable pairing connection sent, oldest connection first.
+    pub fn cable_requests(&self) -> Vec<Vec<u8>> {
+        self.shared.cable_received.lock().unwrap().clone()
     }
 
     /// Diagnostics relay connections still open.
@@ -397,5 +449,38 @@ fn battery_sink(stream: TcpStream, shared: Arc<Shared>) -> tokio::task::JoinHand
             shared.battery_lines.lock().unwrap().push(line);
         }
         shared.battery_connections.fetch_sub(1, Ordering::SeqCst);
+    })
+}
+
+fn cable_pairing(stream: TcpStream, shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        shared.cable_connections.fetch_add(1, Ordering::SeqCst);
+        shared.cable_open.fetch_add(1, Ordering::SeqCst);
+        let behaviour = shared.cable.lock().unwrap().clone();
+        let index = {
+            let mut received = shared.cable_received.lock().unwrap();
+            received.push(Vec::new());
+            received.len() - 1
+        };
+        let (mut r, mut w) = stream.into_split();
+        let mut buffer = [0u8; 256];
+        let mut answered = false;
+        if behaviour != CableBehaviour::Refuse {
+            // Keep reading after the answer, so bytes sent beyond the request line are seen.
+            while let Ok(n) = r.read(&mut buffer).await {
+                if n == 0 {
+                    break;
+                }
+                shared.cable_received.lock().unwrap()[index].extend_from_slice(&buffer[..n]);
+                if !answered && buffer[..n].contains(&b'\n') {
+                    answered = true;
+                    if let CableBehaviour::Reply(line) = &behaviour {
+                        let _ = w.write_all(format!("{line}\n").as_bytes()).await;
+                        let _ = w.shutdown().await;
+                    }
+                }
+            }
+        }
+        shared.cable_open.fetch_sub(1, Ordering::SeqCst);
     })
 }

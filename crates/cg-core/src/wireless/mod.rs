@@ -3,6 +3,7 @@
 //! the OS-specific parts (access point, discovery, TLS) live in `cg-platform`.
 
 pub mod cable;
+pub mod cable_pairing;
 pub mod code_message;
 pub mod code_pairing;
 pub mod encoding;

@@ -13,7 +13,9 @@ pub use fake_lockdown::{
     FakeLockdown, HOST_CERT_PEM, HOST_KEY_PEM, fixture_pair_record, host_cert_der,
 };
 pub use fake_mux::FakeMux;
-pub use fake_phone::{FakePhone, FakePhoneOptions, SESSION_A, SESSION_B, hello_json};
+pub use fake_phone::{
+    CableBehaviour, FakePhone, FakePhoneOptions, SESSION_A, SESSION_B, hello_json,
+};
 pub use fake_probe::{FakeProbe, FakeTunnelProbe, SharedProbe};
 
 use cg_protocol::mux::Device;
