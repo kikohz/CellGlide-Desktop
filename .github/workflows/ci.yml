@@ -86,6 +86,11 @@ jobs:
         if: matrix.arch == 'arm64'
         shell: bash
         run: |
+          set +e +o pipefail
+          where.exe perl
+          wperl=$(where.exe perl | grep -vi '\\Git\\' | head -1 | tr -d '\r')
+          export PATH="$(dirname "$(cygpath -u "$wperl")"):$PATH"
+          which perl
           cargo test -p cg-platform --features wireless --locked --no-run 2>&1 | grep -v LNK4099 | tail -5
           exe=$(cargo test -p cg-platform --features wireless --locked --no-run --message-format=json 2>/dev/null | jq -r 'select(.profile.test==true and .target.name=="cg_platform" and (.target.kind|index("lib"))) | .executable')
           echo "exe=$exe"
