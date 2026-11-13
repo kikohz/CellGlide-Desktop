@@ -268,30 +268,6 @@ mod tests {
         ));
     }
 
-    /// TEMP diagnostics: our client against `openssl s_server -rev` on CG_TLS_EXTERNAL_PORT.
-    #[tokio::test]
-    #[ignore]
-    async fn temp_external_server() {
-        let port: u16 = std::env::var("CG_TLS_EXTERNAL_PORT")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let stream = connect(SocketAddr::from(([127, 0, 0, 1], port)), "known", &KEY)
-            .await
-            .unwrap();
-        println!(
-            "EXTERNAL handshake ok: {} {}",
-            stream.ssl().current_cipher().unwrap().name(),
-            stream.ssl().version_str()
-        );
-        let mut reader = BufReader::new(stream);
-        reader.get_mut().write_all(b"CG1 PAIR\n").await.unwrap();
-        let mut line = String::new();
-        let read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
-        println!("EXTERNAL reply: {read:?} {line:?}");
-        assert_eq!(line.trim_end(), "RIAP 1GC");
-    }
-
     #[test]
     fn failure_classification() {
         // 1115 = SSL_AD_REASON_OFFSET + 115, SSL_R_TLSV1_ALERT_UNKNOWN_PSK_IDENTITY.

@@ -6,3 +6,4 @@
 *.zip binary
 *.dll binary
 *.exe binary
+*.cmd text eol=crlf
