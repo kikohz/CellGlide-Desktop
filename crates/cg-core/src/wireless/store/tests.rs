@@ -469,12 +469,106 @@ fn plain_secrets_round_trip_but_hide_nothing_on_purpose() {
 }
 
 #[test]
-fn debug_output_shows_no_secret() {
+fn debug_output_of_a_key_and_the_store_shows_no_secret() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
     store.save(record(PEER, IDENTITY), key(7)).unwrap();
     let (_, pass) = store.access_point().unwrap();
-    let text = format!("{store:?} {:?}", store.records());
+    let text = format!("{store:?} {:?}", key(7));
+    assert_eq!(format!("{:?}", key(7)), "Key(..)");
     assert!(!text.contains(&pass));
     assert!(!text.contains(&base64url(key(7).as_bytes())));
+}
+
+#[test]
+fn a_corrupt_key_file_is_kept_as_bad_before_the_first_write_over_it() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.save(record(PEER, IDENTITY), key(1)).unwrap();
+    }
+    let bad = dir.path().join("wireless-keys.bin.bad");
+    std::fs::write(&bad, b"older").unwrap();
+    std::fs::write(keys_file(dir.path()), b"garbage").unwrap();
+    let store = open(dir.path());
+    // Not yet: nothing has written keys.
+    assert_eq!(std::fs::read(&bad).unwrap(), b"older");
+    store.save(record(PEER2, IDENTITY2), key(2)).unwrap();
+    assert_eq!(std::fs::read(&bad).unwrap(), b"garbage");
+    assert_eq!(store.key(IDENTITY2), Some(key(2)));
+    // A later write does not touch it again (the key file is ours by now).
+    store.save(record(PEER2, IDENTITY3), key(3)).unwrap();
+    assert_eq!(std::fs::read(&bad).unwrap(), b"garbage");
+}
+
+#[test]
+fn a_healthy_key_file_leaves_no_bad_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store.save(record(PEER, IDENTITY), key(1)).unwrap();
+    store.save(record(PEER2, IDENTITY2), key(2)).unwrap();
+    assert!(!dir.path().join("wireless-keys.bin.bad").exists());
+}
+
+#[test]
+fn a_successful_write_leaves_no_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store.save(record(PEER, IDENTITY), key(1)).unwrap();
+    store.remember_phone("S", PEER).unwrap();
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_write_that_cannot_make_its_temporary_file_leaves_the_target_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store.save(record(PEER, IDENTITY), key(1)).unwrap();
+    let before = std::fs::read(json_file(dir.path())).unwrap();
+    // The temporary file's name is taken by a directory, so it can't be created. Had the
+    // store written straight to the target, the write would have succeeded.
+    std::fs::create_dir(dir.path().join("wireless.json.tmp")).unwrap();
+    assert!(store.remember_phone("S", PEER).is_err());
+    assert_eq!(std::fs::read(json_file(dir.path())).unwrap(), before);
+    assert_eq!(store.phone_id("S"), None);
+    assert_eq!(open(dir.path()).phone_id("S"), None);
+}
+
+#[test]
+fn an_orphan_key_is_dropped_on_the_next_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        open(dir.path())
+            .save(record(PEER, IDENTITY), key(1))
+            .unwrap();
+    }
+    // A key no record uses, as a crash between the key write and the records write leaves.
+    let with_orphan = format!(
+        r#"{{"version":1,"keys":{{"{IDENTITY}":"{}","{IDENTITY2}":"{}"}}}}"#,
+        base64url(key(1).as_bytes()),
+        base64url(key(9).as_bytes())
+    );
+    std::fs::write(
+        keys_file(dir.path()),
+        PlainSecrets.protect(with_orphan.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    let store = open(dir.path());
+    assert_eq!(store.key(IDENTITY2), Some(key(9)));
+    store.remember_phone("S", PEER).unwrap();
+    assert_eq!(store.key(IDENTITY2), None);
+    let plain = PlainSecrets
+        .unprotect(&std::fs::read(keys_file(dir.path())).unwrap())
+        .unwrap();
+    assert!(!contains_any_slice(
+        &plain,
+        base64url(key(9).as_bytes()).as_bytes(),
+        8
+    ));
+    assert_eq!(open(dir.path()).key(IDENTITY), Some(key(1)));
 }

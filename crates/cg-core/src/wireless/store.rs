@@ -12,7 +12,7 @@
 //!
 //! A key file that can't be read (damaged, or sealed by something else) is not an error: the
 //! store opens, no key is available, so every record shows as stale (the phone has to be paired
-//! again), and nothing is deleted. The next write that changes keys replaces the file. The
+//! again), and nothing is deleted. The next write that changes keys first renames it to `wireless-keys.bin.bad` (replacing an older one) and then writes a new file. The
 //! records file is different: if it is unreadable `open` fails, because starting empty would
 //! overwrite the user's pairings with the next save.
 //!
@@ -23,6 +23,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ use crate::settings::write_atomic;
 
 const RECORDS_FILE: &str = "wireless.json";
 const KEYS_FILE: &str = "wireless-keys.bin";
+const BAD_KEYS_FILE: &str = "wireless-keys.bin.bad";
 
 /// Seals and opens the key file's contents. The platform provides the real one (DPAPI).
 pub trait SecretStore: Send + Sync {
@@ -141,6 +143,8 @@ pub struct WirelessStore {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
     state: Mutex<State>,
+    /// The key file on disk could not be used when opened and has not been set aside yet.
+    keys_file_unusable: AtomicBool,
 }
 
 impl fmt::Debug for WirelessStore {
@@ -162,7 +166,7 @@ impl WirelessStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Persisted::default(),
             Err(e) => return Err(e),
         };
-        let (keys, passphrase) = load_keys(&*secrets, &dir.join(KEYS_FILE))?;
+        let (keys, passphrase, unusable) = load_keys(&*secrets, &dir.join(KEYS_FILE))?;
         let store = WirelessStore {
             dir: dir.to_path_buf(),
             secrets,
@@ -171,6 +175,7 @@ impl WirelessStore {
                 keys,
                 passphrase,
             }),
+            keys_file_unusable: AtomicBool::new(unusable),
         };
         if !persisted.local_id.as_deref().is_some_and(is_token) {
             persisted.version = 1;
@@ -387,6 +392,16 @@ impl WirelessStore {
         };
         let plain = Zeroizing::new(serde_json::to_vec(&file).map_err(io::Error::other)?);
         let sealed = self.secrets.protect(&plain)?;
+        if self.keys_file_unusable.load(Ordering::SeqCst) {
+            // Keep what we could not read: it may be sealed by something that can still open it.
+            // `rename` replaces an older .bad.
+            match fs::rename(path, self.dir.join(BAD_KEYS_FILE)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            self.keys_file_unusable.store(false, Ordering::SeqCst);
+        }
         write_atomic(path, &sealed)
     }
 }
@@ -396,7 +411,7 @@ impl WirelessStore {
 fn load_keys(
     secrets: &dyn SecretStore,
     path: &Path,
-) -> io::Result<(BTreeMap<String, Key>, Option<Secret>)> {
+) -> io::Result<(BTreeMap<String, Key>, Option<Secret>, bool)> {
     let sealed = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
@@ -407,13 +422,16 @@ fn load_keys(
         .map(Zeroizing::new)
         .map_err(|e| e.to_string())
         .and_then(|plain| parse_keys(&plain));
-    Ok(parsed.unwrap_or_else(|reason| {
-        tracing::warn!(
-            "wireless key file {} can't be used ({reason}); its pairings are stale",
-            path.display()
-        );
-        Default::default()
-    }))
+    Ok(match parsed {
+        Ok((keys, passphrase)) => (keys, passphrase, false),
+        Err(reason) => {
+            tracing::warn!(
+                "wireless key file {} can't be used ({reason}); its pairings are stale",
+                path.display()
+            );
+            (Default::default(), None, true)
+        }
+    })
 }
 
 fn parse_keys(plain: &[u8]) -> Result<(BTreeMap<String, Key>, Option<Secret>), String> {
