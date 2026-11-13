@@ -249,6 +249,7 @@ speed:
     bad_length: "The speed test response had the wrong length"
     chunked: "Cloudflare switched to chunked responses, which this speed test does not support yet."
     bad_reply: "Invalid speed test response"
+    not_the_server: "This network answered in place of the speed test server. A sign-in page or a filter may be in the way; try again later."
     io: "Speed test failed: %{detail}"
 gui:
   title: "CellGlide"

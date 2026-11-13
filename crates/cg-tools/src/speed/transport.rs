@@ -105,6 +105,11 @@ pub enum SpeedError {
     /// Not an HTTP response.
     #[error("unreadable response")]
     BadReply,
+    /// What came back was not the server's TLS: plain text on port 443, a broken record or a
+    /// certificate for another name. A sign-in page, a filter or a router with no internet
+    /// answers like that in the server's place.
+    #[error("not the speed test server")]
+    NotTheServer,
     /// Any other socket or TLS error, with its text.
     #[error("{0}")]
     Io(String),
@@ -125,6 +130,7 @@ impl SpeedError {
             SpeedError::BadLength,
             SpeedError::Chunked,
             SpeedError::BadReply,
+            SpeedError::NotTheServer,
             SpeedError::Io("reset".into()),
         ];
         for error in &all {
@@ -138,6 +144,7 @@ impl SpeedError {
                 | SpeedError::BadLength
                 | SpeedError::Chunked
                 | SpeedError::BadReply
+                | SpeedError::NotTheServer
                 | SpeedError::Io(_) => {}
             }
         }
@@ -147,6 +154,11 @@ impl SpeedError {
 
 impl From<io::Error> for SpeedError {
     fn from(error: io::Error) -> SpeedError {
+        // rustls reports everything that isn't the server's valid TLS as InvalidData; its text
+        // ("received corrupt message of type InvalidContentType") means nothing to a user.
+        if error.kind() == io::ErrorKind::InvalidData {
+            return SpeedError::NotTheServer;
+        }
         SpeedError::Io(error.to_string())
     }
 }
@@ -690,6 +702,32 @@ pub(crate) mod tests {
             ping(&mut stream, &fake.server()).await.unwrap();
         }
         assert_eq!(fake.accepted(), 1);
+    }
+
+    #[tokio::test]
+    async fn plain_text_on_the_tls_port_is_not_the_server() {
+        // What a router's "no internet" page or a captive portal sends to a TLS client.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut hello = [0u8; 64];
+            let _ = tcp.read(&mut hello).await;
+            let _ = tcp
+                .write_all(b"HTTP/1.1 400 Bad Request
+Content-Length: 0
+
+")
+                .await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let server = Server {
+            host: "localhost".into(),
+            port,
+            tls: true,
+        };
+        let r = connect(&Route::Unbound, &server).await;
+        assert!(matches!(r, Err(SpeedError::NotTheServer)), "{:?}", r.err());
     }
 
     #[tokio::test]

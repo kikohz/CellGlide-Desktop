@@ -17,6 +17,7 @@ fn error_key(error: &SpeedError) -> &'static str {
         SpeedError::BadLength => "speed.error.bad_length",
         SpeedError::Chunked => "speed.error.chunked",
         SpeedError::BadReply => "speed.error.bad_reply",
+        SpeedError::NotTheServer => "speed.error.not_the_server",
         SpeedError::Io(_) => "speed.error.io",
     }
 }

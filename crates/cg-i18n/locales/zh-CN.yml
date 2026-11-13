@@ -249,6 +249,7 @@ speed:
     bad_length: "测速响应长度不匹配"
     chunked: "Cloudflare 改用了分块响应，当前测速暂不支持。"
     bad_reply: "无效的测速响应"
+    not_the_server: "这个网络没有把请求送到测速服务器，可能有登录页面或过滤。请稍后再试。"
     io: "测速失败：%{detail}"
 gui:
   title: "CellGlide"

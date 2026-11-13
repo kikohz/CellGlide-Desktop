@@ -406,6 +406,7 @@ pub const KEYS: &[&str] = &[
     "speed.error.bad_length",
     "speed.error.chunked",
     "speed.error.bad_reply",
+    "speed.error.not_the_server",
     "speed.error.io",
     "gui.title",
     "gui.title_connected",
