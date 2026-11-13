@@ -576,6 +576,7 @@ dependencies = [
  "cg-protocol",
  "getrandom 0.4.3",
  "hkdf",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",

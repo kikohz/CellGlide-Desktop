@@ -19,6 +19,7 @@ cg-ipc.workspace = true
 cg-protocol.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
+hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
