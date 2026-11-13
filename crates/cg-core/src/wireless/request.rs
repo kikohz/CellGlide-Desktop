@@ -11,6 +11,12 @@ pub enum Request {
     Pair,
 }
 
+/// No valid request comes near the limit (the longest is 13 bytes); the check only bounds the
+/// work done on hostile input.
+fn too_long(line: &str) -> bool {
+    line.len() >= MAX_REQUEST_LENGTH
+}
+
 impl Request {
     /// What the sender writes, including the trailing newline.
     pub fn line(&self) -> String {
@@ -22,7 +28,7 @@ impl Request {
 
     /// `line` is the request without its newline (the reader strips it).
     pub fn parse(line: &str) -> Option<Request> {
-        if line.len() >= MAX_REQUEST_LENGTH {
+        if too_long(line) {
             return None;
         }
         if line == "CG1 PAIR" {
@@ -109,5 +115,12 @@ mod tests {
             assert_eq!(Request::parse(line), None, "{line:?}");
         }
         assert!(Request::Data(9876).line().len() <= MAX_REQUEST_LENGTH);
+    }
+
+    #[test]
+    fn the_length_limit_is_exclusive_of_the_newline_budget() {
+        // `parse` gets the line without its newline, so 31 bytes plus it is the longest allowed.
+        assert!(!too_long(&"A".repeat(MAX_REQUEST_LENGTH - 1)));
+        assert!(too_long(&"A".repeat(MAX_REQUEST_LENGTH)));
     }
 }

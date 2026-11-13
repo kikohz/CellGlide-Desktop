@@ -12,7 +12,7 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Public identity that only encrypts the pairing channel and proves nothing.
 pub const PAIRING_IDENTITY: &str = "CG1-pair";
@@ -77,19 +77,17 @@ pub struct Agreed {
 
 impl Session {
     pub fn new(role: Role) -> Session {
-        let mut secret = [0u8; 32];
+        let mut secret = Zeroizing::new([0u8; 32]);
         let mut nonce = [0u8; NONCE_LENGTH];
         // No fallback: a pairing built on guessable randomness is worse than a crash, and the
         // OS generator failing means the machine is in no state to pair anyway.
-        getrandom::fill(&mut secret).expect("system random generator unavailable");
+        getrandom::fill(&mut *secret).expect("system random generator unavailable");
         getrandom::fill(&mut nonce).expect("system random generator unavailable");
-        let session = Session::with_values(role, secret, nonce);
-        secret.zeroize();
-        session
+        Session::with_values(role, *secret, nonce)
     }
 
     #[cfg(test)]
-    fn fixed(role: Role, secret: [u8; 32], nonce: [u8; NONCE_LENGTH]) -> Session {
+    pub(crate) fn fixed(role: Role, secret: [u8; 32], nonce: [u8; NONCE_LENGTH]) -> Session {
         Session::with_values(role, secret, nonce)
     }
 
@@ -164,14 +162,12 @@ fn commit(public_key: &[u8], nonce: &[u8]) -> [u8; 32] {
 }
 
 fn hkdf_key(salt: Option<&[u8]>, ikm: &[u8], info: &[u8]) -> Key {
-    let mut okm = [0u8; 32];
+    let mut okm = Zeroizing::new([0u8; 32]);
     // 32 bytes is far below the 255 * 32 limit, so expand cannot fail.
     Hkdf::<Sha256>::new(salt, ikm)
-        .expand(info, &mut okm)
+        .expand(info, &mut *okm)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    let key = Key(okm);
-    okm.zeroize();
-    key
+    Key(*okm)
 }
 
 /// Both sides of the comparison are public, so a plain comparison is fine.
@@ -350,7 +346,7 @@ mod tests {
     fn key_debug_hides_the_bytes() {
         let key = Key::from_bytes([0xAB; 32]);
         let shown = format!("{key:?}");
-        assert!(!shown.to_lowercase().contains("ab"), "{shown}");
+        assert_eq!(shown, "Key(..)");
     }
 
     #[test]

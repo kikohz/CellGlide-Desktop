@@ -35,6 +35,11 @@ pub fn base64url(bytes: &[u8]) -> String {
 /// phone never sends anything else, and two spellings of one value would let a peer slip
 /// differing bytes past a transcript hash.
 pub fn decode_base64url(text: &str) -> Option<Vec<u8>> {
+    // The empty string is never a valid binary field. (An empty name is allowed, and
+    // `decode_name` handles that itself.)
+    if text.is_empty() {
+        return None;
+    }
     URL_SAFE_NO_PAD.decode(text).ok()
 }
 
@@ -72,6 +77,9 @@ pub fn encode_name(name: &str) -> String {
 }
 
 pub fn decode_name(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return Some(String::new());
+    }
     let data = decode_base64url(text)?;
     if data.len() > MAX_NAME_BYTES {
         return None;
@@ -117,6 +125,7 @@ mod tests {
     fn decode_base64url_accepts_only_canonical_unpadded() {
         assert_eq!(decode_base64url("YQ"), Some(b"a".to_vec()));
         assert_eq!(decode_base64url("-_8"), Some(vec![0xfb, 0xff]));
+        assert_eq!(decode_base64url(""), None);
         for bad in ["YQ==", "YQ=", "Y", "Y+", "YR", "Y/", "Y Q", "YQ\n"] {
             assert_eq!(decode_base64url(bad), None, "{bad:?}");
         }

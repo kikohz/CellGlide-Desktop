@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 
 use super::encoding::{decode_name, encode_name, is_token, is_valid_identity};
 use super::pairing::Key;
+use zeroize::Zeroizing;
 
 /// Longest request, in bytes, including the trailing newline.
 pub const MAX_REQUEST: usize = 256;
@@ -41,10 +42,16 @@ pub fn request(computer_id: &str, computer_name: &str) -> String {
     format!("CG1 CABLE {computer_id} {}\n", encode_name(computer_name))
 }
 
+/// Replies are cut off at this length: no valid line comes close (the longest is under 300
+/// bytes), so the check only bounds the work done on hostile input.
+fn too_long(line: &str) -> bool {
+    line.len() >= MAX_REPLY
+}
+
 /// `line` is the reply without its trailing newline. Anything that is not exactly one of the
 /// two forms is `None`.
 pub fn parse_reply(line: &str) -> Option<Reply> {
-    if line.len() >= MAX_REPLY {
+    if too_long(line) {
         return None;
     }
     let parts: Vec<&str> = line.split(' ').collect();
@@ -60,11 +67,12 @@ pub fn parse_reply(line: &str) -> Option<Reply> {
         return None;
     }
     // Standard base64 with padding here, unlike the url-safe, unpadded name fields.
-    let key: [u8; 32] = STANDARD.decode(key).ok()?.try_into().ok()?;
+    let decoded = Zeroizing::new(STANDARD.decode(key).ok()?);
+    let key: Zeroizing<[u8; 32]> = Zeroizing::new(decoded.as_slice().try_into().ok()?);
     Some(Reply::New {
         phone_id: phone_id.to_string(),
         identity: identity.to_string(),
-        key: Key::from_bytes(key),
+        key: Key::from_bytes(*key),
         phone_name: decode_name(name)?,
     })
 }
