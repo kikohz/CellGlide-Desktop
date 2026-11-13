@@ -82,6 +82,28 @@ jobs:
         with:
           key: windows-${{ matrix.arch }}-rust
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
+      - name: TEMP arm64 wireless crash diagnostics
+        if: matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          cargo test -p cg-platform --features wireless --locked --no-run 2>&1 | grep -v LNK4099 | tail -5
+          exe=$(cargo test -p cg-platform --features wireless --locked --no-run --message-format=json 2>/dev/null | jq -r 'select(.profile.test==true and .target.name=="cg_platform" and (.target.kind|index("lib"))) | .executable')
+          echo "exe=$exe"
+          for f in target/debug/build/openssl-sys-*/output; do grep -v "^cargo:rerun" "$f" | head -40; done
+          find target/debug/build -name configuration.h -path '*openssl*' -exec grep -n "define OPENSSL_NO_ASM\|OPENSSL_SYS\|define OPENSSL_CONFIGURED" {} +
+          find target/debug/build -name makefile -path '*openssl*' | head -3 | while read m; do grep -in "^CC=\|^CFLAGS=\|^PLATFORM=\|^AS=\|^CNF_CFLAGS=\|^LIB_CFLAGS=\|^CNF_CPPFLAGS=" "$m"; done
+          where cl clang clang-cl nasm 2>&1 | head
+          "$exe" --test-threads=1 --nocapture windows::wireless_tls; echo "serial exit=$?"
+          for t in handshakes_and_echoes_a_line an_unknown_identity_is_reported_as_such the_wrong_key_is_not_an_unknown_identity a_server_without_the_suite_fails_the_handshake nothing_listening_is_an_io_error suite_check; do
+            "$exe" --exact "windows::wireless_tls::tests::$t" --nocapture; echo "TEST $t exit=$?"
+          done
+          ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/" 2>&1
+          cdb=$(ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/arm64/cdb.exe" "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe" 2>/dev/null | head -1)
+          echo "cdb=$cdb"
+          if [ -n "$cdb" ]; then
+            "$cdb" -G -lines -y "srv*C:\\symcache*https://msdl.microsoft.com/download/symbols" -c "g;.echo AFTER_G;.ecxr;r;kn 60;.echo DONE;q" "$(cygpath -w "$exe")" --test-threads=1 --nocapture windows::wireless_tls 2>&1 | tail -150
+          fi
+          exit 1
       # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); off elsewhere until the service uses it.
       - if: matrix.arch == 'x64'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
