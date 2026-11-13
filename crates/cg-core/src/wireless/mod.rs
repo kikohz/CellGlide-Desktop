@@ -3,6 +3,7 @@
 //! the OS-specific parts (access point, discovery, TLS) live in `cg-platform`.
 
 pub mod encoding;
+pub mod pairing;
 pub mod request;
 
 /// Bonjour service type the phone advertises.

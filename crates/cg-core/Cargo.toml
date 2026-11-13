@@ -17,6 +17,8 @@ base64.workspace = true
 bytes.workspace = true
 cg-ipc.workspace = true
 cg-protocol.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -25,6 +27,8 @@ plist.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
@@ -32,6 +36,8 @@ tokio-rustls.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 webpki-roots.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_System_IO"] }
