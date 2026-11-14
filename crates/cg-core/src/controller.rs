@@ -822,7 +822,8 @@ impl Actor {
     }
 
     /// The user's answer to the code shown. A match goes to the task, which waits for the
-    /// phone's answer too and only then saves; a mismatch ends the attempt at once (the task,
+    /// phone's answer too and only then saves (the code stays shown, `confirmed`, until then;
+    /// asking again is refused); a mismatch ends the attempt at once (the task,
     /// and with it the pairing channel, is gone before this returns; nothing was saved).
     async fn confirm_code(&mut self, matches: bool) -> Result<()> {
         if !matches!(self.wireless.phase, WirelessPhase::Pairing { .. }) {
@@ -840,7 +841,10 @@ impl Actor {
         }
         tracing::info!("wireless: the code was confirmed; waiting for the phone");
         let _ = reply.send(true);
-        self.wireless.phase = WirelessPhase::Dialing;
+        // The code stays shown until the phone answers (the task then moves the phase on).
+        if let WirelessPhase::Pairing { confirmed, .. } = &mut self.wireless.phase {
+            *confirmed = true;
+        }
         Ok(())
     }
 
@@ -924,7 +928,11 @@ impl Actor {
             } => {
                 // Otherwise the reply is dropped: a "no" to a task that is going away anyway.
                 if self.wireless.phase.owns() {
-                    self.wireless.phase = WirelessPhase::Pairing { code, phone_name };
+                    self.wireless.phase = WirelessPhase::Pairing {
+                        code,
+                        phone_name,
+                        confirmed: false,
+                    };
                     self.wireless.confirm = Some(reply);
                 }
             }

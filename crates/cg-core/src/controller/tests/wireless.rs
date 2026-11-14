@@ -1234,6 +1234,7 @@ fn the_pairing_phase_never_prints_its_code() {
     let phase = WirelessPhase::Pairing {
         code: "042137".into(),
         phone_name: Some("Test iPhone".into()),
+        confirmed: false,
     };
     assert!(!format!("{phase:?}").contains("042137"));
     assert!(!format!("{:?}", phase.view()).contains("042137"));
@@ -1344,14 +1345,112 @@ async fn the_access_point_lost_while_the_code_is_shown_fails_and_saves_nothing()
 }
 
 #[tokio::test]
-async fn the_phone_leaving_while_the_code_is_shown_fails_and_saves_nothing() {
+async fn the_phone_leaving_while_the_code_is_shown_saves_nothing() {
     let w = showing_a_code().await;
     w.fake.phone_leaves(at(9));
-    wait_for(&w.r.controller, "failed", |s| {
-        failed(s, WirelessFailure::PairingFailed)
+    // The channel ends cleanly after P: as a phone with another question showing, the
+    // pairing is turned away (fix round 1, M1), not failed; the attempt goes on waiting.
+    let snap = wait_for(&w.r.controller, "turned away", |s| {
+        hint(s) == Some(WirelessFailure::PairingBusy)
     })
     .await;
+    assert_eq!(phase(&snap), Some(WirelessPhaseView::Waiting));
+    assert!(bad_request(w.confirm(true).await));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(w.saved(NEW_ID), None);
+    assert!(w.store.key(PAIRED_IDENTITY).is_none());
+    assert!(w.fake.pairings().iter().all(|p| p.f_valid.is_none()));
+    assert!(!pairing(&w.r.controller.snapshot()));
+    assert_eq!(pairing_dials(&w.fake), 1);
+}
+
+// --- Fix round 1.
+
+/// After this computer's user confirms, the code stays shown (confirmed) until the phone
+/// answers; asking again is refused.
+#[tokio::test]
+async fn after_a_match_the_code_stays_shown_until_the_phone_answers() {
+    let w = pairing_rig(|_| {}).await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        answer_after: Duration::from_millis(800),
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    w.start().await;
+    let (_, shown) = w.code_shown().await;
+    w.confirm(true).await.unwrap();
+    let confirmed = WirelessPhaseView::Pairing {
+        code: shown.clone(),
+        phone_name: None,
+        confirmed: true,
+    };
+    assert_eq!(phase(&w.r.controller.snapshot()), Some(confirmed.clone()));
+    assert!(bad_request(w.confirm(true).await));
+    assert!(bad_request(w.confirm(false).await));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let snap = w.r.controller.snapshot();
+    assert_eq!(phase(&snap), Some(confirmed), "until the phone answers");
+    assert!(!format!("{snap:?}").contains(&shown));
+    assert_eq!(w.saved(NEW_ID), None);
+    w.connected().await;
+    assert!(w.saved(NEW_ID).is_some());
+}
+
+/// M1: the phone closing the channel right after P, with no answer line (another question on
+/// its screen), turns the pairing away: shown as busy, not asked again in the window, and the
+/// attempt ends as busy.
+#[tokio::test]
+async fn a_phone_with_another_question_showing_is_busy_not_failed() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.wait_for_phone = Duration::from_secs(1);
+    })
+    .await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        answer: PairingAnswer::CloseAfterP,
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    w.start().await;
+    let snap = wait_for(&w.r.controller, "busy", |s| {
+        hint(s) == Some(WirelessFailure::PairingBusy)
+    })
+    .await;
+    assert_eq!(phase(&snap), Some(WirelessPhaseView::Waiting));
+    assert!(w.fake.is_up());
+    wait_for(&w.r.controller, "the end", |s| {
+        failed(s, WirelessFailure::PairingBusy)
+    })
+    .await;
+    assert_eq!(pairing_dials(&w.fake), 1, "not asked again");
+    assert_eq!(w.fake.pairings()[0].f_valid, None);
     w.nothing_left_of_the_pairing().await;
+}
+
+/// The phone says no while this computer's user confirms: whichever the actor sees first,
+/// nothing is saved and the attempt ends as denied.
+#[tokio::test]
+async fn a_no_from_the_phone_racing_a_confirmation_saves_nothing() {
+    for delay in [0u64, 1, 5, 20, 60] {
+        let w = pairing_rig(|_| {}).await;
+        let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+            answer: PairingAnswer::Deny,
+            ..PhonePairing::default()
+        });
+        w.fake.add_phone(phone, Rounds::all());
+        w.start().await;
+        w.code_shown().await;
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        let answered = w.confirm(true).await;
+        assert!(
+            answered.is_ok() || bad_request(answered),
+            "delay {delay} ms"
+        );
+        wait_for(&w.r.controller, "denied", |s| {
+            failed(s, WirelessFailure::PairingDenied)
+        })
+        .await;
+        w.nothing_left_of_the_pairing().await;
+    }
 }
 
 #[tokio::test]
@@ -1584,6 +1683,7 @@ async fn a_stale_pairing_is_replaced_by_code_for_that_phone() {
         Some(WirelessPhaseView::Pairing {
             code: code(&snap).unwrap(),
             phone_name: Some("Test iPhone".into()),
+            confirmed: false,
         }),
         "the name from the earlier pairing"
     );

@@ -33,7 +33,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -97,10 +97,12 @@ pub enum WirelessPhase {
     },
     /// Found; checking the pairing and building the session.
     Dialing,
-    /// Code pairing: `code` is shown until this computer's user answers (`ConfirmCode`).
+    /// Code pairing: `code` is shown until this computer's user answers (`ConfirmCode`), and
+    /// after a match (`confirmed`) until the phone answers too.
     Pairing {
         code: String,
         phone_name: Option<String>,
+        confirmed: bool,
     },
     Connected,
     /// The session ended at `since`; trying to get it back.
@@ -124,9 +126,14 @@ impl WirelessPhase {
             WirelessPhase::Dialing => WirelessPhaseView::Connecting,
             WirelessPhase::Connected => WirelessPhaseView::Connected,
             WirelessPhase::Reconnecting { .. } => WirelessPhaseView::Reconnecting,
-            WirelessPhase::Pairing { code, phone_name } => WirelessPhaseView::Pairing {
+            WirelessPhase::Pairing {
+                code,
+                phone_name,
+                confirmed,
+            } => WirelessPhaseView::Pairing {
                 code: code.clone(),
                 phone_name: phone_name.clone(),
+                confirmed: *confirmed,
             },
             WirelessPhase::Failed(reason) => WirelessPhaseView::Failed {
                 reason: reason.clone(),
@@ -173,10 +180,15 @@ impl std::fmt::Debug for WirelessPhase {
                 .field("hint", hint)
                 .finish(),
             WirelessPhase::Dialing => f.write_str("Dialing"),
-            WirelessPhase::Pairing { phone_name, .. } => f
+            WirelessPhase::Pairing {
+                phone_name,
+                confirmed,
+                ..
+            } => f
                 .debug_struct("Pairing")
                 .field("code", &"<hidden>")
                 .field("phone_name", phone_name)
+                .field("confirmed", confirmed)
                 .finish(),
             WirelessPhase::Connected => f.write_str("Connected"),
             WirelessPhase::Reconnecting { since, name_clash } => f
@@ -616,8 +628,8 @@ impl<'a> Attempt<'a> {
                 return Pairing::Retry;
             }
         };
-        let heard = Arc::new(AtomicBool::new(false));
-        let stream = Heard {
+        let heard = Arc::new(Heard::default());
+        let stream = Watched {
             inner: stream,
             heard: heard.clone(),
         };
@@ -686,15 +698,18 @@ impl<'a> Attempt<'a> {
                     .find(|r| r.peer_id == paired.phone_id && !r.stale)
                 {
                     Some(record) => Pairing::Paired(record),
-                    None => Pairing::Retry,
+                    // Saved, yet not there: the store is not usable.
+                    None => Pairing::End(WirelessFailure::PairingFailed),
                 }
             }
             Err(CodePairingError::Denied) => {
                 tracing::info!("wireless: pairing not allowed on the phone");
                 Pairing::End(WirelessFailure::PairingDenied)
             }
-            // Closed before its first line: the phone's lockout, or another pairing on it.
-            Err(CodePairingError::Io(_)) if !heard.load(Ordering::SeqCst) => Pairing::Busy,
+            // Turned away: closed before its first line (the phone's lockout, or another pairing
+            // on it), or closed cleanly after `P` without an answer (another question is on the
+            // phone's screen; no strike there).
+            Err(CodePairingError::Io(_)) if heard.turned_away() => Pairing::Busy,
             Err(error) => {
                 tracing::warn!("wireless: code pairing failed: {error}");
                 Pairing::End(WirelessFailure::PairingFailed)
@@ -806,14 +821,32 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The pairing channel, noting whether the phone sent anything at all: one that closes before
-/// its first byte turned the pairing away (busy or locked out), which is not a failed pairing.
+/// What the phone sent on the pairing channel: whether anything, how many lines, and whether it
+/// ended the stream cleanly.
+#[derive(Default)]
 struct Heard {
-    inner: crate::mux::MuxStream,
-    heard: Arc<AtomicBool>,
+    anything: AtomicBool,
+    lines: AtomicUsize,
+    ended: AtomicBool,
 }
 
-impl AsyncRead for Heard {
+impl Heard {
+    /// The phone turned the pairing away rather than failing it: it closed before its first
+    /// byte (busy or locked out), or closed cleanly right after its `P` line (the second) with
+    /// no answer line (another question was showing).
+    fn turned_away(&self) -> bool {
+        !self.anything.load(Ordering::SeqCst)
+            || (self.ended.load(Ordering::SeqCst) && self.lines.load(Ordering::SeqCst) == 2)
+    }
+}
+
+/// The pairing channel, noting in `heard` what the phone sent.
+struct Watched {
+    inner: crate::mux::MuxStream,
+    heard: Arc<Heard>,
+}
+
+impl AsyncRead for Watched {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -821,15 +854,25 @@ impl AsyncRead for Heard {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let before = buf.filled().len();
+        let room = buf.remaining() > 0;
         let polled = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if buf.filled().len() > before {
-            this.heard.store(true, Ordering::SeqCst);
+        if let Poll::Ready(Ok(())) = &polled {
+            let new = &buf.filled()[before..];
+            if new.is_empty() {
+                if room {
+                    this.heard.ended.store(true, Ordering::SeqCst);
+                }
+            } else {
+                this.heard.anything.store(true, Ordering::SeqCst);
+                let lines = new.iter().filter(|b| **b == b'\n').count();
+                this.heard.lines.fetch_add(lines, Ordering::SeqCst);
+            }
         }
         polled
     }
 }
 
-impl AsyncWrite for Heard {
+impl AsyncWrite for Watched {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

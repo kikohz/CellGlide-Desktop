@@ -84,6 +84,10 @@ pub enum WirelessPhaseView {
         /// The iPhone's name, when this computer knows it (an earlier pairing with it).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phone_name: Option<String>,
+        /// This computer's user said the codes match; the code stays shown until the iPhone
+        /// answers.
+        #[serde(default)]
+        confirmed: bool,
     },
     Failed {
         reason: WirelessFailure,
@@ -98,10 +102,15 @@ impl std::fmt::Debug for WirelessPhaseView {
             WirelessPhaseView::Connecting => f.write_str("Connecting"),
             WirelessPhaseView::Connected => f.write_str("Connected"),
             WirelessPhaseView::Reconnecting => f.write_str("Reconnecting"),
-            WirelessPhaseView::Pairing { phone_name, .. } => f
+            WirelessPhaseView::Pairing {
+                phone_name,
+                confirmed,
+                ..
+            } => f
                 .debug_struct("Pairing")
                 .field("code", &"<hidden>")
                 .field("phone_name", phone_name)
+                .field("confirmed", confirmed)
                 .finish(),
             WirelessPhaseView::Failed { reason } => {
                 f.debug_struct("Failed").field("reason", reason).finish()
@@ -174,11 +183,12 @@ mod tests {
         let pairing = WirelessPhaseView::Pairing {
             code: "042137".into(),
             phone_name: Some("Test iPhone".into()),
+            confirmed: true,
         };
         let json = serde_json::to_string(&pairing).unwrap();
         assert_eq!(
             json,
-            r#"{"phase":"pairing","code":"042137","phone_name":"Test iPhone"}"#
+            r#"{"phase":"pairing","code":"042137","phone_name":"Test iPhone","confirmed":true}"#
         );
         assert_eq!(
             serde_json::from_str::<WirelessPhaseView>(&json).unwrap(),
@@ -190,7 +200,8 @@ mod tests {
             unnamed,
             WirelessPhaseView::Pairing {
                 code: "042137".into(),
-                phone_name: None
+                phone_name: None,
+                confirmed: false,
             }
         );
         // The code is for the screen, never for logs.

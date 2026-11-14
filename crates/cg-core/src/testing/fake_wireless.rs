@@ -103,6 +103,9 @@ pub enum PairingAnswer {
     NeverAnswer,
     /// Closes right after the request line, as a phone in its pairing lockout.
     CloseAtOnce,
+    /// Closes right after `P` without an answer line, as a phone with another question on its
+    /// screen.
+    CloseAfterP,
 }
 
 /// The fake phone's side of code pairing.
@@ -809,6 +812,9 @@ async fn pair(stream: DuplexStream, phone: WirelessPhone, state: Arc<Mutex<State
         return;
     };
     update(&|p| p.code = Some(agreed.code.clone()));
+    if script.answer == PairingAnswer::CloseAfterP {
+        return;
+    }
 
     tokio::time::sleep(script.answer_after).await;
     match script.answer {
@@ -817,7 +823,7 @@ async fn pair(stream: DuplexStream, phone: WirelessPhone, state: Arc<Mutex<State
             send(&mut w, message::DENIED).await;
             return;
         }
-        PairingAnswer::NeverAnswer | PairingAnswer::CloseAtOnce => {
+        PairingAnswer::NeverAnswer | PairingAnswer::CloseAtOnce | PairingAnswer::CloseAfterP => {
             while read_line(&mut r).await.is_some() {}
             return;
         }
