@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! wireless_gate <ssid> <passphrase> <seconds> [--mdns system|raw|both]
-//!               [--data <identity> <long-term key, 64 hex> <port>]
+//!               [--data <identity> <long-term key, 64 hex> <port> | --pair]
 //! ```
 //!
 //! Starts the access point, then every 2 s logs the connected devices and what each mDNS method
@@ -14,7 +14,13 @@
 //!   phone's `C` line and closes (no pairing goes further);
 //! - `--data`: the pairing's identity with `link_key(<long-term key>)`, sends
 //!   `CG1 DATA <port>\n`; for port 8088 also the hello request, and logs the first 300 bytes of
-//!   the reply.
+//!   the reply;
+//! - `--pair`: code pairing in full over the pairing channel (the service's own dialer,
+//!   `wireless_ports::TlsDialer`), as a fresh computer id made for this run: prints the 6-digit
+//!   code, asks on the terminal whether the iPhone shows the same one (`y`/`n`), checks the
+//!   phone's proof and sends `F`. Nothing is saved: where the service would store the pairing it
+//!   prints `would save: identity=... phone=...` (never the key). Remove this computer on the
+//!   iPhone afterwards. Needs an interactive terminal.
 //!
 //! A failed handshake is retried at most every 10 s. Stops after `<seconds>` or on Ctrl-C;
 //! either way the access point is stopped (it also vanishes if the process is killed). Logs to
@@ -35,9 +41,12 @@ mod gate {
     use std::net::{IpAddr, SocketAddr};
     use std::time::{Duration, Instant};
 
+    use cg_core::wireless::code_pairing::{self, Paired};
     use cg_core::wireless::pairing::{Key, PAIRING_IDENTITY, link_key, pairing_channel_key};
+    use cg_core::wireless::ports::Dialer;
     use cg_platform::windows::access_point::AccessPoint;
     use cg_platform::windows::mdns::{self, FoundPhone, Method};
+    use cg_platform::windows::wireless_ports::TlsDialer;
     use cg_platform::windows::wireless_tls;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -45,6 +54,8 @@ mod gate {
     const BROWSE: Duration = Duration::from_secs(2);
     const RETRY: Duration = Duration::from_secs(10);
     const READ: Duration = Duration::from_secs(10);
+    /// TCP connect plus handshake (the session's dialer allows 4 s).
+    const CONNECT: Duration = Duration::from_secs(10);
     /// The address Windows gives the Wi-Fi Direct group owner by default.
     const DEFAULT_LOCAL: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 137, 1));
 
@@ -83,16 +94,18 @@ mod gate {
         seconds: u64,
         methods: Vec<Method>,
         data: Option<Data>,
+        pair: bool,
     }
 
     const USAGE: &str = "usage: wireless_gate <ssid> <passphrase> <seconds> [--mdns system|raw|both] \
-                         [--data <identity> <long-term key hex> <port>]";
+                         [--data <identity> <long-term key hex> <port> | --pair]";
 
     fn parse_args() -> Result<Args, String> {
         let mut args = std::env::args().skip(1);
         let mut positional = Vec::new();
         let mut methods = vec![Method::System, Method::Raw];
         let mut data = None;
+        let mut pair = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--mdns" => {
@@ -117,8 +130,12 @@ mod gate {
                         port,
                     });
                 }
+                "--pair" => pair = true,
                 _ => positional.push(arg),
             }
+        }
+        if pair && data.is_some() {
+            return Err("--pair and --data exclude each other".into());
         }
         let [ssid, passphrase, seconds] =
             <[String; 3]>::try_from(positional).map_err(|_| USAGE.to_string())?;
@@ -131,6 +148,7 @@ mod gate {
             seconds,
             methods,
             data,
+            pair,
         })
     }
 
@@ -176,6 +194,8 @@ mod gate {
             args.methods,
             if args.data.is_some() {
                 "data connection"
+            } else if args.pair {
+                "code pairing (nothing saved)"
             } else {
                 "pairing channel"
             },
@@ -280,8 +300,9 @@ mod gate {
             let address = SocketAddr::new(phone.address, phone.port);
             log(format!("phone {} at {address}: connecting", phone.instance));
             match &args.data {
-                None => connected_once = pairing_channel(address).await,
                 Some(data) => connected_once = data_connection(address, data).await,
+                None if args.pair => connected_once = code_pair(phone, address).await,
+                None => connected_once = pairing_channel(address).await,
             }
         }
         drop(access_point);
@@ -316,7 +337,7 @@ mod gate {
         let started = Instant::now();
         let key = pairing_channel_key();
         let mut stream =
-            match wireless_tls::connect(address, PAIRING_IDENTITY, key.as_bytes()).await {
+            match wireless_tls::connect(address, PAIRING_IDENTITY, key.as_bytes(), CONNECT).await {
                 Ok(stream) => stream,
                 Err(error) => {
                     log(format!(
@@ -344,21 +365,106 @@ mod gate {
         line.starts_with("C ")
     }
 
-    /// `CG1 DATA <port>` with the pairing's link key; for 8088 also the hello request.
-    async fn data_connection(address: SocketAddr, data: &Data) -> bool {
+    /// Code pairing with `phone` over the pairing channel, confirmed on this terminal; saves
+    /// nothing. True once the pairing channel opened: the attempt is not repeated after that,
+    /// whatever its outcome.
+    async fn code_pair(phone: &FoundPhone, address: SocketAddr) -> bool {
+        let computer_id = match fresh_computer_id() {
+            Ok(id) => id,
+            Err(error) => {
+                log(format!("no computer id: {error}"));
+                return false;
+            }
+        };
+        let computer_name =
+            cg_core::wireless::computer_name(std::env::var("COMPUTERNAME").ok().as_deref());
         let started = Instant::now();
-        let key = link_key(&data.long_term);
-        let mut stream = match wireless_tls::connect(address, &data.identity, key.as_bytes()).await
-        {
+        let key = pairing_channel_key();
+        let stream = match TlsDialer.dial(address, PAIRING_IDENTITY, &key).await {
             Ok(stream) => stream,
             Err(error) => {
                 log(format!(
-                    "TLS ({}): FAILED: {error} ({error:?})",
-                    data.identity
+                    "TLS ({PAIRING_IDENTITY}): FAILED: {error} ({error:?})"
                 ));
                 return false;
             }
         };
+        log(format!(
+            "TLS ({PAIRING_IDENTITY}): handshake done in {} ms; pairing as {computer_name:?}, \
+             computer id {computer_id} (made for this run)",
+            started.elapsed().as_millis()
+        ));
+        let outcome = code_pairing::run(
+            stream,
+            &phone.instance,
+            &computer_id,
+            &computer_name,
+            confirm_on_terminal,
+            |paired: &Paired| {
+                log(format!(
+                    "would save: identity={} phone={} name={:?} (nothing written)",
+                    paired.identity, paired.phone_id, paired.phone_name
+                ));
+                Ok(())
+            },
+        )
+        .await;
+        match outcome {
+            Ok(paired) => log(format!(
+                "code pairing: DONE with {} ({:?}), identity {}; F sent; nothing saved. \
+                 Remove this computer on the iPhone.",
+                paired.phone_id, paired.phone_name, paired.identity
+            )),
+            Err(error) => log(format!("code pairing: FAILED: {error} ({error:?})")),
+        }
+        true
+    }
+
+    /// Shows the code and asks this terminal; anything but `y` is a no. The answer is read on a
+    /// thread of its own, so a pairing that ends meanwhile is not held up by it.
+    async fn confirm_on_terminal(code: String) -> bool {
+        log(format!("CODE: {code}"));
+        log("Does the iPhone show the same code? Type y or n, then Enter:");
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let read = std::io::stdin().read_line(&mut line);
+            let _ = answer.send(read.is_ok() && line.trim().eq_ignore_ascii_case("y"));
+        });
+        let yes = answered.await.unwrap_or(false);
+        log(if yes {
+            "confirmed here; waiting for the iPhone"
+        } else {
+            "not confirmed here"
+        });
+        yes
+    }
+
+    /// A new random computer id: a version 4 UUID in upper case, as the store makes its own.
+    fn fresh_computer_id() -> windows::core::Result<String> {
+        let id = windows::core::GUID::new()?;
+        let d = id.data4;
+        Ok(format!(
+            "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            id.data1, id.data2, id.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+        ))
+    }
+
+    /// `CG1 DATA <port>` with the pairing's link key; for 8088 also the hello request.
+    async fn data_connection(address: SocketAddr, data: &Data) -> bool {
+        let started = Instant::now();
+        let key = link_key(&data.long_term);
+        let mut stream =
+            match wireless_tls::connect(address, &data.identity, key.as_bytes(), CONNECT).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    log(format!(
+                        "TLS ({}): FAILED: {error} ({error:?})",
+                        data.identity
+                    ));
+                    return false;
+                }
+            };
         log(format!(
             "TLS ({}): handshake done in {} ms, {} {}",
             data.identity,
