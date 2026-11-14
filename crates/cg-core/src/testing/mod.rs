@@ -7,6 +7,7 @@ mod fake_lockdown;
 mod fake_mux;
 mod fake_phone;
 mod fake_probe;
+mod fake_wireless;
 
 pub use fake_backend::{FakeBackend, FinishCall, SharedFake};
 pub use fake_link::FakeWirelessLink;
@@ -19,6 +20,10 @@ pub use fake_phone::{
     CableBehaviour, FakePhone, FakePhoneOptions, SESSION_A, SESSION_B, hello_json,
 };
 pub use fake_probe::{FakeProbe, FakeTunnelProbe, SharedProbe};
+pub use fake_wireless::{
+    ACCESS_POINT_ADDRESS, Dial, DialMatch, DialOutcome, FakeWireless, PAIRED_IDENTITY, PHONE_NAME,
+    PairingAnswer, PairingReport, PhonePairing, Rounds, WirelessPhone,
+};
 
 use cg_protocol::mux::Device;
 use std::net::SocketAddr;

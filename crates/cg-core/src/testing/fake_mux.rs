@@ -86,6 +86,12 @@ impl FakeMux {
         self.state.lock().unwrap().routes.insert(port, to);
     }
 
+    /// Where each phone port is served (what `route` set), e.g. for reaching the same fake
+    /// phone over `FakeWireless`.
+    pub fn routes(&self) -> HashMap<u16, SocketAddr> {
+        self.state.lock().unwrap().routes.clone()
+    }
+
     /// A pairing record whose contents nobody reads.
     pub fn add_pair_record(&self, serial: &str) {
         self.state

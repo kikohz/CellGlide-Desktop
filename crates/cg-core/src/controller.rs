@@ -21,6 +21,7 @@ use crate::tunnel::{
     TunnelPlan,
 };
 use crate::wireless::cable_pairing;
+use crate::wireless::ports::WirelessPorts;
 use crate::wireless::store::WirelessStore;
 use crate::{CoreError, Result};
 use cg_ipc::health::{DayStart, EventKind, HistoryDay};
@@ -69,6 +70,9 @@ pub struct ControllerConfig {
     pub wireless: Option<Arc<WirelessStore>>,
     /// The service forces the wireless switch on, whatever the stored setting says.
     pub wireless_forced: bool,
+    /// The platform's access point, discovery and TLS dialer; `None` where wireless sessions
+    /// are not available.
+    pub wireless_ports: Option<WirelessPorts>,
 }
 
 /// How often the timeline's checks run, as the Mac's `HealthController`.
@@ -207,6 +211,7 @@ impl ControllerConfig {
             time_zone: TimeZone::system(),
             wireless: None,
             wireless_forced: false,
+            wireless_ports: None,
         }
     }
 }

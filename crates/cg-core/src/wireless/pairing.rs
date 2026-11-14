@@ -182,11 +182,30 @@ pub fn verify_commitment(commitment: &[u8], public_key: &[u8], nonce: &[u8]) -> 
     commit(public_key, nonce).as_slice() == commitment
 }
 
+/// A TLS pre-shared key for the phone's wireless listener: the link key of a pairing
+/// (`link_key`) or the public pairing channel's (`pairing_channel_key`). Only those two make
+/// one, so the long-term key itself can never be handed to the dialer by mistake. Never
+/// printed, wiped on drop (through the `Key` inside).
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkKey(Key);
+
+impl LinkKey {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for LinkKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkKey(..)")
+    }
+}
+
 /// The pre-shared key a pairing's connections use: HKDF-SHA256 of the long-term key, no salt,
 /// info "CG2 link psk". The long-term key itself only feeds derivations, so the TLS key and
 /// the pairing proofs' key never coincide.
-pub fn link_key(long_term: &Key) -> Key {
-    hkdf_key(None, long_term.as_bytes(), b"CG2 link psk")
+pub fn link_key(long_term: &Key) -> LinkKey {
+    LinkKey(hkdf_key(None, long_term.as_bytes(), b"CG2 link psk"))
 }
 
 /// The key the pairing proofs are MACed under: same derivation, info "CG2 pairing proof".
@@ -196,8 +215,8 @@ pub fn proof_key(long_term: &Key) -> Key {
 
 /// The public key of `PAIRING_IDENTITY`: SHA256("CG1 public pairing key"). It protects nothing
 /// secret; the pairing channel only needs some TLS key.
-pub fn pairing_channel_key() -> Key {
-    Key(Sha256::digest(b"CG1 public pairing key").into())
+pub fn pairing_channel_key() -> LinkKey {
+    LinkKey(Key(Sha256::digest(b"CG1 public pairing key").into()))
 }
 
 #[cfg(test)]
@@ -336,8 +355,8 @@ mod tests {
         let long_term = Key::from_bytes(hex32(LONG_TERM));
         let link = link_key(&long_term);
         let proof = proof_key(&long_term);
-        assert_ne!(link, proof);
-        assert_ne!(link, long_term);
+        assert_ne!(link.as_bytes(), proof.as_bytes());
+        assert_ne!(link.as_bytes(), long_term.as_bytes());
         assert_ne!(proof, long_term);
         // Computed independently with Python (hmac/hashlib, RFC 5869 with the default
         // all-zero salt, which is what CryptoKit's HKDF does without a salt):
@@ -359,6 +378,13 @@ mod tests {
             pairing_channel_key().as_bytes(),
             &hex32("856878c3285976f206f8bff2c7c253467ce8a8db76b8c7e3db87999b4ec09df1")
         );
+    }
+
+    #[test]
+    fn link_key_debug_hides_the_bytes() {
+        let link = link_key(&Key::from_bytes([0xAB; 32]));
+        assert_eq!(format!("{link:?}"), "LinkKey(..)");
+        assert_eq!(format!("{:?}", pairing_channel_key()), "LinkKey(..)");
     }
 
     #[test]

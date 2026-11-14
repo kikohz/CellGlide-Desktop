@@ -34,6 +34,9 @@ pub enum CoreError {
     /// The wireless cable pairing exchange went wrong; text for logs only (never the reply).
     #[error("cable pairing: {0}")]
     Pairing(String),
+    /// A wireless connection to the phone did not come up.
+    #[error("wireless: {0}")]
+    Dial(crate::wireless::ports::DialError),
 }
 
 impl CoreError {
@@ -63,6 +66,10 @@ impl CoreError {
             },
             CoreError::Pairing(detail) => Reason::Internal {
                 detail: format!("cable pairing: {detail}"),
+            },
+            CoreError::Dial(crate::wireless::ports::DialError::Timeout) => Reason::Timeout,
+            CoreError::Dial(error) => Reason::Internal {
+                detail: format!("wireless: {error}"),
             },
         }
     }
