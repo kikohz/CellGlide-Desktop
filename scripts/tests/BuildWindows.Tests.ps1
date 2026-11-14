@@ -28,6 +28,23 @@ Describe 'build-windows' {
         Get-RustTarget 'x64' | Should -Be 'x86_64-pc-windows-msvc'
         { Get-RustTarget 'x86' } | Should -Throw
     }
+    It 'compiles OpenSSL with clang-cl through the wrapper on arm64 only' {
+        $root = (Resolve-Path "$PSScriptRoot\..\..").Path
+        (Get-OpenSslCompilerEnv 'x64' $root).Count | Should -Be 0
+        $llvm = Join-Path $TestDrive 'LLVM\bin'
+        $null = New-Item -ItemType Directory -Force $llvm
+        Set-Content (Join-Path $llvm 'clang-cl.exe') 'x'
+        Mock Get-Command { $null } -ParameterFilter { $Name -contains 'clang-cl' }
+        $vars = Get-OpenSslCompilerEnv 'arm64' $root $llvm
+        $vars['CC'] | Should -Be (Join-Path $root 'scripts\openssl-clang-cl.cmd')
+        $vars['CC_aarch64_pc_windows_msvc'] | Should -Be 'clang-cl'
+        $vars['PATH'] | Should -BeLike "$llvm;*"
+    }
+    It 'says what to install when clang-cl is missing on arm64' {
+        $root = (Resolve-Path "$PSScriptRoot\..\..").Path
+        Mock Get-Command { $null } -ParameterFilter { $Name -contains 'clang-cl' }
+        { Get-OpenSslCompilerEnv 'arm64' $root (Join-Path $TestDrive 'no-llvm') } | Should -Throw '*clang-cl not found*install LLVM*'
+    }
     It 'reads the PE machine' {
         $f = Join-Path $TestDrive 'fake.dll'; New-FakePe $f 0xAA64
         Get-PeMachine $f | Should -Be 0xAA64

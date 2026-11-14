@@ -72,31 +72,28 @@ jobs:
         with:
           components: clippy
       # bash, not Windows PowerShell: its first start on the arm64 image alone takes about 30 s.
+      # On ARM64, OpenSSL (cg-platform's feature wireless, which cg-service turns on) is compiled with
+      # clang-cl in every step of this job: built by MSVC's ARM64 cl it crashes in every TLS handshake
+      # (crates/cg-platform/build.rs, which refuses the build without this).
       - name: LLVM (clang) for the ARM64 C build
         if: matrix.arch == 'arm64'
         shell: bash
         run: |
           [ -x '/c/Program Files/LLVM/bin/clang.exe' ] || choco install llvm -y
           echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          echo "CC=$GITHUB_WORKSPACE\\scripts\\openssl-clang-cl.cmd" >> "$GITHUB_ENV"
+          echo 'CC_aarch64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.arch }}-rust
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows' }}
-      # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); off elsewhere until the service uses it.
+      # Feature wireless: vendored OpenSSL (needs Perl, which the runner images have); cg-service turns it on.
       - if: matrix.arch == 'x64'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - if: matrix.arch == 'x64'
         run: cargo clippy -p cg-platform --features wireless --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - if: matrix.arch == 'x64'
-        run: cargo test -p cg-platform --features wireless --locked
-      # On ARM64, OpenSSL is compiled with clang-cl: built by MSVC's ARM64 cl it crashes in every TLS
-      # handshake (crates/cg-platform/build.rs, which refuses the build without this).
-      - if: matrix.arch == 'arm64'
-        run: cargo test -p cg-platform --features wireless --locked
-        env:
-          CC: ${{ github.workspace }}\scripts\openssl-clang-cl.cmd
-          CC_aarch64_pc_windows_msvc: clang-cl
+      - run: cargo test -p cg-platform --features wireless --locked
       - name: Privileged wintun test (hosted runners are administrators)
         shell: powershell
         run: |

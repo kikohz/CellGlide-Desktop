@@ -1,7 +1,11 @@
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64|arm64 [-OutDir <dir>]
 #
-# Builds the Windows package for one architecture (an arm64 package is built on x64 but never run):
-#   1. cargo build --release --locked --target <triple> -p cg-service -p cg-cli -p cg-ffi;
+# Builds the Windows package for one architecture. CI builds each package on its own architecture
+# (the windows-app job: arm64 on a windows-11-arm runner); an arm64 package built on x64 cannot be
+# run there.
+#   1. cargo build --release --locked --target <triple> -p cg-service -p cg-cli -p cg-ffi; for arm64
+#      with OpenSSL (cg-service's wireless link) compiled by clang-cl through
+#      scripts\openssl-clang-cl.cmd (Get-OpenSslCompilerEnv: MSVC's ARM64 compiler miscompiles it);
 #   2. the committed NativeMethods.g.cs must be what that build wrote;
 #   3. dotnet publish CellGlide.App (Native AOT, self-contained) for win-<arch> with that DLL and the
 #      workspace version, from windows\ (so windows\global.json applies), locked package versions;
@@ -175,6 +179,26 @@ function Test-PackageLayout([string]$Dir, [string]$Arch) {
     return [string[]]$problems
 }
 
+# The compiler settings the vendored OpenSSL needs for $Arch, as environment variables for the cargo
+# build: none on x64; on arm64 CC is scripts\openssl-clang-cl.cmd (OpenSSL's Configure takes its
+# compiler from CC) and CC_aarch64_pc_windows_msvc=clang-cl (the other C builds), because MSVC's
+# ARM64 cl builds an OpenSSL whose TLS handshake crashes (crates\cg-platform\build.rs refuses that
+# build). clang-cl comes from PATH, else from $LlvmBin (where the CI's LLVM install puts it), which
+# is then put first on PATH so that the wrapper finds it.
+function Get-OpenSslCompilerEnv([string]$Arch, [string]$Root, [string]$LlvmBin = 'C:\Program Files\LLVM\bin') {
+    if ($Arch -ne 'arm64') { return @{} }
+    $wrapper = Join-Path $Root 'scripts\openssl-clang-cl.cmd'
+    if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) { throw "missing: $wrapper (the arm64 OpenSSL build needs it)" }
+    $vars = @{ 'CC' = $wrapper; 'CC_aarch64_pc_windows_msvc' = 'clang-cl' }
+    if (-not (Get-Command clang-cl -CommandType Application -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $LlvmBin 'clang-cl.exe') -PathType Leaf)) {
+            throw "clang-cl not found (not on PATH, not in $LlvmBin). The arm64 build compiles OpenSSL with clang-cl, because MSVC's ARM64 compiler miscompiles it: install LLVM (choco install llvm, or the LLVM installer from https://github.com/llvm/llvm-project/releases) and build again."
+        }
+        $vars['PATH'] = "$LlvmBin;$env:PATH"
+    }
+    return $vars
+}
+
 # Runs a native command; a non-zero exit code stops the build.
 function Invoke-Native([string]$Name, [scriptblock]$Command) {
     Write-Host "==> $Name"
@@ -247,8 +271,19 @@ function Invoke-WindowsBuild {
         # cargo reruns build.rs (which rewrites NativeMethods.g.cs) only when its inputs change; a new
         # modification time (content untouched) makes it run, so the check below sees what it writes.
         (Get-Item (Join-Path $Root 'crates\cg-ffi\build.rs')).LastWriteTime = Get-Date
-        Invoke-Native "cargo build --release --target $Triple" {
-            cargo build --release --locked --target $Triple -p cg-service -p cg-cli -p cg-ffi
+        $compilerEnv = Get-OpenSslCompilerEnv $Arch $Root
+        $savedEnv = @{}
+        foreach ($name in $compilerEnv.Keys) {
+            $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $compilerEnv[$name], 'Process')
+            if ($name -ne 'PATH') { Write-Host "    $name=$($compilerEnv[$name])" }
+        }
+        try {
+            Invoke-Native "cargo build --release --target $Triple" {
+                cargo build --release --locked --target $Triple -p cg-service -p cg-cli -p cg-ffi
+            }
+        } finally {
+            foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }
         }
         Invoke-Native 'NativeMethods.g.cs matches the committed copy' {
             git diff --exit-code HEAD -- windows/CellGlide.Core/Native/NativeMethods.g.cs
