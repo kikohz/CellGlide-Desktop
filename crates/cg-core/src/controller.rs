@@ -74,8 +74,6 @@ pub struct ControllerConfig {
     /// Where wireless pairings are kept; `None` means the feature is absent and nothing wireless
     /// is attempted.
     pub wireless: Option<Arc<WirelessStore>>,
-    /// The service forces the wireless switch on, whatever the stored setting says.
-    pub wireless_forced: bool,
     /// The platform's access point, discovery and TLS dialer; `None` where wireless sessions
     /// are not available.
     pub wireless_ports: Option<WirelessPorts>,
@@ -221,7 +219,6 @@ impl ControllerConfig {
             health_dir: None,
             time_zone: TimeZone::system(),
             wireless: None,
-            wireless_forced: false,
             wireless_ports: None,
             wireless_timing: WirelessTiming::default(),
             wireless_health: HealthTiming::wireless(),
@@ -654,7 +651,7 @@ impl Actor {
 
     /// The wireless switch as it applies now.
     fn wireless_enabled(&self) -> bool {
-        self.settings.get().wireless_enabled || self.config.wireless_forced
+        self.settings.get().wireless_enabled
     }
 
     fn chosen(&self) -> Option<&str> {
@@ -1726,7 +1723,7 @@ impl Actor {
         let Some(store) = self.config.wireless.clone() else {
             return;
         };
-        let enabled = self.settings.get().wireless_enabled || self.config.wireless_forced;
+        let enabled = self.settings.get().wireless_enabled;
         // Cable pairing is for the USB link only.
         let Some(device) = active.phone.usb_device() else {
             return;
@@ -4186,11 +4183,10 @@ mod tests {
             _dir: tempfile::TempDir,
         }
 
-        /// A rig with a store; `setting` is the stored switch, `forced` the service's override.
+        /// A rig with a store; `setting` is the stored switch.
         async fn wireless_rig(
             options: FakePhoneOptions,
             setting: bool,
-            forced: bool,
             with_store: bool,
         ) -> Wireless {
             let dir = tempfile::tempdir().unwrap();
@@ -4203,7 +4199,6 @@ mod tests {
                     ..Stored::default()
                 });
                 config.wireless = with_store.then_some(shared);
-                config.wireless_forced = forced;
                 config.computer_name = Some("Desk PC".into());
             })
             .await;
@@ -4244,7 +4239,6 @@ mod tests {
             let w = wireless_rig(
                 options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
                 true,
-                false,
                 true,
             )
             .await;
@@ -4274,39 +4268,24 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn the_service_override_enables_it_when_the_setting_is_off() {
-            let w = wireless_rig(
-                options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
-                false,
-                true,
-                true,
-            )
-            .await;
-            connect_and_wait(&w.r, "connected", connected).await;
-            until("the pairing", || w.store.records().len() == 1).await;
-        }
-
-        #[tokio::test]
         async fn nothing_is_attempted_without_the_switch_the_store_or_the_capability() {
             let cases = [
-                // Setting off, not forced.
-                (WIRELESS_CAPS, false, false, true),
+                // Setting off.
+                (WIRELESS_CAPS, false, true),
                 // No store: the feature is absent.
-                (WIRELESS_CAPS, true, true, false),
+                (WIRELESS_CAPS, true, false),
                 // A phone without wireless-v2.
                 (
                     &["socks5-tcp", "udp-over-usb-v1", "session-watch-v1"][..],
                     true,
-                    false,
                     true,
                 ),
             ];
-            for (caps, setting, forced, with_store) in cases {
+            for (caps, setting, with_store) in cases {
                 let (log, _guard) = capture();
                 let w = wireless_rig(
                     options(CableBehaviour::Reply(new_line()), caps),
                     setting,
-                    forced,
                     with_store,
                 )
                 .await;
@@ -4330,7 +4309,7 @@ mod tests {
             ] {
                 let (log, _guard) = capture();
                 let refused = cable == CableBehaviour::Refuse;
-                let w = wireless_rig(options(cable, WIRELESS_CAPS), true, false, true).await;
+                let w = wireless_rig(options(cable, WIRELESS_CAPS), true, true).await;
                 connect_and_wait(&w.r, "connected", connected).await;
                 if !refused {
                     until("the attempt", || w.r.phone.cable_connections() == 1).await;
@@ -4346,13 +4325,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_silent_phone_does_not_hold_the_session_and_the_attempt_ends_with_it() {
-            let w = wireless_rig(
-                options(CableBehaviour::Silent, WIRELESS_CAPS),
-                true,
-                false,
-                true,
-            )
-            .await;
+            let w = wireless_rig(options(CableBehaviour::Silent, WIRELESS_CAPS), true, true).await;
             connect_and_wait(&w.r, "connected", connected).await;
             until("the attempt", || w.r.phone.open_cable_connections() == 1).await;
             // Connected while the attempt waits on the phone.
@@ -4375,7 +4348,6 @@ mod tests {
                     WIRELESS_CAPS,
                 ),
                 true,
-                false,
                 true,
             )
             .await;

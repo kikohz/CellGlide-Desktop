@@ -13,6 +13,8 @@ pub mod secrets;
 pub mod strict_dns;
 pub mod wintun;
 #[cfg(feature = "wireless")]
+pub mod wireless_ports;
+#[cfg(feature = "wireless")]
 pub mod wireless_tls;
 
 pub use backend::WindowsBackend;

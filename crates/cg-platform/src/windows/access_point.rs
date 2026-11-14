@@ -18,6 +18,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use windows::Devices::WiFiDirect::{
     WiFiDirectAdvertisementListenStateDiscoverability, WiFiDirectAdvertisementPublisher,
     WiFiDirectAdvertisementPublisherStatus, WiFiDirectAdvertisementPublisherStatusChangedEventArgs,
@@ -77,14 +78,16 @@ struct Client {
     remote: IpAddr,
 }
 
-/// Not observed yet: a later `Aborted` (the radio turned off after start). The session layer must
-/// add a status signal for it (plan B).
+/// A started access point. When the system stops it on its own after the start (the publisher
+/// reports `Aborted`: the radio switched off, the adapter taken by something else),
+/// [`AccessPoint::lost_signal`] turns true.
 pub struct AccessPoint {
     publisher: WiFiDirectAdvertisementPublisher,
     status_token: i64,
     listener: WiFiDirectConnectionListener,
     request_token: i64,
     clients: Arc<Mutex<Vec<Client>>>,
+    lost: watch::Receiver<bool>,
 }
 
 impl AccessPoint {
@@ -112,6 +115,10 @@ impl AccessPoint {
         legacy.SetPassphrase(&credential).map_err(winrt)?;
 
         let (status_sender, statuses) = mpsc::channel();
+        // `Aborted` before `Started` is a failed start (reported by `start`); after it, the
+        // access point is gone. The handler sets the flag either way; only a started access
+        // point's owner reads it.
+        let (lost_sender, lost) = watch::channel(false);
         let status_token = publisher
             .StatusChanged(&TypedEventHandler::new(
                 move |_: Ref<WiFiDirectAdvertisementPublisher>,
@@ -124,6 +131,9 @@ impl AccessPoint {
                             status.0,
                             error.0
                         );
+                        if status == WiFiDirectAdvertisementPublisherStatus::Aborted {
+                            lost_sender.send_replace(true);
+                        }
                         let _ = status_sender.send((status, error));
                     }
                     Ok(())
@@ -160,6 +170,7 @@ impl AccessPoint {
             listener,
             request_token,
             clients,
+            lost,
         };
         if let Err(error) = access_point.publisher.Start() {
             drop(access_point);
@@ -205,6 +216,12 @@ impl AccessPoint {
             .iter()
             .map(|client| (client.local, client.remote))
             .collect()
+    }
+
+    /// Turns true once the system stopped the access point on its own (`Aborted` after the
+    /// start). Valid while this access point exists.
+    pub fn lost_signal(&self) -> watch::Receiver<bool> {
+        self.lost.clone()
     }
 
     /// Stops the access point (as dropping does).

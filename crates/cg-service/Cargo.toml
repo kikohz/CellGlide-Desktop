@@ -33,6 +33,8 @@ zbus.workspace = true
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# The wireless link (access point, discovery, TLS-PSK with the vendored OpenSSL): Windows only.
+cg-platform = { workspace = true, features = ["wireless"] }
 tracing-appender.workspace = true
 windows-service.workspace = true
 windows = { workspace = true, features = [

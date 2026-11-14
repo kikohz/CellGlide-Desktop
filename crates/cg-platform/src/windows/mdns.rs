@@ -48,15 +48,15 @@ pub enum Method {
 }
 
 /// The phones advertising the service on the access point whose address is
-/// `interface_local_ip`: the system API first, our own queries if that fails.
+/// `interface_local_ip`, with our own queries: on the device the system API found the phone in
+/// only about half the rounds (docs/validation/windows-1.1-gate.md), so it is not tried first.
 pub fn browse(interface_local_ip: IpAddr, timeout: Duration) -> io::Result<Vec<FoundPhone>> {
-    match browse_with(Method::System, interface_local_ip, timeout) {
-        Ok(found) => Ok(found),
-        Err(error) => {
-            tracing::warn!("mDNS: system browse failed ({error}), using raw queries");
-            browse_with(Method::Raw, interface_local_ip, timeout)
-        }
-    }
+    browse_with(Method::Raw, interface_local_ip, timeout)
+}
+
+/// Whether `address` is one of this computer's IPv4 addresses right now.
+pub fn is_local_address(address: Ipv4Addr) -> bool {
+    interface_index(address).is_ok()
 }
 
 pub fn browse_with(
