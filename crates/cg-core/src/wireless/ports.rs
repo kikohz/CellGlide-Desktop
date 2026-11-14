@@ -2,6 +2,7 @@
 //! live in `cg-platform`; tests use in-memory stand-ins.
 
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 
 use crate::Result;
@@ -18,4 +19,26 @@ pub trait WirelessLink: Send + Sync {
 
     /// A new connection to `port` on the phone.
     fn open(&self, port: u16) -> BoxFuture<'_, Result<MuxStream>>;
+}
+
+/// A phone advertising the CellGlide service on the access point.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FoundPhone {
+    /// The service instance name: the phone's identifier (phoneID).
+    pub instance: String,
+    pub address: IpAddr,
+    pub port: u16,
+}
+
+/// Why a TLS connection to the phone did not come up.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DialError {
+    /// The phone does not know the PSK identity (TLS alert 115, unknown_psk_identity).
+    #[error("the phone does not know this pairing")]
+    UnknownIdentity,
+    #[error("no connection within the time limit")]
+    Timeout,
+    /// Anything else; text for logs only.
+    #[error("{0}")]
+    Io(String),
 }

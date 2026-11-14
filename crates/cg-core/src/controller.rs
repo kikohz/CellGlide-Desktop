@@ -83,7 +83,12 @@ pub struct HealthWatchTiming {
     /// A phone that sent nothing for this long no longer vouches for its own legs.
     pub frame_stale: Duration,
     pub channel_timeout: Duration,
+    /// The whole captive check through the tunnel (`TunnelProbe::check_within`).
+    pub tunnel_timeout: Duration,
     pub judge: JudgeConfig,
+    /// The median handshake time above which the link counts as weak (`health::weak`); `None`
+    /// (USB) never calls it weak.
+    pub weak_median: Option<Duration>,
 }
 
 impl Default for HealthWatchTiming {
@@ -94,7 +99,29 @@ impl Default for HealthWatchTiming {
             fast: Duration::from_secs(3),
             frame_stale: Duration::from_secs(6),
             channel_timeout: Duration::from_secs(2),
+            tunnel_timeout: crate::exit_check::CAPTIVE_TIMEOUT,
             judge: JudgeConfig::default(),
+            weak_median: None,
+        }
+    }
+}
+
+/// The wireless tier's SOCKS handshake timeout, for the quick check and the timeline's check.
+pub const WIRELESS_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(2500);
+/// The wireless tier's limit for the small request through the tunnel.
+pub const WIRELESS_TUNNEL_TIMEOUT: Duration = Duration::from_millis(5500);
+
+impl HealthWatchTiming {
+    /// The wireless tier (as the Mac): SOCKS handshake 2.5 s, the small request through the
+    /// tunnel 5.5 s, a leg fails after 3 failures in a row, and a median handshake above
+    /// 1150 ms is weak.
+    pub fn wireless() -> Self {
+        HealthWatchTiming {
+            channel_timeout: WIRELESS_HANDSHAKE_TIMEOUT,
+            tunnel_timeout: WIRELESS_TUNNEL_TIMEOUT,
+            judge: JudgeConfig::wireless(),
+            weak_median: Some(crate::health::weak::WEAK_MEDIAN),
+            ..HealthWatchTiming::default()
         }
     }
 }
@@ -110,6 +137,8 @@ pub struct HealthTiming {
     pub retry: Duration,
     /// Minimum spacing of checks triggered by the phone reporting no exit.
     pub early_spacing: Duration,
+    /// This many failed quick checks in a row run a full check at once.
+    pub quick_fail_after: u32,
 }
 
 impl Default for HealthTiming {
@@ -120,8 +149,36 @@ impl Default for HealthTiming {
             full: Duration::from_secs(60),
             retry: Duration::from_secs(5),
             early_spacing: Duration::from_secs(30),
+            quick_fail_after: 2,
         }
     }
+}
+
+impl HealthTiming {
+    /// The wireless tier: the quick SOCKS check waits 2.5 s, and 3 failures in a row (not 2)
+    /// run a full check.
+    pub fn wireless() -> Self {
+        HealthTiming {
+            quick_timeout: WIRELESS_HANDSHAKE_TIMEOUT,
+            quick_fail_after: 3,
+            ..HealthTiming::default()
+        }
+    }
+}
+
+/// Counts one quick check result; true when `fail_after` failures in a row are reached (the
+/// count then starts again).
+fn quick_check_counted(failures: &mut u32, ok: bool, fail_after: u32) -> bool {
+    if ok {
+        *failures = 0;
+        return false;
+    }
+    *failures += 1;
+    if *failures >= fail_after {
+        *failures = 0;
+        return true;
+    }
+    false
 }
 
 /// Where the persistent settings live.
@@ -709,16 +766,11 @@ impl Actor {
                 }
             }
             Event::QuickCheck(g, ok) if g == self.generation => {
+                let fail_after = self.config.health.quick_fail_after;
                 if let Some(active) = self.active.as_mut() {
                     active.quick_check_running = false;
-                    if ok {
-                        active.quick_failures = 0;
-                    } else {
-                        active.quick_failures += 1;
-                        if active.quick_failures >= 2 {
-                            active.quick_failures = 0;
-                            active.next_full = Instant::now();
-                        }
+                    if quick_check_counted(&mut active.quick_failures, ok, fail_after) {
+                        active.next_full = Instant::now();
                     }
                 }
             }
@@ -866,7 +918,7 @@ impl Actor {
             let probe = self.config.tunnel_probe.clone();
             let tx = events.clone();
             active.tasks.spawn(async move {
-                let ok = probe.check().await;
+                let ok = probe.check_within(watch.tunnel_timeout).await;
                 let _ = tx.send(Event::HealthTunnel(generation, ok)).await;
             });
         }
@@ -1513,6 +1565,7 @@ mod tests {
             full: Duration::from_secs(30),
             retry: Duration::from_secs(5),
             early_spacing: Duration::from_millis(300),
+            quick_fail_after: 2,
         }
     }
 
@@ -1523,6 +1576,7 @@ mod tests {
             full: Duration::from_millis(300),
             retry: Duration::from_millis(400),
             early_spacing: Duration::from_millis(300),
+            quick_fail_after: 2,
         }
     }
 
@@ -2817,10 +2871,12 @@ mod tests {
             fast: Duration::from_millis(100),
             frame_stale: Duration::from_secs(1),
             channel_timeout: Duration::from_millis(500),
+            tunnel_timeout: crate::exit_check::CAPTIVE_TIMEOUT,
             judge: JudgeConfig {
                 warmup: Duration::ZERO,
                 ..JudgeConfig::default()
             },
+            weak_median: None,
         }
     }
 
@@ -3805,6 +3861,65 @@ mod tests {
             assert_eq!(log.lines("INFO", "already paired"), 0);
             assert!(connected(&w.r.controller.snapshot()));
             assert!(w.store.records().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    #[test]
+    fn the_cable_tier_is_unchanged() {
+        let quick = HealthTiming::default();
+        assert_eq!(quick.quick_timeout, Duration::from_secs(2));
+        assert_eq!(quick.quick_fail_after, 2);
+        let watch = HealthWatchTiming::default();
+        assert_eq!(watch.channel_timeout, Duration::from_secs(2));
+        assert_eq!(watch.tunnel_timeout, Duration::from_secs(5));
+        assert_eq!(watch.judge, JudgeConfig::default());
+        assert_eq!(watch.judge.fail_after, 2);
+        assert_eq!(watch.weak_median, None);
+    }
+
+    #[test]
+    fn the_wireless_tier() {
+        let quick = HealthTiming::wireless();
+        assert_eq!(quick.quick_timeout, Duration::from_millis(2500));
+        assert_eq!(quick.quick_fail_after, 3);
+        let cable = HealthTiming::default();
+        assert_eq!(
+            (quick.quick, quick.full, quick.retry, quick.early_spacing),
+            (cable.quick, cable.full, cable.retry, cable.early_spacing)
+        );
+        let watch = HealthWatchTiming::wireless();
+        assert_eq!(watch.channel_timeout, Duration::from_millis(2500));
+        assert_eq!(watch.tunnel_timeout, Duration::from_millis(5500));
+        assert_eq!(watch.judge, JudgeConfig::wireless());
+        assert_eq!(watch.judge.fail_after, 3);
+        assert_eq!(watch.weak_median, Some(Duration::from_millis(1150)));
+        let cable = HealthWatchTiming::default();
+        assert_eq!(
+            (watch.channel, watch.tunnel, watch.fast, watch.frame_stale),
+            (cable.channel, cable.tunnel, cable.fast, cable.frame_stale)
+        );
+    }
+
+    #[test]
+    fn quick_failures_count_up_to_the_configured_threshold() {
+        for fail_after in [2, 3] {
+            let mut failures = 0;
+            for _ in 1..fail_after {
+                assert!(!quick_check_counted(&mut failures, false, fail_after));
+            }
+            assert!(quick_check_counted(&mut failures, false, fail_after));
+            assert_eq!(failures, 0, "counting starts again");
+            // A success in between resets the run.
+            for _ in 1..fail_after {
+                quick_check_counted(&mut failures, false, fail_after);
+            }
+            assert!(!quick_check_counted(&mut failures, true, fail_after));
+            assert!(!quick_check_counted(&mut failures, false, fail_after));
         }
     }
 }

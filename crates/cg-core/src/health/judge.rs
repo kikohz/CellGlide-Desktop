@@ -35,6 +35,17 @@ impl Default for JudgeConfig {
     }
 }
 
+impl JudgeConfig {
+    /// The wireless tier (as the Mac): a leg fails only after 3 failures in a row, since the
+    /// radio drops the odd probe that the cable never would.
+    pub fn wireless() -> Self {
+        JudgeConfig {
+            fail_after: 3,
+            ..JudgeConfig::default()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangePhase {
     Started,
@@ -524,5 +535,26 @@ mod tests {
             vec![ChangePhase::Ended]
         );
         assert_eq!(j.cause(), None);
+    }
+
+    #[test]
+    fn the_wireless_tier_fails_a_leg_after_three_failures() {
+        assert_eq!(
+            JudgeConfig::wireless(),
+            JudgeConfig {
+                fail_after: 3,
+                ..JudgeConfig::default()
+            }
+        );
+        let mut j = HealthJudge::new(JudgeConfig::wireless());
+        j.start(at(0));
+        for i in 0..3 {
+            j.record(Segment::Channel, Some(true), at(11 + i));
+        }
+        j.record(Segment::Channel, Some(false), at(20));
+        j.record(Segment::Channel, Some(false), at(21));
+        assert_eq!(j.state(Segment::Channel), SegmentState::Ok);
+        j.record(Segment::Channel, Some(false), at(22));
+        assert_eq!(j.state(Segment::Channel), SegmentState::Failed);
     }
 }

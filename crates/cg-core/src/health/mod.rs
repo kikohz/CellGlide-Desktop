@@ -5,4 +5,5 @@
 pub mod judge;
 pub mod log;
 pub mod monitor;
+pub mod weak;
 pub mod window;

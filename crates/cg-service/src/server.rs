@@ -355,6 +355,7 @@ pub(crate) mod test_support {
             full: Duration::from_secs(30),
             retry: Duration::from_secs(5),
             early_spacing: Duration::from_millis(300),
+            quick_fail_after: 2,
         };
         let controller = Controller::spawn(config);
         let sources = Arc::new(test_sources(dir));

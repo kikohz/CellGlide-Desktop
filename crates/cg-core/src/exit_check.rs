@@ -103,6 +103,12 @@ impl ExitProbe for HttpsProbe {
 pub trait TunnelProbe: Send + Sync + 'static {
     /// Whether the computer's own traffic gets out, through the tunnel.
     fn check(&self) -> BoxFuture<'_, bool>;
+
+    /// `check`, given `limit` in all (the wireless tier allows longer than the cable's). A
+    /// probe with a time limit of its own uses `limit` instead of it.
+    fn check_within(&self, limit: Duration) -> BoxFuture<'_, bool> {
+        Box::pin(async move { tokio::time::timeout(limit, self.check()).await == Ok(true) })
+    }
 }
 
 /// `GET http://captive.apple.com/hotspot-detect.html` without a proxy: 200 and `Success` in
@@ -194,12 +200,13 @@ fn captive_success(response: &[u8]) -> bool {
 
 impl TunnelProbe for CaptiveProbe {
     fn check(&self) -> BoxFuture<'_, bool> {
-        Box::pin(async move {
-            matches!(
-                tokio::time::timeout(self.timeout, self.run()).await,
-                Ok(Ok(true))
-            )
-        })
+        self.check_within(self.timeout)
+    }
+
+    fn check_within(&self, limit: Duration) -> BoxFuture<'_, bool> {
+        Box::pin(
+            async move { matches!(tokio::time::timeout(limit, self.run()).await, Ok(Ok(true))) },
+        )
     }
 }
 
@@ -316,6 +323,16 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert!(request.contains(&expected), "{request}");
+    }
+
+    #[tokio::test]
+    async fn captive_probe_takes_the_limit_it_is_given() {
+        let ok = format!("HTTP/1.0 200 OK\r\n\r\n{SUCCESS}");
+        // Answers after 700 ms; the probe's own limit is 500 ms.
+        let probe = http_once(ok.clone().into(), Duration::from_millis(700)).await;
+        assert!(probe.check_within(Duration::from_secs(3)).await);
+        let probe = http_once(ok.into(), Duration::from_millis(700)).await;
+        assert!(!probe.check().await);
     }
 
     #[tokio::test]

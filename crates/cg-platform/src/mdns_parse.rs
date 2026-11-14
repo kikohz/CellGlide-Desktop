@@ -19,14 +19,9 @@ const MAX_POINTERS: usize = 64;
 /// RFC 1035: a name is at most 255 bytes on the wire.
 const MAX_NAME_LENGTH: usize = 255;
 
-/// A phone advertising the CellGlide service on the access point.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FoundPhone {
-    /// The service instance name: the phone's identifier (phoneID).
-    pub instance: String,
-    pub address: IpAddr,
-    pub port: u16,
-}
+/// A phone advertising the CellGlide service on the access point (defined in cg-core, where the
+/// session picks among them).
+pub use cg_core::wireless::ports::FoundPhone;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordData {
