@@ -56,6 +56,11 @@ pub enum DialError {
 pub use cg_ipc::wireless::ApFailure;
 
 /// Starts this computer's temporary access point.
+///
+/// The caller may drop the `start` future before it completes (the user cancelled, the service
+/// is stopping). An implementation whose start goes on elsewhere (a blocking thread, a WinRT
+/// operation) must then drop the result as soon as it arrives, so an access point started for
+/// nobody is stopped at once and never left running.
 pub trait AccessPoint: Send + Sync {
     fn start<'a>(
         &'a self,

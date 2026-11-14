@@ -18,6 +18,7 @@ use crate::wireless::policy::{
 };
 use crate::wireless::ports::{DialError, FoundPhone, RunningAccessPoint, TlsLink, WirelessPorts};
 use crate::wireless::store::{Record, WirelessStore};
+use cg_ipc::Reason;
 use cg_ipc::wireless::{WirelessFailure, WirelessPhaseView};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -44,6 +45,9 @@ pub struct WirelessTiming {
     /// This many rounds in a row with the paired phone's name at several addresses are shown
     /// as a name clash (and end as one when the window runs out).
     pub clash_rounds: u32,
+    /// A device on USB is asked for the phone app's hello (to see whether it can take over
+    /// from the wireless session) at most this often.
+    pub usb_probe_every: Duration,
 }
 
 impl Default for WirelessTiming {
@@ -55,6 +59,7 @@ impl Default for WirelessTiming {
             browse: Duration::from_secs(2),
             dial_timeout: policy::DIAL_TIMEOUT,
             clash_rounds: 3,
+            usb_probe_every: Duration::from_secs(10),
         }
     }
 }
@@ -97,7 +102,9 @@ impl WirelessPhase {
             WirelessPhase::Dialing => WirelessPhaseView::Connecting,
             WirelessPhase::Connected => WirelessPhaseView::Connected,
             WirelessPhase::Reconnecting { .. } => WirelessPhaseView::Reconnecting,
-            WirelessPhase::Failed(reason) => WirelessPhaseView::Failed { reason: *reason },
+            WirelessPhase::Failed(reason) => WirelessPhaseView::Failed {
+                reason: reason.clone(),
+            },
         })
     }
 
@@ -116,10 +123,13 @@ impl WirelessPhase {
 }
 
 /// Why the actor could not build the session on a link the task had checked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum NotEstablished {
     /// A dial inside it was refused with an unknown identity.
     UnknownIdentity,
+    /// The phone can't be used and trying again won't help (`Reason::PhoneTooOld`).
+    Permanent(Reason),
+    /// Anything else; tried again.
     Other,
 }
 
@@ -463,6 +473,9 @@ impl<'a> Attempt<'a> {
                 match answer.await {
                     Ok(Ok(ended)) => return Dialled::Connected(ended),
                     Ok(Err(NotEstablished::UnknownIdentity)) => DialError::UnknownIdentity,
+                    Ok(Err(NotEstablished::Permanent(reason))) => {
+                        return Dialled::End(WirelessFailure::PhoneRefused { reason });
+                    }
                     Ok(Err(NotEstablished::Other)) => return Dialled::Retry,
                     // The actor dropped the question: it is ending the attempt.
                     Err(_) => return Dialled::Retry,

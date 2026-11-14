@@ -533,6 +533,7 @@ mod tests {
                 ssid: Some("CellGlide-AB12".into()),
                 weak: true,
                 name_clash: false,
+                last_error: Some(Reason::NoExit),
             }),
             ..Snapshot::default()
         };

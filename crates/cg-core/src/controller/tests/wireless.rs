@@ -59,6 +59,7 @@ fn timing() -> WirelessTiming {
         browse: Duration::from_millis(10),
         dial_timeout: Duration::from_millis(300),
         clash_rounds: 3,
+        usb_probe_every: Duration::from_secs(10),
     }
 }
 
@@ -157,7 +158,7 @@ async fn connected_rig(adjust: impl FnOnce(&mut ControllerConfig)) -> W {
 }
 
 fn phase(s: &Snapshot) -> Option<WirelessPhaseView> {
-    s.wireless.as_ref().map(|w| w.phase)
+    s.wireless.as_ref().map(|w| w.phase.clone())
 }
 
 fn on_air(s: &Snapshot) -> bool {
@@ -473,6 +474,8 @@ async fn suspend_ends_it_and_resume_does_not_start_it_again() {
         .send(Command::Sleep { sleeping: false })
         .await
         .unwrap();
+    // Nothing to wait on for "nothing starts": let a few ticks (250 ms each) pass.
+    tokio::time::sleep(Duration::from_millis(800)).await;
     let snap = w.r.controller.snapshot();
     assert_eq!(snap.wireless, None);
     assert!(!connected(&snap));
@@ -736,6 +739,7 @@ fn the_defaults_are_the_policy_and_the_wireless_tier() {
             browse: Duration::from_secs(2),
             dial_timeout: Duration::from_secs(4),
             clash_rounds: 3,
+            usb_probe_every: Duration::from_secs(10),
         }
     );
     assert_eq!(
@@ -860,4 +864,228 @@ async fn a_lost_access_point_while_waiting_fails_the_attempt() {
     p.fake.lose_access_point();
     paused_wait(&p.controller, "lost", |s| failed(s, WirelessFailure::Lost)).await;
     assert!(!p.fake.is_up());
+}
+
+// --- Fix round 1.
+
+/// Where the USB device's hello goes instead of the fake phone: every connection is counted
+/// and closed at once, as a device whose phone app does not share (an iPad, an iPhone only
+/// charging).
+async fn not_sharing() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (addr, count)
+}
+
+fn probes(count: &std::sync::atomic::AtomicUsize) -> usize {
+    count.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// I1: a device on USB whose phone app does not answer leaves the wireless session alone, is
+/// asked again only after it appears again, and then not before `usb_probe_every`.
+#[tokio::test]
+async fn a_usb_device_that_does_not_share_leaves_the_wireless_session_up() {
+    let w = connected_rig(|config| {
+        config.wireless_timing.usb_probe_every = Duration::from_secs(1);
+    })
+    .await;
+    // The wireless phone keeps the routes it was given; only USB's hello goes nowhere.
+    let (addr, count) = not_sharing().await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.r.mux.attach(device("aaaa", 1));
+    eventually("the first probe", Duration::from_secs(5), || {
+        probes(&count) == 1
+    })
+    .await;
+    let asked = std::time::Instant::now();
+    w.r.mux.detach(1);
+    w.r.mux.attach(device("aaaa", 2));
+    eventually("the second probe", Duration::from_secs(5), || {
+        probes(&count) == 2
+    })
+    .await;
+    assert!(
+        asked.elapsed() >= Duration::from_millis(900),
+        "not before usb_probe_every: {:?}",
+        asked.elapsed()
+    );
+    // Still there, not attached again: not asked a third time.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(probes(&count), 2);
+    let snap = w.r.controller.snapshot();
+    assert!(on_air(&snap), "{snap:?}");
+    assert_eq!(snap.devices, ["aaaa"]);
+    assert!(w.fake.is_up());
+    assert_eq!(w.r.backend.started(), 1);
+    assert_eq!(w.r.backend.stopped(), 0);
+}
+
+/// I1: only a USB phone that shares blocks `ConnectWireless`; one that doesn't, or two phones
+/// with none chosen, do not.
+#[tokio::test]
+async fn connect_wireless_is_allowed_beside_a_usb_device_that_does_not_share() {
+    let w = wireless_rig().await;
+    w.add_phone(Rounds::all());
+    let (addr, count) = not_sharing().await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.r.mux.attach(device("aaaa", 1));
+    wait_for(&w.r.controller, "idle", |s| s.state == ConnState::Idle).await;
+    w.start().await;
+    assert_eq!(probes(&count), 1, "asked once, inline");
+    w.connected().await;
+    assert!(w.fake.is_up());
+
+    // Two sharing phones, none chosen: wireless may start too.
+    let w = wireless_rig().await;
+    w.add_phone(Rounds::all());
+    w.r.mux.attach(device("aaaa", 1));
+    w.r.mux.attach(device("bbbb", 2));
+    wait_for(&w.r.controller, "two phones", |s| s.devices.len() == 2).await;
+    w.start().await;
+    w.connected().await;
+}
+
+/// I2: a phone whose app is too old ends the attempt at once.
+#[tokio::test]
+async fn a_phone_too_old_ends_the_attempt_at_once() {
+    let options = FakePhoneOptions {
+        hello: hello_json(&["socks5-tcp", "session-watch-v1"], true, SESSION_A),
+        ..FakePhoneOptions::default()
+    };
+    let w = wireless_rig_with(options, |_| {}).await;
+    w.add_phone(Rounds::all());
+    w.start().await;
+    wait_for(&w.r.controller, "refused", |s| {
+        failed(
+            s,
+            WirelessFailure::PhoneRefused {
+                reason: Reason::PhoneTooOld,
+            },
+        )
+    })
+    .await;
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.backend.started(), 0);
+    assert_eq!(w.fake.dials().len(), 2, "the check and the hello, once");
+}
+
+/// I2: an error that may heal is tried again, and shown while it lasts.
+#[tokio::test]
+async fn other_errors_keep_trying_and_show_the_last_reason() {
+    let w = wireless_rig().await;
+    w.r.probe.set_ok(false);
+    w.add_phone(Rounds::all());
+    w.start().await;
+    let snap = wait_for(&w.r.controller, "the reason", |s| {
+        s.wireless
+            .as_ref()
+            .is_some_and(|w| w.last_error == Some(Reason::NoExit))
+    })
+    .await;
+    assert!(phase(&snap).is_some_and(|p| p != WirelessPhaseView::Connected));
+    w.r.probe.set_ok(true);
+    let snap = w.connected().await;
+    assert_eq!(snap.wireless.unwrap().last_error, None);
+    assert_eq!(w.fake.start_attempts(), 1);
+}
+
+/// M1: on a multi-threaded runtime (the service's) the access point is down when
+/// `CancelWireless` returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_returns_with_the_access_point_down_on_a_threaded_runtime() {
+    let w = connected_rig(|_| {}).await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert!(!w.fake.is_up());
+    assert_eq!(w.fake.stops(), 1);
+    assert_eq!(w.r.backend.stopped(), 1);
+}
+
+/// M3 (i): after a verified session dropped, a device elsewhere advertising the phone's name
+/// and refusing the pairing ends the reconnect as refused; the pairing stays good.
+#[tokio::test]
+async fn an_impostor_elsewhere_after_the_session_dropped_is_refused_not_stale() {
+    let w = connected_rig(|config| {
+        config.wireless_timing.retry_for = Duration::from_secs(1);
+    })
+    .await;
+    w.fake.stop_advertising(PHONE_ID, at(205));
+    w.fake.add_impostor(PHONE_ID, at(66), Rounds::all());
+    w.fake.phone_leaves(at(205));
+    wait_for(&w.r.controller, "refused", |s| {
+        failed(s, WirelessFailure::PairingRefused)
+    })
+    .await;
+    assert!(!w.store.records()[0].stale);
+    assert!(w.fake.dials().iter().any(|d| d.to.ip() == at(66)));
+    assert!(!w.fake.is_up());
+}
+
+/// M3 (ii): cancelling while the pairing is being checked.
+#[tokio::test]
+async fn cancel_while_dialing_closes_the_access_point() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.wireless_timing.dial_timeout = Duration::from_secs(30);
+    })
+    .await;
+    w.fake.script_dials(DialMatch::any(), [DialOutcome::Hang]);
+    w.add_phone(Rounds::all());
+    w.start().await;
+    wait_for(&w.r.controller, "dialing", |s| {
+        phase(s) == Some(WirelessPhaseView::Connecting)
+    })
+    .await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.r.backend.started(), 0);
+}
+
+/// M3 (ii): cancelling while the actor builds the session: the session it just built goes too.
+#[tokio::test]
+async fn cancel_while_the_session_is_built_ends_both() {
+    let w = wireless_rig().await;
+    w.r.probe.set_delay(Duration::from_millis(500));
+    w.add_phone(Rounds::all());
+    w.start().await;
+    eventually("building", Duration::from_secs(5), || {
+        w.r.probe.calls() >= 1
+    })
+    .await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert!(!w.fake.is_up());
+    let snap = w.r.controller.snapshot();
+    assert_eq!(snap.wireless, None);
+    assert!(!connected(&snap));
+    assert_eq!(w.r.backend.started(), w.r.backend.stopped());
+}
+
+/// M3 (iii): the switch turned off while reconnecting.
+#[tokio::test]
+async fn turning_the_switch_off_while_reconnecting_ends_it() {
+    let w = connected_rig(|_| {}).await;
+    w.fake
+        .script_dials(DialMatch::address(at(205)), vec![DialOutcome::Hang; 100]);
+    w.r.phone.end_session();
+    wait_for(&w.r.controller, "reconnecting", |s| {
+        phase(s) == Some(WirelessPhaseView::Reconnecting)
+    })
+    .await;
+    w.r.controller
+        .send(Command::SetWireless { enabled: false })
+        .await
+        .unwrap();
+    assert!(failed(
+        &w.r.controller.snapshot(),
+        WirelessFailure::TurnedOff
+    ));
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.backend.stopped(), 1);
 }

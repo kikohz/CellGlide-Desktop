@@ -378,6 +378,8 @@ enum Event {
     HealthTunnel(u64, bool),
     /// From the wireless attempt's task, tagged with the attempt.
     Wireless(u64, WirelessEvent),
+    /// Whether the USB device (serial, mux id) answered the phone app's hello.
+    UsbProbe(String, u32, bool),
 }
 
 /// Aborts the session's helper tasks unless the session is handed over.
@@ -459,6 +461,19 @@ struct Wireless {
     task: Option<wireless_session::Task>,
     /// The access point's network name, once it is up.
     ssid: Option<String>,
+    /// Why the last try to build the session failed, while the attempt keeps trying.
+    last_error: Option<Reason>,
+    /// USB devices asked whether the phone app answers (by serial): when last, and whether
+    /// they are due again (they appeared since).
+    probes: HashMap<String, UsbProbe>,
+    /// The probe in flight, if any: (serial, mux id) and its task.
+    probing: Option<(String, u32, JoinHandle<()>)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UsbProbe {
+    last: Instant,
+    due: bool,
 }
 
 enum Choice {
@@ -563,6 +578,9 @@ impl Actor {
                 attempt: 0,
                 task: None,
                 ssid: None,
+                last_error: None,
+                probes: HashMap::new(),
+                probing: None,
             },
         }
     }
@@ -695,7 +713,7 @@ impl Actor {
                 self.end_wireless(WirelessPhase::Off).await;
                 self.teardown().await;
             }
-            Command::ConnectWireless => return self.connect_wireless(events),
+            Command::ConnectWireless => return self.connect_wireless(events).await,
             Command::CancelWireless => self.end_wireless(WirelessPhase::Off).await,
             Command::SetWireless { enabled } => {
                 self.settings.update(|s| s.wireless_enabled = enabled);
@@ -752,7 +770,7 @@ impl Actor {
         Ok(())
     }
 
-    fn connect_wireless(&mut self, events: &mpsc::Sender<Event>) -> Result<()> {
+    async fn connect_wireless(&mut self, events: &mpsc::Sender<Event>) -> Result<()> {
         if self.wireless.phase.owns() {
             return Ok(());
         }
@@ -762,8 +780,8 @@ impl Actor {
             Some("not available here")
         } else if self.active.is_some() {
             Some("a session runs")
-        } else if !self.devices.is_empty() {
-            Some("an iPhone is on USB")
+        } else if self.usb_phone_answers().await {
+            Some("an iPhone shares over USB")
         } else {
             None
         };
@@ -779,6 +797,7 @@ impl Actor {
         };
         self.wireless.attempt += 1;
         self.wireless.phase = WirelessPhase::Starting;
+        self.wireless.last_error = None;
         self.wireless.task = Some(wireless_session::Task::spawn(wireless_session::Context {
             attempt: self.wireless.attempt,
             ports,
@@ -800,6 +819,10 @@ impl Actor {
         if let Some(task) = self.wireless.task.take() {
             task.stop().await;
         }
+        if let Some((_, _, probe)) = self.wireless.probing.take() {
+            probe.abort();
+        }
+        self.wireless.last_error = None;
         if self.active_is_wireless() {
             self.teardown().await;
         }
@@ -829,6 +852,7 @@ impl Actor {
                         self.begin_session(active);
                         if reply.send(Ok(end)).is_ok() {
                             self.wireless.phase = WirelessPhase::Connected;
+                            self.wireless.last_error = None;
                             tracing::info!("wireless: connected");
                         } else {
                             // Nobody waits for this session any more.
@@ -837,12 +861,19 @@ impl Actor {
                     }
                     Err(error) => {
                         tracing::warn!("wireless: connect failed: {error}");
+                        let reason = error.reason();
                         let why = match error {
                             CoreError::Dial(DialError::UnknownIdentity) => {
                                 NotEstablished::UnknownIdentity
                             }
+                            // Over USB too this is the one failure that asks the user to act
+                            // (update the app) rather than wait: no point dialling again.
+                            _ if reason == Reason::PhoneTooOld => {
+                                NotEstablished::Permanent(reason.clone())
+                            }
                             _ => NotEstablished::Other,
                         };
+                        self.wireless.last_error = Some(reason);
                         let _ = reply.send(Err(why));
                     }
                 }
@@ -855,12 +886,87 @@ impl Actor {
         }
     }
 
-    /// An iPhone that can be used on USB ends the wireless attempt and connects over USB, even
+    /// The USB device a connection would use now, if there is exactly that one.
+    fn selected_usb(&self) -> Option<Device> {
+        match choose(&self.devices, self.chosen()) {
+            Choice::Selected(device) => Some(device),
+            Choice::Waiting | Choice::Choose => None,
+        }
+    }
+
+    /// Whether the USB device a connection would use answers the phone app's hello (CellGlide
+    /// sharing over the cable), asked here and now (bounded by the hello's own time limit).
+    async fn usb_phone_answers(&mut self) -> bool {
+        let Some(device) = self.selected_usb() else {
+            return false;
+        };
+        self.wireless.probes.insert(
+            device.serial.clone(),
+            UsbProbe {
+                last: Instant::now(),
+                due: false,
+            },
+        );
+        let phone = Phone::usb(self.config.endpoint.clone(), device);
+        phone::read_hello(&phone).await.is_ok()
+    }
+
+    /// While a wireless attempt runs, asks the USB device a connection would use whether the
+    /// phone app answers, in the background: once after it appears (attach or usbmuxd joined
+    /// again), and at most once per `usb_probe_every`. An iPad, or an iPhone only charging, is
+    /// left alone and the wireless session goes on.
+    fn probe_usb(&mut self, events: &mpsc::Sender<Event>) {
+        if !self.wireless.phase.owns()
+            || self
+                .wireless
+                .probing
+                .as_ref()
+                .is_some_and(|(_, _, task)| !task.is_finished())
+        {
+            return;
+        }
+        let Some(device) = self.selected_usb() else {
+            return;
+        };
+        let now = Instant::now();
+        let every = self.config.wireless_timing.usb_probe_every;
+        if let Some(probe) = self.wireless.probes.get(&device.serial)
+            && (!probe.due || now < probe.last + every)
+        {
+            return;
+        }
+        self.wireless.probes.insert(
+            device.serial.clone(),
+            UsbProbe {
+                last: now,
+                due: false,
+            },
+        );
+        let (serial, mux_id) = (device.serial.clone(), device.mux_id);
+        let phone = Phone::usb(self.config.endpoint.clone(), device);
+        let tx = events.clone();
+        let task = tokio::spawn({
+            let serial = serial.clone();
+            async move {
+                let answers = phone::read_hello(&phone).await.is_ok();
+                let _ = tx.send(Event::UsbProbe(serial, mux_id, answers)).await;
+            }
+        });
+        self.wireless.probing = Some((serial, mux_id, task));
+    }
+
+    /// A device appeared on USB (attached, or listed when usbmuxd was joined again): it may be
+    /// asked again.
+    fn usb_probe_due(&mut self, serial: &str) {
+        if let Some(probe) = self.wireless.probes.get_mut(serial) {
+            probe.due = true;
+        }
+    }
+
+    /// An iPhone that shares over USB ends the wireless attempt and connects over USB, even
     /// with auto connect off: the user asked for a connection.
     async fn switch_to_usb(&mut self) {
-        if !self.wireless.phase.owns()
-            || !matches!(choose(&self.devices, self.chosen()), Choice::Selected(_))
-        {
+        if !self.wireless.phase.owns() {
             return;
         }
         tracing::info!("wireless: an iPhone is on USB; switching to it");
@@ -919,6 +1025,7 @@ impl Actor {
                     // A phone that is plugged in again is asked again.
                     self.forget_label(&device.serial);
                     self.monitor.usb(true, Timestamp::now());
+                    self.usb_probe_due(&device.serial);
                     self.devices.push(device);
                     self.devices.sort_by(|a, b| a.serial.cmp(&b.serial));
                     self.describe_new_phones(events);
@@ -1064,6 +1171,26 @@ impl Actor {
             Event::Wireless(attempt, event) if attempt == self.wireless.attempt => {
                 self.wireless_event(event, events).await;
             }
+            Event::UsbProbe(serial, mux_id, answers) => {
+                if self
+                    .wireless
+                    .probing
+                    .as_ref()
+                    .is_some_and(|(s, m, _)| *s == serial && *m == mux_id)
+                {
+                    self.wireless.probing = None;
+                }
+                // Still the device a connection would use, and the attempt still runs.
+                if answers
+                    && self
+                        .selected_usb()
+                        .is_some_and(|d| d.serial == serial && d.mux_id == mux_id)
+                {
+                    self.switch_to_usb().await;
+                } else if !answers {
+                    tracing::info!("wireless: the device on USB does not share; staying wireless");
+                }
+            }
             // Anything else belongs to a session (or a wireless attempt) that has already
             // been torn down.
             _ => {}
@@ -1098,7 +1225,7 @@ impl Actor {
             self.end_wireless(WirelessPhase::Failed(WirelessFailure::Lost))
                 .await;
         }
-        self.switch_to_usb().await;
+        self.probe_usb(events);
         // While a wireless attempt runs, USB connects only through `switch_to_usb`.
         if self.wants()
             && self.active.is_none()
@@ -1272,6 +1399,9 @@ impl Actor {
                 for device in &devices {
                     if !self.devices.iter().any(|d| d.mux_id == device.mux_id) {
                         self.monitor.usb(true, Timestamp::now());
+                    }
+                    if let Some(probe) = self.wireless.probes.get_mut(&device.serial) {
+                        probe.due = true;
                     }
                 }
                 self.devices = devices;
@@ -1694,6 +1824,7 @@ impl Actor {
                 .as_ref()
                 .is_some_and(|a| a.is_wireless() && a.weak()),
             name_clash: phase.name_clash(),
+            last_error: self.wireless.last_error.clone().filter(|_| phase.owns()),
         })
     }
 

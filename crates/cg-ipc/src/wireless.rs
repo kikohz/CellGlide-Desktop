@@ -5,6 +5,7 @@
 //!
 //! The access point's passphrase is never part of any of these.
 
+use crate::Reason;
 use serde::{Deserialize, Serialize};
 
 /// Why the access point could not be started.
@@ -25,7 +26,7 @@ pub enum ApFailure {
 }
 
 /// How a wireless attempt ended when it did not end because the user (or USB) ended it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum WirelessFailure {
     /// The access point could not be started.
@@ -50,10 +51,13 @@ pub enum WirelessFailure {
     TurnedOff,
     /// The pairing store could not give the access point's name and passphrase.
     StoreUnavailable,
+    /// The iPhone was reached but can't be used, and trying again won't change that (e.g. its
+    /// app is too old or lacks a capability).
+    PhoneRefused { reason: Reason },
 }
 
 /// The phase of the wireless attempt (tagged `phase`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum WirelessPhaseView {
     /// Starting the access point.
@@ -84,6 +88,9 @@ pub struct WirelessStatus {
     /// rounds, so nothing is dialled.
     #[serde(default)]
     pub name_clash: bool,
+    /// Why the last try to build the session failed, while the attempt keeps trying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<Reason>,
 }
 
 #[cfg(test)]
@@ -101,6 +108,7 @@ mod tests {
             ssid: None,
             weak: false,
             name_clash: false,
+            last_error: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(
@@ -141,6 +149,9 @@ mod tests {
             WirelessFailure::Lost,
             WirelessFailure::TurnedOff,
             WirelessFailure::StoreUnavailable,
+            WirelessFailure::PhoneRefused {
+                reason: Reason::PhoneTooOld,
+            },
         ]);
         for failure in all {
             let json = serde_json::to_string(&failure).unwrap();
