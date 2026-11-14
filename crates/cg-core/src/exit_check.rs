@@ -117,6 +117,8 @@ pub struct CaptiveProbe {
     host: String,
     port: u16,
     path: String,
+    /// Only for a bare `check()`, which is `check_within(timeout)`. The controller always calls
+    /// `check_within(HealthWatchTiming.tunnel_timeout)`, so the configured tier decides.
     timeout: Duration,
 }
 
@@ -343,6 +345,11 @@ mod tests {
         assert!(!probe.check().await);
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(CaptiveProbe::apple().timeout, Duration::from_secs(5));
+        // The cable tier passes the same 5 s, so USB keeps its old limit.
+        assert_eq!(
+            crate::controller::HealthWatchTiming::default().tunnel_timeout,
+            CaptiveProbe::apple().timeout
+        );
     }
 
     /// Needs internet access: run with `cargo test -p cg-core exit_check -- --ignored`.

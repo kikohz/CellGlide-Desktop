@@ -40,6 +40,8 @@ pub const PAIRED_IDENTITY: &str = "5C1D2E3F-0000-4000-8000-000000000001";
 pub const PHONE_NAME: &str = "Test iPhone";
 /// The phone waits this long for the request line (the real one gives handshake and line 5 s).
 const REQUEST_LINE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Once one direction of a data connection has ended, the phone ends the other this much later.
+pub const RELAY_LINGER: Duration = Duration::from_secs(5);
 
 /// The discovery rounds (0, 1, 2, … in the order of `browse` calls) in which an advert is seen.
 #[derive(Clone)]
@@ -682,6 +684,26 @@ impl Drop for FakeRunningAccessPoint {
     }
 }
 
+/// Copies both ways, as the phone's relay: when one direction ends (its sender half-closed or
+/// failed) the other may go on for `RELAY_LINGER`, then the whole connection is closed.
+async fn relay(stream: DuplexStream, upstream: tokio::net::TcpStream) {
+    let (mut from_computer, mut to_computer) = tokio::io::split(stream);
+    let (mut from_phone, mut to_phone) = upstream.into_split();
+    let up = async {
+        let _ = tokio::io::copy(&mut from_computer, &mut to_phone).await;
+        let _ = to_phone.shutdown().await;
+    };
+    let down = async {
+        let _ = tokio::io::copy(&mut from_phone, &mut to_computer).await;
+        let _ = to_computer.shutdown().await;
+    };
+    tokio::pin!(up, down);
+    tokio::select! {
+        () = &mut up => { let _ = tokio::time::timeout(RELAY_LINGER, &mut down).await; }
+        () = &mut down => { let _ = tokio::time::timeout(RELAY_LINGER, &mut up).await; }
+    }
+}
+
 /// The request line, byte by byte so nothing after it is consumed. `None` for anything else
 /// than a line within `MAX_REQUEST_LENGTH`.
 async fn request_line<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
@@ -714,10 +736,10 @@ async fn serve(
             let Some(target) = phone.routes.get(&port).copied() else {
                 return;
             };
-            let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await else {
+            let Ok(upstream) = tokio::net::TcpStream::connect(target).await else {
                 return;
             };
-            let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+            relay(stream, upstream).await;
         }
         (Mode::Pair, Some(Request::Pair)) => pair(stream, phone, state).await,
         // The phone closes a request that does not fit the identity.
@@ -1295,5 +1317,101 @@ mod tests {
                 Some("CG1 DATA 8088".to_string())
             ]
         );
+    }
+
+    /// A phone service on `port` behind its own mux: reads the request until EOF, answers, and
+    /// then holds the connection open.
+    async fn answers_after_eof(port: u16) -> FakeMux {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mux = FakeMux::start().await;
+        mux.route(port, listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).await.unwrap();
+            assert_eq!(request, b"request");
+            conn.write_all(b"reply").await.unwrap();
+            // Never closes on its own.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(conn);
+        });
+        mux
+    }
+
+    #[tokio::test]
+    async fn a_half_closed_data_connection_still_gets_its_reply_then_ends_after_five_seconds() {
+        let mux = answers_after_eof(8090).await;
+        let fake = FakeWireless::new();
+        fake.add_phone(paired_phone(&mux), Rounds::all());
+        let link = TlsLink::new(
+            PHONE,
+            at(205),
+            IDENTITY,
+            link_key(&long_term()),
+            fake.ports().dialer,
+        );
+        let mut stream = link.open(8090).await.unwrap();
+        stream.write_all(b"request").await.unwrap();
+        stream.shutdown().await.unwrap();
+        let half_closed = Instant::now();
+        let mut reply = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut reply))
+            .await
+            .expect("the relay ends the connection")
+            .unwrap();
+        let ended = half_closed.elapsed();
+        assert_eq!(reply, b"reply");
+        assert!(
+            ended >= RELAY_LINGER - Duration::from_millis(100),
+            "{ended:?}"
+        );
+        assert!(ended < RELAY_LINGER + Duration::from_secs(2), "{ended:?}");
+    }
+
+    #[tokio::test]
+    async fn a_data_connection_the_phone_half_closes_ends_after_five_seconds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mux = FakeMux::start().await;
+        mux.route(8089, listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            conn.write_all(b"status").await.unwrap();
+            conn.shutdown().await.unwrap();
+            // Keeps reading; the relay closes the connection.
+            let mut sink = Vec::new();
+            let _ = conn.read_to_end(&mut sink).await;
+        });
+        let fake = FakeWireless::new();
+        fake.add_phone(paired_phone(&mux), Rounds::all());
+        let link = TlsLink::new(
+            PHONE,
+            at(205),
+            IDENTITY,
+            link_key(&long_term()),
+            fake.ports().dialer,
+        );
+        let mut stream = link.open(8089).await.unwrap();
+        let mut status = Vec::new();
+        stream.read_to_end(&mut status).await.unwrap();
+        assert_eq!(status, b"status");
+        let eof = Instant::now();
+        // Writing still works for a while, then the connection is gone.
+        stream.write_all(b"still here").await.unwrap();
+        let gone = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if stream.write_all(b".").await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "the relay closes the connection");
+        let ended = eof.elapsed();
+        assert!(
+            ended >= RELAY_LINGER - Duration::from_millis(200),
+            "{ended:?}"
+        );
+        assert!(ended < RELAY_LINGER + Duration::from_secs(2), "{ended:?}");
     }
 }
