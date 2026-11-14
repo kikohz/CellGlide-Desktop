@@ -22,7 +22,7 @@ use crate::{CoreError, Result};
 use cg_protocol::phone::Hello;
 
 /// What the phone is called when it sends no usable name.
-const FALLBACK_PHONE_NAME: &str = "iPhone";
+pub(crate) const FALLBACK_PHONE_NAME: &str = "iPhone";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {

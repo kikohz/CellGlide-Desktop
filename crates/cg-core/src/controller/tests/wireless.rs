@@ -1089,3 +1089,708 @@ async fn turning_the_switch_off_while_reconnecting_ends_it() {
     assert!(!w.fake.is_up());
     assert_eq!(w.r.backend.stopped(), 1);
 }
+
+// --- Code pairing (Plan B Task 5).
+
+use crate::testing::{PAIRED_IDENTITY, PHONE_NAME, PairingAnswer, PhonePairing};
+use crate::wireless::pairing::PAIRING_IDENTITY;
+
+/// A phone this computer has no pairing with.
+const NEW_ID: &str = "0A1B2C3D-4E5F-4061-8273-8495A6B7C8D9";
+const OTHER_ID: &str = "1B2C3D4E-5F60-4172-8384-95A6B7C8D9EA";
+
+fn code(s: &Snapshot) -> Option<String> {
+    match phase(s)? {
+        WirelessPhaseView::Pairing { code, .. } => Some(code),
+        _ => None,
+    }
+}
+
+fn pairing(s: &Snapshot) -> bool {
+    code(s).is_some()
+}
+
+fn hint(s: &Snapshot) -> Option<WirelessFailure> {
+    s.wireless.as_ref().and_then(|w| w.hint.clone())
+}
+
+fn pairing_dials(fake: &FakeWireless) -> usize {
+    fake.dials()
+        .iter()
+        .filter(|d| d.identity == PAIRING_IDENTITY)
+        .count()
+}
+
+impl W {
+    /// A phone at `.last` serving the rig's fake phone, knowing no pairing.
+    fn stranger(&self, id: &str, last: u8) -> WirelessPhone {
+        WirelessPhone::new(id, at(last)).serving(&self.r.mux)
+    }
+
+    async fn confirm(&self, matches: bool) -> Result<()> {
+        self.r
+            .controller
+            .send(Command::ConfirmCode { matches })
+            .await
+    }
+
+    async fn code_shown(&self) -> (Snapshot, String) {
+        let snap = wait_for(&self.r.controller, "the code", pairing).await;
+        let code = code(&snap).unwrap();
+        (snap, code)
+    }
+
+    fn saved(&self, peer_id: &str) -> Option<Record> {
+        self.store
+            .records()
+            .into_iter()
+            .find(|r| r.peer_id == peer_id)
+    }
+
+    /// Nothing of the pairing in progress is left: no record, no key, no `F` sent, no code
+    /// shown, nothing to confirm, the access point down; and nothing turns up later.
+    async fn nothing_left_of_the_pairing(&self) {
+        assert!(bad_request(self.confirm(true).await));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(self.saved(NEW_ID), None);
+        assert!(self.store.key(PAIRED_IDENTITY).is_none());
+        assert!(self.fake.pairings().iter().all(|p| p.f_valid.is_none()));
+        assert!(!self.fake.is_up());
+        assert!(!pairing(&self.r.controller.snapshot()));
+        // The pairing that was there before is untouched.
+        assert_eq!(self.saved(PHONE_ID), Some(record()));
+    }
+}
+
+/// A rig as `wireless_rig_with`, with this computer's name set.
+async fn pairing_rig(adjust: impl FnOnce(&mut ControllerConfig)) -> W {
+    wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.computer_name = Some("Desk PC".into());
+        adjust(config);
+    })
+    .await
+}
+
+/// A rig showing the code of a pairing with the stranger at .9.
+async fn showing_a_code() -> W {
+    let w = pairing_rig(|_| {}).await;
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    w.start().await;
+    w.code_shown().await;
+    w
+}
+
+#[tokio::test]
+async fn an_unpaired_phone_shows_the_code_then_pairs_and_connects() {
+    let w = pairing_rig(|_| {}).await;
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    w.start().await;
+    let (snap, code) = w.code_shown().await;
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|b| b.is_ascii_digit()));
+    eventually("the phone's code", Duration::from_secs(5), || {
+        w.fake.pairings().first().is_some_and(|p| p.code.is_some())
+    })
+    .await;
+    let report = w.fake.pairings()[0].clone();
+    assert_eq!(report.code.as_deref(), Some(code.as_str()), "the same code");
+    assert_eq!(report.phone, NEW_ID);
+    assert_eq!(report.computer_id, Some(w.store.local_id()));
+    assert_eq!(report.computer_name.as_deref(), Some("Desk PC"));
+    assert_eq!(snap.state, ConnState::Connecting);
+    assert_eq!(w.saved(NEW_ID), None, "nothing saved before both agreed");
+    // The code is on screen, never in what gets logged.
+    assert!(!format!("{snap:?}").contains(&code));
+    assert!(!format!("{:?}", snap.wireless).contains(&code));
+
+    w.confirm(true).await.unwrap();
+    let snap = w.connected().await;
+    assert_eq!(snap.selected, Some(format!("wireless:{NEW_ID}")));
+    let saved = w.saved(NEW_ID).expect("saved");
+    assert_eq!(saved.identity, PAIRED_IDENTITY);
+    assert_eq!(saved.name, PHONE_NAME);
+    assert_eq!(saved.method, Method::Code);
+    assert!(!saved.stale);
+    assert!(w.store.key(PAIRED_IDENTITY).is_some());
+    assert_eq!(w.fake.pairings()[0].f_valid, Some(true), "F was sent");
+    let dials = w.fake.dials();
+    assert_eq!(dials[0].identity, PAIRING_IDENTITY);
+    assert_eq!(dials[0].request_line.as_deref(), Some("CG1 PAIR"));
+    assert_eq!(pairing_dials(&w.fake), 1);
+    assert!(
+        dials[1..]
+            .iter()
+            .all(|d| d.identity == PAIRED_IDENTITY && d.to.ip() == at(9))
+    );
+    assert!(w.fake.is_up());
+    assert_eq!(w.fake.start_attempts(), 1);
+    // The other phone's pairing stays.
+    assert_eq!(w.saved(PHONE_ID), Some(record()));
+    assert!(w.store.key(IDENTITY).is_some());
+}
+
+#[test]
+fn the_pairing_phase_never_prints_its_code() {
+    let phase = WirelessPhase::Pairing {
+        code: "042137".into(),
+        phone_name: Some("Test iPhone".into()),
+    };
+    assert!(!format!("{phase:?}").contains("042137"));
+    assert!(!format!("{:?}", phase.view()).contains("042137"));
+}
+
+#[tokio::test]
+async fn a_code_that_does_not_match_fails_and_saves_nothing() {
+    let w = showing_a_code().await;
+    w.confirm(false).await.unwrap();
+    let snap = w.r.controller.snapshot();
+    assert!(failed(&snap, WirelessFailure::PairingFailed), "{snap:?}");
+    assert!(!w.fake.is_up());
+    w.nothing_left_of_the_pairing().await;
+    assert_eq!(w.r.backend.started(), 0);
+}
+
+#[tokio::test]
+async fn the_phone_saying_no_is_denied_and_saves_nothing() {
+    let w = pairing_rig(|_| {}).await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        answer: PairingAnswer::Deny,
+        answer_after: Duration::from_millis(300),
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    w.start().await;
+    w.code_shown().await;
+    w.confirm(true).await.unwrap();
+    wait_for(&w.r.controller, "denied", |s| {
+        failed(s, WirelessFailure::PairingDenied)
+    })
+    .await;
+    w.nothing_left_of_the_pairing().await;
+    assert_eq!(pairing_dials(&w.fake), 1, "not asked again");
+}
+
+// Review Focus 5: every end of the attempt while the code is shown.
+
+#[tokio::test]
+async fn cancel_while_the_code_is_shown_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn disconnect_while_the_code_is_shown_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.controller.send(Command::Disconnect).await.unwrap();
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn turning_the_switch_off_while_the_code_is_shown_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.controller
+        .send(Command::SetWireless { enabled: false })
+        .await
+        .unwrap();
+    assert!(failed(
+        &w.r.controller.snapshot(),
+        WirelessFailure::TurnedOff
+    ));
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn suspend_while_the_code_is_shown_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.controller
+        .send(Command::Sleep { sleeping: true })
+        .await
+        .unwrap();
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    w.r.controller
+        .send(Command::Sleep { sleeping: false })
+        .await
+        .unwrap();
+    w.nothing_left_of_the_pairing().await;
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+}
+
+#[tokio::test]
+async fn an_iphone_on_usb_while_the_code_is_shown_takes_over_and_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.mux.attach(device("aaaa", 1));
+    let snap = wait_for(&w.r.controller, "on usb", |s| {
+        connected(s) && s.selected.as_deref() == Some("aaaa")
+    })
+    .await;
+    assert_eq!(snap.wireless, None);
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn the_access_point_lost_while_the_code_is_shown_fails_and_saves_nothing() {
+    let w = showing_a_code().await;
+    w.fake.lose_access_point();
+    wait_for(&w.r.controller, "lost", |s| {
+        failed(s, WirelessFailure::Lost)
+    })
+    .await;
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn the_phone_leaving_while_the_code_is_shown_fails_and_saves_nothing() {
+    let w = showing_a_code().await;
+    w.fake.phone_leaves(at(9));
+    wait_for(&w.r.controller, "failed", |s| {
+        failed(s, WirelessFailure::PairingFailed)
+    })
+    .await;
+    w.nothing_left_of_the_pairing().await;
+}
+
+#[tokio::test]
+async fn shutdown_while_the_code_is_shown_saves_nothing() {
+    let w = showing_a_code().await;
+    w.r.controller.shutdown().await;
+    assert!(!w.fake.is_up());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(w.saved(NEW_ID), None);
+    assert!(w.fake.pairings().iter().all(|p| p.f_valid.is_none()));
+}
+
+/// The task aborted while it waits for the user's answer: the question goes with it.
+#[tokio::test]
+async fn the_attempt_aborted_while_the_code_is_shown_saves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let fake = FakeWireless::new();
+    fake.set_browse_delay(Duration::from_millis(10));
+    fake.add_phone(WirelessPhone::new(NEW_ID, at(9)), Rounds::all());
+    let (events, mut received) = mpsc::channel(64);
+    let task = tokio::spawn(super::super::wireless_session::run(
+        super::super::wireless_session::Context {
+            attempt: 1,
+            ports: fake.ports(),
+            store: store.clone(),
+            timing: timing(),
+            events,
+        },
+    ));
+    let reply = loop {
+        match received.recv().await {
+            Some(Event::Wireless(1, WirelessEvent::Confirm { reply, .. })) => break reply,
+            Some(_) => {}
+            None => panic!("the task ended"),
+        }
+    };
+    assert!(fake.is_up());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(reply.is_closed(), "the question is withdrawn");
+    assert!(!fake.is_up());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(store.records().iter().all(|r| r.peer_id != NEW_ID));
+    assert!(fake.pairings().iter().all(|p| p.f_valid.is_none()));
+}
+
+#[tokio::test]
+async fn an_unknown_identity_right_after_pairing_is_retried_and_connects() {
+    let w = pairing_rig(|_| {}).await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        accept_after: Duration::from_millis(400),
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    w.start().await;
+    w.code_shown().await;
+    w.confirm(true).await.unwrap();
+    w.connected().await;
+    let data: Vec<_> = w
+        .fake
+        .dials()
+        .into_iter()
+        .filter(|d| d.identity == PAIRED_IDENTITY)
+        .collect();
+    assert!(data.len() >= 2, "refused first: {data:?}");
+    assert!(!w.saved(NEW_ID).unwrap().stale);
+    assert_eq!(pairing_dials(&w.fake), 1);
+}
+
+/// A pairing the phone never takes: its refusals come from an address never verified for the
+/// new identity (the pairing channel's handshake does not count), so they prove nothing even
+/// long after the grace; the window ends as refused and the record is not marked stale.
+#[tokio::test(start_paused = true)]
+async fn a_new_pairing_the_phone_never_takes_is_never_verified_nor_marked_stale() {
+    let p = paused_rig();
+    p.fake.add_phone(
+        WirelessPhone::new(NEW_ID, at(9)).pairing(PhonePairing {
+            accept_after: Duration::from_secs(3600),
+            ..PhonePairing::default()
+        }),
+        Rounds::all(),
+    );
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    paused_wait(&p.controller, "the code", pairing).await;
+    let confirmed = tokio::time::Instant::now();
+    p.controller
+        .send(Command::ConfirmCode { matches: true })
+        .await
+        .unwrap();
+    let snap = paused_wait(&p.controller, "the end", |s| {
+        matches!(phase(s), Some(WirelessPhaseView::Failed { .. }))
+    })
+    .await;
+    assert!(failed(&snap, WirelessFailure::PairingRefused), "{snap:?}");
+    assert!(
+        confirmed.elapsed() >= Duration::from_secs(60),
+        "the whole window: {:?}",
+        confirmed.elapsed()
+    );
+    let store = WirelessStore::open(p._dir.path(), Arc::new(PlainSecrets)).unwrap();
+    let saved = store.records().into_iter().find(|r| r.peer_id == NEW_ID);
+    assert!(!saved.unwrap().stale);
+    assert_eq!(pairing_dials(&p.fake), 1, "not paired again");
+    assert!(!p.fake.is_up());
+}
+
+/// After a pairing by code the phone may refuse the new identity for a while; refusals within
+/// the 10 s grace are not counted even at a verified address, so the pairing ends as failed (it
+/// did not take) only 5 s after the grace, and is kept.
+#[tokio::test]
+async fn refusals_within_the_grace_after_pairing_are_not_counted() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.retry_for = Duration::from_secs(30);
+    })
+    .await;
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    w.start().await;
+    w.code_shown().await;
+    let confirmed = std::time::Instant::now();
+    w.confirm(true).await.unwrap();
+    w.connected().await;
+    w.fake.script_dials(
+        DialMatch::identity(PAIRED_IDENTITY),
+        vec![DialOutcome::Fail(DialError::UnknownIdentity); 100_000],
+    );
+    w.r.phone.end_session();
+    wait_within(&w.r.controller, "failed", Duration::from_secs(25), |s| {
+        failed(s, WirelessFailure::PairingFailed)
+    })
+    .await;
+    let after = confirmed.elapsed();
+    assert!(after >= Duration::from_millis(14_500), "after {after:?}");
+    let saved = w.saved(NEW_ID).unwrap();
+    assert!(!saved.stale, "kept as it is");
+    assert!(w.store.key(PAIRED_IDENTITY).is_some());
+    assert!(!w.fake.is_up());
+}
+
+/// A reconnect brings back the phone it lost; a stranger on the access point meanwhile is not
+/// paired.
+#[tokio::test]
+async fn reconnecting_never_pairs_another_phone() {
+    let w = connected_rig(|config| {
+        config.wireless_timing.retry_for = Duration::from_secs(1);
+    })
+    .await;
+    w.fake.stop_advertising(PHONE_ID, at(205));
+    w.fake.phone_leaves(at(205));
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    wait_for(&w.r.controller, "lost", |s| {
+        failed(s, WirelessFailure::Lost)
+    })
+    .await;
+    assert_eq!(pairing_dials(&w.fake), 0);
+    assert!(w.fake.pairings().is_empty());
+}
+
+/// A pairing that completes after the waiting window ran out still gets its own retries.
+#[tokio::test]
+async fn a_pairing_finished_after_the_window_still_gets_its_chance() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.wait_for_phone = Duration::from_millis(500);
+    })
+    .await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        answer_after: Duration::from_millis(800),
+        accept_after: Duration::from_millis(300),
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    w.start().await;
+    w.code_shown().await;
+    w.confirm(true).await.unwrap();
+    w.connected().await;
+    assert!(w.saved(NEW_ID).is_some());
+}
+
+#[tokio::test]
+async fn two_unpaired_phones_wait_and_pairing_goes_on_when_one_is_left() {
+    let w = pairing_rig(|_| {}).await;
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    w.fake.add_phone(w.stranger(OTHER_ID, 10), Rounds::all());
+    w.start().await;
+    let snap = wait_for(&w.r.controller, "the hint", |s| {
+        hint(s) == Some(WirelessFailure::SeveralPhones)
+    })
+    .await;
+    assert_eq!(phase(&snap), Some(WirelessPhaseView::Waiting));
+    assert!(w.fake.dials().is_empty());
+    w.fake.stop_advertising(OTHER_ID, at(10));
+    let (snap, _) = w.code_shown().await;
+    assert_eq!(hint(&snap), None);
+    w.confirm(true).await.unwrap();
+    let snap = w.connected().await;
+    assert_eq!(snap.selected, Some(format!("wireless:{NEW_ID}")));
+    assert!(w.fake.dials().iter().all(|d| d.to.ip() == at(9)));
+}
+
+#[tokio::test]
+async fn two_unpaired_phones_until_the_window_ends_fail_as_several() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.wait_for_phone = Duration::from_secs(1);
+    })
+    .await;
+    w.fake.add_phone(w.stranger(NEW_ID, 9), Rounds::all());
+    w.fake.add_phone(w.stranger(OTHER_ID, 10), Rounds::all());
+    w.start().await;
+    let started = std::time::Instant::now();
+    wait_for(&w.r.controller, "several", |s| {
+        failed(s, WirelessFailure::SeveralPhones)
+    })
+    .await;
+    assert!(started.elapsed() >= Duration::from_millis(900), "kept up");
+    assert!(w.fake.dials().is_empty());
+    assert!(!w.fake.is_up());
+}
+
+/// A pairing stale from before: that phone is paired by code, and the new pairing replaces the
+/// old one (its key is gone).
+#[tokio::test]
+async fn a_stale_pairing_is_replaced_by_code_for_that_phone() {
+    let w = pairing_rig(|_| {}).await;
+    w.store.set_stale(PHONE_ID, true).unwrap();
+    w.fake.add_phone(w.stranger(PHONE_ID, 205), Rounds::all());
+    w.start().await;
+    let (snap, _) = w.code_shown().await;
+    assert_eq!(
+        phase(&snap),
+        Some(WirelessPhaseView::Pairing {
+            code: code(&snap).unwrap(),
+            phone_name: Some("Test iPhone".into()),
+        }),
+        "the name from the earlier pairing"
+    );
+    w.confirm(true).await.unwrap();
+    w.connected().await;
+    let records = w.store.records();
+    assert_eq!(records.len(), 1, "replaced: {records:?}");
+    assert_eq!(records[0].peer_id, PHONE_ID);
+    assert_eq!(records[0].identity, PAIRED_IDENTITY);
+    assert_eq!(records[0].method, Method::Code);
+    assert!(!records[0].stale);
+    assert!(w.store.key(IDENTITY).is_none(), "the old key is gone");
+    assert!(w.store.key(PAIRED_IDENTITY).is_some());
+}
+
+#[tokio::test]
+async fn confirm_code_without_a_code_shown_is_refused_and_changes_nothing() {
+    let w = wireless_rig().await;
+    assert!(bad_request(w.confirm(true).await));
+    assert!(bad_request(w.confirm(false).await));
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.fake.start_attempts(), 0);
+
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    assert!(bad_request(w.confirm(false).await));
+    assert_eq!(
+        phase(&w.r.controller.snapshot()),
+        Some(WirelessPhaseView::Waiting)
+    );
+    assert!(w.fake.is_up());
+
+    w.add_phone(Rounds::all());
+    w.connected().await;
+    assert!(bad_request(w.confirm(false).await));
+    assert!(on_air(&w.r.controller.snapshot()));
+    assert!(w.fake.is_up());
+    assert_eq!(w.r.backend.stopped(), 0);
+}
+
+/// A `C` line naming another phone (here the user's paired iPhone) ends the pairing before
+/// this computer sends anything of its own, and nothing is saved or replaced.
+#[tokio::test]
+async fn a_c_line_naming_another_phone_fails_before_m_and_saves_nothing() {
+    let w = pairing_rig(|_| {}).await;
+    let phone = w.stranger(NEW_ID, 9).pairing(PhonePairing {
+        claim_phone_id: Some(PHONE_ID.into()),
+        ..PhonePairing::default()
+    });
+    w.fake.add_phone(phone, Rounds::all());
+    let mut rx = w.r.controller.subscribe();
+    w.start().await;
+    let shown = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let snap = rx.borrow_and_update().clone();
+            if pairing(&snap) {
+                return true;
+            }
+            if failed(&snap, WirelessFailure::PairingFailed) {
+                return false;
+            }
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("an end");
+    assert!(!shown, "no code shown");
+    assert!(!w.fake.pairings()[0].got_m, "no M sent");
+    w.nothing_left_of_the_pairing().await;
+}
+
+/// Review Focus 6: something advertising the paired phone's name and refusing its pairing
+/// (the phone itself away) is never paired by code, and the pairing stays good.
+#[tokio::test]
+async fn an_impostor_with_the_paired_name_is_never_paired_by_code() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.wait_for_phone = Duration::from_secs(1);
+    })
+    .await;
+    w.fake.add_impostor(PHONE_ID, at(66), Rounds::all());
+    w.start().await;
+    wait_for(&w.r.controller, "refused", |s| {
+        failed(s, WirelessFailure::PairingRefused)
+    })
+    .await;
+    assert_eq!(w.saved(PHONE_ID), Some(record()), "not stale");
+    assert_eq!(pairing_dials(&w.fake), 0);
+    assert!(w.fake.pairings().is_empty());
+}
+
+/// Never pair while the name is ambiguous, even for a pairing that is stale.
+#[tokio::test]
+async fn a_stale_phone_at_two_addresses_is_neither_dialled_nor_paired() {
+    let w = pairing_rig(|config| {
+        config.wireless_timing.wait_for_phone = Duration::from_secs(1);
+    })
+    .await;
+    w.store.set_stale(PHONE_ID, true).unwrap();
+    w.fake.add_phone(w.stranger(PHONE_ID, 205), Rounds::all());
+    w.fake.add_impostor(PHONE_ID, at(66), Rounds::all());
+    w.start().await;
+    wait_for(&w.r.controller, "clash", |s| {
+        failed(s, WirelessFailure::NameClash)
+    })
+    .await;
+    assert!(w.fake.dials().is_empty());
+    assert!(w.fake.pairings().is_empty());
+}
+
+/// A pairing that was good when the attempt began and that it marked stale is not paired by
+/// code in the same attempt; the user asking again pairs it.
+#[tokio::test]
+async fn a_pairing_marked_stale_is_paired_by_code_only_when_asked_again() {
+    let w = connected_rig(|config| {
+        config.wireless_timing.retry_for = Duration::from_secs(30);
+    })
+    .await;
+    w.fake.script_dials(
+        DialMatch {
+            address: Some(at(205)),
+            identity: Some(IDENTITY.into()),
+        },
+        vec![DialOutcome::Fail(DialError::UnknownIdentity); 1000],
+    );
+    w.r.phone.end_session();
+    wait_within(&w.r.controller, "stale", Duration::from_secs(20), |s| {
+        failed(s, WirelessFailure::PairingStale)
+    })
+    .await;
+    assert_eq!(pairing_dials(&w.fake), 0);
+    assert!(w.store.records()[0].stale);
+
+    w.start().await;
+    w.code_shown().await;
+    assert_eq!(pairing_dials(&w.fake), 1);
+    assert_eq!(w.fake.pairings()[0].phone, PHONE_ID);
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+}
+
+/// The phone turning pairing away (closing the pairing channel before its first line, as in
+/// its lockout): shown, not asked again for a minute, and the attempt ends as busy.
+#[tokio::test(start_paused = true)]
+async fn a_phone_that_turns_pairing_away_is_asked_again_only_after_a_minute() {
+    let p = paused_rig();
+    p.fake.add_phone(
+        WirelessPhone::new(NEW_ID, at(9)).pairing(PhonePairing {
+            answer: PairingAnswer::CloseAtOnce,
+            ..PhonePairing::default()
+        }),
+        Rounds::all(),
+    );
+    let asked = tokio::time::Instant::now();
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    let snap = paused_wait(&p.controller, "busy", |s| {
+        hint(s) == Some(WirelessFailure::PairingBusy)
+    })
+    .await;
+    assert_eq!(phase(&snap), Some(WirelessPhaseView::Waiting));
+    let first = tokio::time::Instant::now();
+    assert_eq!(pairing_dials(&p.fake), 1);
+    let real = std::time::Instant::now();
+    while pairing_dials(&p.fake) < 2 {
+        assert!(
+            real.elapsed() < Duration::from_secs(30),
+            "never asked again"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let again = first.elapsed();
+    assert!(again >= Duration::from_secs(59), "after {again:?}");
+    assert!(again <= Duration::from_secs(66), "after {again:?}");
+    paused_wait(&p.controller, "the end", |s| {
+        failed(s, WirelessFailure::PairingBusy)
+    })
+    .await;
+    assert!(asked.elapsed() >= Duration::from_secs(300));
+    assert!(pairing_dials(&p.fake) <= 5, "{}", pairing_dials(&p.fake));
+    assert!(!p.fake.is_up());
+}
+
+/// 75 s without this computer's user answering: the pairing fails and nothing is saved.
+#[tokio::test(start_paused = true)]
+async fn no_answer_for_75_seconds_fails_and_saves_nothing() {
+    let p = paused_rig();
+    p.fake
+        .add_phone(WirelessPhone::new(NEW_ID, at(9)), Rounds::all());
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    paused_wait(&p.controller, "the code", pairing).await;
+    let shown = tokio::time::Instant::now();
+    paused_wait(&p.controller, "failed", |s| {
+        failed(s, WirelessFailure::PairingFailed)
+    })
+    .await;
+    let after = shown.elapsed();
+    assert!(after >= Duration::from_secs(74), "after {after:?}");
+    assert!(after <= Duration::from_secs(80), "after {after:?}");
+    assert!(!p.fake.is_up());
+    assert!(matches!(
+        p.controller
+            .send(Command::ConfirmCode { matches: true })
+            .await,
+        Err(CoreError::BadRequest)
+    ));
+    let store = WirelessStore::open(p._dir.path(), Arc::new(PlainSecrets)).unwrap();
+    assert!(store.records().iter().all(|r| r.peer_id != NEW_ID));
+    assert!(p.fake.pairings().iter().all(|r| r.f_valid.is_none()));
+}

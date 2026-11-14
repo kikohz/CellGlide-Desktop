@@ -189,6 +189,35 @@ where
     Fut: Future<Output = bool>,
     V: FnOnce(&Paired) -> io::Result<()>,
 {
+    run_saving(
+        stream,
+        expected_phone_id,
+        computer_id,
+        computer_name,
+        confirm,
+        move |paired: &Paired| std::future::ready(save(paired)),
+    )
+    .await
+}
+
+/// `run` with a `save` that may wait (a store writing on a blocking thread): the future it
+/// returns must complete before `F` is sent, and its error sends nothing, exactly as for `run`.
+/// The future may not borrow `Paired`; `save` takes what it needs before returning it.
+pub async fn run_saving<S, C, Fut, V, SaveFut>(
+    stream: S,
+    expected_phone_id: &str,
+    computer_id: &str,
+    computer_name: &str,
+    confirm: C,
+    save: V,
+) -> Result<Paired, CodePairingError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    C: FnOnce(String) -> Fut,
+    Fut: Future<Output = bool>,
+    V: FnOnce(&Paired) -> SaveFut,
+    SaveFut: Future<Output = io::Result<()>>,
+{
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut transcript = Transcript::new();
@@ -248,7 +277,9 @@ where
         phone_name: display_name(&phone_name),
         long_term_key: agreed.long_term_key,
     };
-    save(&paired).map_err(|e| CodePairingError::Io(e.to_string()))?;
+    save(&paired)
+        .await
+        .map_err(|e| CodePairingError::Io(e.to_string()))?;
     // If F never arrives the phone saves nothing and this pairing is dead; pairing again
     // replaces it.
     let f = message::finished(&message::proof(

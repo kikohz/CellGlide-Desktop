@@ -10,20 +10,33 @@
 //! The session's end reaches the task as the drop of a oneshot sender the actor keeps in the
 //! session (`Active::ended`): the tunnel is stopped before that, so a reconnect always starts
 //! from the original network.
+//!
+//! A phone without a usable pairing, alone on the access point while it waits, is paired by
+//! code (`pair`). Everything of a pairing in progress lives in that future: the pairing channel,
+//! and the question to the user, which the actor holds only as the reply sender of
+//! `WirelessEvent::Confirm`. Whatever ends the attempt drops both, and nothing is saved until
+//! both users agreed and the phone's proof checked out (`code_pairing`).
 
 use super::Event;
-use crate::wireless::pairing::link_key;
+use crate::wireless::code_pairing::{self, CodePairingError, Paired};
+use crate::wireless::pairing::{PAIRING_IDENTITY, link_key, pairing_channel_key};
 use crate::wireless::policy::{
-    self, DialContext, Next, Pick, RETRY_EVERY, RETRY_FOR, UnknownTracker, WAIT_FOR_PHONE,
+    self, DialContext, Next, PAIRING_BUSY_WAIT, Pick, RETRY_EVERY, RETRY_FOR, UnknownTracker,
+    WAIT_FOR_PHONE,
 };
 use crate::wireless::ports::{DialError, FoundPhone, RunningAccessPoint, TlsLink, WirelessPorts};
-use crate::wireless::store::{Record, WirelessStore};
+use crate::wireless::store::{Method, Record, WirelessStore};
 use cg_ipc::Reason;
 use cg_ipc::wireless::{WirelessFailure, WirelessPhaseView};
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -66,7 +79,8 @@ impl Default for WirelessTiming {
 
 /// Where the wireless attempt is. Everything but `Off` and `Failed` owns the controller: the
 /// state comes from here and not from usbmuxd, and no USB connection is attempted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Debug` never prints the pairing code.
+#[derive(Clone, PartialEq, Eq)]
 pub enum WirelessPhase {
     Off,
     /// Reading the access point's name and starting it.
@@ -77,9 +91,17 @@ pub enum WirelessPhase {
         ssid: String,
         /// The paired phone's name has been at several addresses for a few rounds.
         name_clash: bool,
+        /// What holds the attempt up meanwhile (`SeveralPhones`, `PairingBusy`); the window
+        /// ends with it.
+        hint: Option<WirelessFailure>,
     },
     /// Found; checking the pairing and building the session.
     Dialing,
+    /// Code pairing: `code` is shown until this computer's user answers (`ConfirmCode`).
+    Pairing {
+        code: String,
+        phone_name: Option<String>,
+    },
     Connected,
     /// The session ended at `since`; trying to get it back.
     Reconnecting {
@@ -102,10 +124,21 @@ impl WirelessPhase {
             WirelessPhase::Dialing => WirelessPhaseView::Connecting,
             WirelessPhase::Connected => WirelessPhaseView::Connected,
             WirelessPhase::Reconnecting { .. } => WirelessPhaseView::Reconnecting,
+            WirelessPhase::Pairing { code, phone_name } => WirelessPhaseView::Pairing {
+                code: code.clone(),
+                phone_name: phone_name.clone(),
+            },
             WirelessPhase::Failed(reason) => WirelessPhaseView::Failed {
                 reason: reason.clone(),
             },
         })
+    }
+
+    pub fn hint(&self) -> Option<WirelessFailure> {
+        match self {
+            WirelessPhase::Waiting { hint, .. } => hint.clone(),
+            _ => None,
+        }
     }
 
     pub fn name_clash(&self) -> bool {
@@ -119,6 +152,40 @@ impl WirelessPhase {
                 ..
             }
         )
+    }
+}
+
+impl std::fmt::Debug for WirelessPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WirelessPhase::Off => f.write_str("Off"),
+            WirelessPhase::Starting => f.write_str("Starting"),
+            WirelessPhase::Waiting {
+                since,
+                ssid,
+                name_clash,
+                hint,
+            } => f
+                .debug_struct("Waiting")
+                .field("since", since)
+                .field("ssid", ssid)
+                .field("name_clash", name_clash)
+                .field("hint", hint)
+                .finish(),
+            WirelessPhase::Dialing => f.write_str("Dialing"),
+            WirelessPhase::Pairing { phone_name, .. } => f
+                .debug_struct("Pairing")
+                .field("code", &"<hidden>")
+                .field("phone_name", phone_name)
+                .finish(),
+            WirelessPhase::Connected => f.write_str("Connected"),
+            WirelessPhase::Reconnecting { since, name_clash } => f
+                .debug_struct("Reconnecting")
+                .field("since", since)
+                .field("name_clash", name_clash)
+                .finish(),
+            WirelessPhase::Failed(failure) => f.debug_tuple("Failed").field(failure).finish(),
+        }
     }
 }
 
@@ -142,6 +209,14 @@ pub(super) enum WirelessEvent {
         link: Arc<TlsLink>,
         reply: oneshot::Sender<Result<oneshot::Receiver<()>, NotEstablished>>,
     },
+    /// Code pairing: show `code` (phase `Pairing`) and answer whether this computer's user says
+    /// it matches the phone's. Dropping `reply` unanswered withdraws the question (the task
+    /// takes it as "no"); the task dropping the receiver means it no longer waits.
+    Confirm {
+        code: String,
+        phone_name: Option<String>,
+        reply: oneshot::Sender<bool>,
+    },
     /// The attempt is over; the access point is already down.
     Done(WirelessFailure),
 }
@@ -150,8 +225,10 @@ pub(super) enum WirelessEvent {
 pub(super) struct Task(Option<JoinHandle<()>>);
 
 impl Task {
-    pub(super) fn spawn(context: Context) -> Task {
-        Task(Some(tokio::spawn(run(context))))
+    /// `computer_name` as configured (`ControllerConfig::computer_name`); the code pairing's
+    /// `M` line gets it through `wireless::computer_name`.
+    pub(super) fn spawn(context: Context, computer_name: Option<String>) -> Task {
+        Task(Some(tokio::spawn(run_as(context, computer_name))))
     }
 
     /// Aborts the task and waits until it is gone (and with it the access point).
@@ -198,14 +275,21 @@ impl Context {
     }
 }
 
+/// The attempt without a computer name of its own (the phone is then told the fallback); for
+/// tests that drive the task directly.
+#[cfg(test)]
 pub(super) async fn run(context: Context) {
-    let failure = drive(&context).await;
+    run_as(context, None).await;
+}
+
+async fn run_as(context: Context, computer_name: Option<String>) {
+    let failure = drive(&context, computer_name).await;
     tracing::info!("wireless: attempt ended: {failure:?}");
     context.tell(WirelessEvent::Done(failure)).await;
 }
 
 /// The attempt from start to failure; the access point lives here and nowhere else.
-async fn drive(context: &Context) -> WirelessFailure {
+async fn drive(context: &Context, computer_name: Option<String>) -> WirelessFailure {
     let timing = context.timing;
     context
         .tell(WirelessEvent::Phase(WirelessPhase::Starting))
@@ -232,14 +316,14 @@ async fn drive(context: &Context) -> WirelessFailure {
         }
     };
     tracing::info!("wireless: access point {ssid} started");
-    let mut attempt = Attempt::new(context);
+    let mut attempt = Attempt::new(context, computer_name);
     let mut window = Window {
         kind: WindowKind::Waiting { ssid },
         since: Instant::now(),
         deadline: Instant::now() + timing.wait_for_phone,
     };
     loop {
-        let ended = match attempt.connect(access_point.as_mut(), &window).await {
+        let ended = match attempt.connect(access_point.as_mut(), &mut window).await {
             Ok(ended) => ended,
             Err(failure) => return failure,
         };
@@ -278,12 +362,13 @@ struct Window {
 }
 
 impl Window {
-    fn phase(&self, name_clash: bool) -> WirelessPhase {
+    fn phase(&self, name_clash: bool, hint: Option<WirelessFailure>) -> WirelessPhase {
         match &self.kind {
             WindowKind::Waiting { ssid } => WirelessPhase::Waiting {
                 since: self.since,
                 ssid: ssid.clone(),
                 name_clash,
+                hint,
             },
             WindowKind::Reconnecting => WirelessPhase::Reconnecting {
                 since: self.since,
@@ -296,13 +381,26 @@ impl Window {
     fn dialing(&self, name_clash: bool) -> WirelessPhase {
         match self.kind {
             WindowKind::Waiting { .. } => WirelessPhase::Dialing,
-            WindowKind::Reconnecting => self.phase(name_clash),
+            WindowKind::Reconnecting => self.phase(name_clash, None),
         }
     }
 
-    fn ran_out(&self, name_clash: bool, unknown_seen: bool) -> WirelessFailure {
+    /// Code pairing happens only while waiting for a phone after the user asked: a reconnect
+    /// brings back the session it lost, not another phone.
+    fn pairs(&self) -> bool {
+        matches!(self.kind, WindowKind::Waiting { .. })
+    }
+
+    fn ran_out(
+        &self,
+        name_clash: bool,
+        hint: Option<WirelessFailure>,
+        unknown_seen: bool,
+    ) -> WirelessFailure {
         if name_clash {
             WirelessFailure::NameClash
+        } else if let Some(hint) = hint {
+            hint
         } else if unknown_seen {
             WirelessFailure::PairingRefused
         } else {
@@ -320,9 +418,21 @@ enum Dialled {
     End(WirelessFailure),
 }
 
+/// How one code pairing went.
+enum Pairing {
+    /// Saved (and `F` sent): dial the phone with `record` at once.
+    Paired(Record),
+    /// The phone turned the pairing channel away before its first line.
+    Busy,
+    /// The pairing channel did not come up: try again next round.
+    Retry,
+    End(WirelessFailure),
+}
+
 /// What one `ConnectWireless` remembers between its windows.
 struct Attempt<'a> {
     context: &'a Context,
+    computer_name: Option<String>,
     /// Phone id → the address a handshake with its pairing completed at, in this attempt.
     verified: HashMap<String, IpAddr>,
     /// Pairings that were good when the attempt began and that it marked stale.
@@ -330,16 +440,23 @@ struct Attempt<'a> {
     /// Runs of unknown identities, for the phone last picked.
     unknowns: UnknownTracker,
     picked: Option<String>,
+    /// The pairing made by code in this attempt, if any: the phone and when.
+    fresh: Option<(String, Instant)>,
+    /// The phone turned pairing away; not asked again before this.
+    busy_until: Option<Instant>,
 }
 
 impl<'a> Attempt<'a> {
-    fn new(context: &'a Context) -> Attempt<'a> {
+    fn new(context: &'a Context, computer_name: Option<String>) -> Attempt<'a> {
         Attempt {
             context,
+            computer_name,
             verified: HashMap::new(),
             marked_stale: HashSet::new(),
             unknowns: UnknownTracker::new(),
             picked: None,
+            fresh: None,
+            busy_until: None,
         }
     }
 
@@ -347,27 +464,30 @@ impl<'a> Attempt<'a> {
         self.context.tell(WirelessEvent::Phase(phase)).await;
     }
 
-    /// Rounds of discovery and dialling until the session is built (its end receiver), the
-    /// window runs out, or something ends the attempt.
+    /// Rounds of discovery and dialling (or code pairing) until the session is built (its end
+    /// receiver), the window runs out, or something ends the attempt.
     async fn connect(
         &mut self,
         access_point: &mut dyn RunningAccessPoint,
-        window: &Window,
+        window: &mut Window,
     ) -> Result<oneshot::Receiver<()>, WirelessFailure> {
         let timing = self.context.timing;
         let mut clash_rounds = 0u32;
         let mut unknown_seen = false;
-        let mut shown_clash = false;
-        self.tell(window.phase(false)).await;
+        // What holds the attempt up while it waits (several unpaired phones, a busy phone).
+        let mut hint: Option<WirelessFailure> = None;
+        // The (name clash, hint) last shown with the window's phase.
+        let mut shown = (false, None);
+        self.tell(window.phase(false, None)).await;
         loop {
             let round = Instant::now();
             let name_clash = clash_rounds >= timing.clash_rounds;
             if round >= window.deadline {
-                return Err(window.ran_out(name_clash, unknown_seen));
+                return Err(window.ran_out(name_clash, hint, unknown_seen));
             }
-            if name_clash != shown_clash {
-                shown_clash = name_clash;
-                self.tell(window.phase(name_clash)).await;
+            if (name_clash, &hint) != (shown.0, &shown.1) {
+                shown = (name_clash, hint.clone());
+                self.tell(window.phase(name_clash, hint.clone())).await;
             }
             let local = access_point.local_address();
             let found = tokio::select! {
@@ -376,29 +496,73 @@ impl<'a> Attempt<'a> {
             };
             let records = self.context.store.records();
             let pick = policy::pick(&found, &records, &self.verified, &self.marked_stale);
+            // A phone to dial with a pairing (one found paired, or one just paired by code).
+            let mut to_dial: Option<(FoundPhone, Record)> = None;
             match pick {
                 Pick::Paired { phone, record } => {
                     clash_rounds = 0;
-                    shown_clash = false;
-                    self.tell(window.dialing(false)).await;
-                    let dialled = tokio::select! {
-                        dialled = self.dial(&phone, &record, window, &mut unknown_seen) => dialled,
-                        () = access_point.lost() => return Err(lost()),
-                    };
-                    match dialled {
-                        Dialled::Connected(ended) => return Ok(ended),
-                        Dialled::End(failure) => return Err(failure),
-                        Dialled::Retry => self.tell(window.phase(false)).await,
-                    }
+                    hint = None;
+                    to_dial = Some((phone, record));
                 }
                 Pick::Ambiguous { instance } => {
                     clash_rounds += 1;
                     tracing::debug!("wireless: {instance} is advertised from several addresses");
                 }
-                // Code pairing is not part of this build yet: keep waiting for a paired phone.
+                Pick::Unpaired(phone) if window.pairs() => {
+                    clash_rounds = 0;
+                    if self.busy_until.is_some_and(|until| round < until) {
+                        hint = Some(WirelessFailure::PairingBusy);
+                    } else {
+                        hint = None;
+                        self.tell(WirelessPhase::Dialing).await;
+                        let paired = tokio::select! {
+                            paired = self.pair(&phone) => paired,
+                            () = access_point.lost() => return Err(lost()),
+                        };
+                        match paired {
+                            Pairing::Paired(record) => {
+                                // However late in the window, the new pairing gets its chance.
+                                window.deadline =
+                                    window.deadline.max(Instant::now() + timing.retry_for);
+                                to_dial = Some((phone, record));
+                            }
+                            Pairing::Busy => {
+                                tracing::info!(
+                                    "wireless: the phone turned pairing away; asking again later"
+                                );
+                                self.busy_until = Some(Instant::now() + PAIRING_BUSY_WAIT);
+                                hint = Some(WirelessFailure::PairingBusy);
+                            }
+                            Pairing::Retry => {}
+                            Pairing::End(failure) => return Err(failure),
+                        }
+                        if to_dial.is_none() {
+                            shown = (false, hint.clone());
+                            self.tell(window.phase(false, hint.clone())).await;
+                        }
+                    }
+                }
+                Pick::SeveralUnpaired if window.pairs() => {
+                    clash_rounds = 0;
+                    hint = Some(WirelessFailure::SeveralPhones);
+                }
+                // Reconnecting brings back the phone it lost, never pairs another one.
                 Pick::Unpaired(_) | Pick::SeveralUnpaired => clash_rounds = 0,
                 // A round that finds nothing proves nothing (discovery misses about a third).
                 Pick::None => {}
+            }
+            if let Some((phone, record)) = to_dial {
+                shown = (false, None);
+                self.tell(window.dialing(false)).await;
+                let dialled = tokio::select! {
+                    dialled = self.dial(&phone, &record, window, &mut unknown_seen) => dialled,
+                    () = access_point.lost() => return Err(lost()),
+                };
+                match dialled {
+                    Dialled::Connected(ended) => return Ok(ended),
+                    Dialled::End(failure) => return Err(failure),
+                    Dialled::Retry => self.tell(window.phase(false, None)).await,
+                }
             }
             tokio::select! {
                 () = tokio::time::sleep_until(round + timing.retry_every) => {}
@@ -429,6 +593,115 @@ impl<'a> Attempt<'a> {
         }
     }
 
+    /// Code pairing with `phone` over the pairing channel (the public identity). The code goes
+    /// to the actor (phase `Pairing`) and the user's answer comes back through
+    /// `WirelessEvent::Confirm`; the pairing is saved, on a blocking thread, only once both
+    /// users agreed and the phone's proof checked out, and before `F` is sent. Dropping this
+    /// future (the attempt ends) drops the channel and the question, and saves nothing.
+    async fn pair(&mut self, phone: &FoundPhone) -> Pairing {
+        let context = self.context;
+        let to = SocketAddr::new(phone.address, phone.port);
+        let key = pairing_channel_key();
+        let dialer = context.ports.dialer.clone();
+        let opened = tokio::time::timeout(
+            context.timing.dial_timeout,
+            dialer.dial(to, PAIRING_IDENTITY, &key),
+        )
+        .await
+        .unwrap_or(Err(DialError::Timeout));
+        let stream = match opened {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::debug!("wireless: pairing channel not opened: {error}");
+                return Pairing::Retry;
+            }
+        };
+        let heard = Arc::new(AtomicBool::new(false));
+        let stream = Heard {
+            inner: stream,
+            heard: heard.clone(),
+        };
+        // A phone whose pairing went stale is shown by the name it had.
+        let known_name = context
+            .store
+            .records()
+            .into_iter()
+            .find(|r| r.peer_id == phone.instance)
+            .map(|r| r.name);
+        let local_id = context.store.local_id();
+        let computer_name = crate::wireless::computer_name(self.computer_name.as_deref());
+        tracing::info!("wireless: pairing by code with {}", phone.instance);
+        let confirm = |code: String| async move {
+            let (reply, answer) = oneshot::channel();
+            let event = WirelessEvent::Confirm {
+                code,
+                phone_name: known_name,
+                reply,
+            };
+            if !context.tell(event).await {
+                return false;
+            }
+            // The actor dropping the question (the attempt is ending) is a "no".
+            answer.await.unwrap_or(false)
+        };
+        let store = context.store.clone();
+        let save = move |paired: &Paired| {
+            let mut name = paired.phone_name.clone();
+            if name.is_empty() {
+                name = crate::wireless::cable_pairing::FALLBACK_PHONE_NAME.to_string();
+            }
+            let record = Record {
+                peer_id: paired.phone_id.clone(),
+                name,
+                identity: paired.identity.clone(),
+                created_at: unix_now(),
+                method: Method::Code,
+                stale: false,
+            };
+            let key = paired.long_term_key.clone();
+            async move {
+                // Replaces any earlier pairing with this phone (record and key).
+                tokio::task::spawn_blocking(move || store.save(record, key))
+                    .await
+                    .unwrap_or_else(|error| Err(io::Error::other(error.to_string())))
+            }
+        };
+        let result = code_pairing::run_saving(
+            stream,
+            &phone.instance,
+            &local_id,
+            &computer_name,
+            confirm,
+            save,
+        )
+        .await;
+        match result {
+            Ok(paired) => {
+                tracing::info!("wireless: paired by code with {}", paired.phone_id);
+                self.fresh = Some((paired.phone_id.clone(), Instant::now()));
+                match context
+                    .store
+                    .records()
+                    .into_iter()
+                    .find(|r| r.peer_id == paired.phone_id && !r.stale)
+                {
+                    Some(record) => Pairing::Paired(record),
+                    None => Pairing::Retry,
+                }
+            }
+            Err(CodePairingError::Denied) => {
+                tracing::info!("wireless: pairing not allowed on the phone");
+                Pairing::End(WirelessFailure::PairingDenied)
+            }
+            // Closed before its first line: the phone's lockout, or another pairing on it.
+            Err(CodePairingError::Io(_)) if !heard.load(Ordering::SeqCst) => Pairing::Busy,
+            Err(error) => {
+                tracing::warn!("wireless: code pairing failed: {error}");
+                Pairing::End(WirelessFailure::PairingFailed)
+            }
+        }
+    }
+
     /// Checks the pairing with one dial, then has the actor build the session over it.
     async fn dial(
         &mut self,
@@ -445,6 +718,12 @@ impl<'a> Attempt<'a> {
             self.unknowns.clear();
             self.picked = Some(record.peer_id.clone());
         }
+        // How long ago this pairing was made by code in this attempt.
+        let since_pairing = self
+            .fresh
+            .as_ref()
+            .filter(|(peer, _)| *peer == record.peer_id)
+            .map(|(_, at)| at.elapsed());
         let key = link_key(&key);
         let to = SocketAddr::new(phone.address, phone.port);
         let dialer = context.ports.dialer.clone();
@@ -458,6 +737,8 @@ impl<'a> Attempt<'a> {
             Ok(stream) => {
                 drop(stream);
                 self.unknowns.on_other(phone.address);
+                // Verified only by a handshake with this pairing's own identity (never by the
+                // pairing channel's public one).
                 self.verified.insert(record.peer_id.clone(), phone.address);
                 let link = Arc::new(TlsLink::new(
                     &record.peer_id,
@@ -486,13 +767,13 @@ impl<'a> Attempt<'a> {
         let now = Instant::now();
         if error == DialError::UnknownIdentity {
             *unknown_seen = true;
-            self.unknowns.on_unknown(phone.address, now, None);
+            self.unknowns.on_unknown(phone.address, now, since_pairing);
         } else {
             self.unknowns.on_other(phone.address);
         }
         tracing::debug!("wireless: dial failed: {error}");
         let dial = DialContext {
-            since_pairing: None,
+            since_pairing,
             verified: self.verified.get(&record.peer_id) == Some(&phone.address),
             unknown_span: self.unknowns.span(phone.address, now),
             window_over: now >= window.deadline,
@@ -511,9 +792,60 @@ impl<'a> Attempt<'a> {
                 self.marked_stale.insert(record.peer_id.clone());
                 Dialled::End(WirelessFailure::PairingStale)
             }
-            // `EndFailed` needs a pairing made by code in this attempt, which this build does
-            // not make; either way the record is left alone.
-            Next::EndFailed | Next::EndRefused => Dialled::End(WirelessFailure::PairingRefused),
+            // The pairing made by code in this attempt did not take on the phone (refused at
+            // an address verified for it, past its grace). The record is left as it is.
+            Next::EndFailed => Dialled::End(WirelessFailure::PairingFailed),
+            Next::EndRefused => Dialled::End(WirelessFailure::PairingRefused),
         }
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The pairing channel, noting whether the phone sent anything at all: one that closes before
+/// its first byte turned the pairing away (busy or locked out), which is not a failed pairing.
+struct Heard {
+    inner: crate::mux::MuxStream,
+    heard: Arc<AtomicBool>,
+}
+
+impl AsyncRead for Heard {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            this.heard.store(true, Ordering::SeqCst);
+        }
+        polled
+    }
+}
+
+impl AsyncWrite for Heard {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }

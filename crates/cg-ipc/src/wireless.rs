@@ -54,10 +54,18 @@ pub enum WirelessFailure {
     /// The iPhone was reached but can't be used, and trying again won't change that (e.g. its
     /// app is too old or lacks a capability).
     PhoneRefused { reason: Reason },
+    /// Code pairing: the iPhone's user said no.
+    PairingDenied,
+    /// Code pairing did not complete: the code was not confirmed here (or not in time), the
+    /// connection broke, or the iPhone's lines did not check out. Nothing was saved.
+    PairingFailed,
+    /// The iPhone turned code pairing away (another pairing in progress, or its lockout after
+    /// three failures) until the window ran out.
+    PairingBusy,
 }
 
-/// The phase of the wireless attempt (tagged `phase`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The phase of the wireless attempt (tagged `phase`). `Debug` never prints the pairing code.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum WirelessPhaseView {
     /// Starting the access point.
@@ -69,9 +77,37 @@ pub enum WirelessPhaseView {
     Connected,
     /// The session ended; trying to get it back while the access point stays up.
     Reconnecting,
+    /// Code pairing: show `code` and ask whether the iPhone shows the same
+    /// (`ConfirmCode { matches }`).
+    Pairing {
+        code: String,
+        /// The iPhone's name, when this computer knows it (an earlier pairing with it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phone_name: Option<String>,
+    },
     Failed {
         reason: WirelessFailure,
     },
+}
+
+impl std::fmt::Debug for WirelessPhaseView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WirelessPhaseView::Starting => f.write_str("Starting"),
+            WirelessPhaseView::Waiting => f.write_str("Waiting"),
+            WirelessPhaseView::Connecting => f.write_str("Connecting"),
+            WirelessPhaseView::Connected => f.write_str("Connected"),
+            WirelessPhaseView::Reconnecting => f.write_str("Reconnecting"),
+            WirelessPhaseView::Pairing { phone_name, .. } => f
+                .debug_struct("Pairing")
+                .field("code", &"<hidden>")
+                .field("phone_name", phone_name)
+                .finish(),
+            WirelessPhaseView::Failed { reason } => {
+                f.debug_struct("Failed").field("reason", reason).finish()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +127,11 @@ pub struct WirelessStatus {
     /// Why the last try to build the session failed, while the attempt keeps trying.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<Reason>,
+    /// What holds the attempt up while it keeps waiting (several unpaired iPhones, the iPhone
+    /// turning pairing away for now); the attempt ends with this failure if it lasts until the
+    /// window runs out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<WirelessFailure>,
 }
 
 #[cfg(test)]
@@ -109,6 +150,7 @@ mod tests {
             weak: false,
             name_clash: false,
             last_error: None,
+            hint: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(
@@ -125,6 +167,63 @@ mod tests {
         assert_eq!(waiting.phase, WirelessPhaseView::Waiting);
         assert_eq!(waiting.ssid.as_deref(), Some("CellGlide-AB12"));
         assert!(!waiting.weak && !waiting.name_clash);
+    }
+
+    #[test]
+    fn code_pairing_shapes_and_failures() {
+        let pairing = WirelessPhaseView::Pairing {
+            code: "042137".into(),
+            phone_name: Some("Test iPhone".into()),
+        };
+        let json = serde_json::to_string(&pairing).unwrap();
+        assert_eq!(
+            json,
+            r#"{"phase":"pairing","code":"042137","phone_name":"Test iPhone"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<WirelessPhaseView>(&json).unwrap(),
+            pairing
+        );
+        let unnamed: WirelessPhaseView =
+            serde_json::from_str(r#"{"phase":"pairing","code":"042137"}"#).unwrap();
+        assert_eq!(
+            unnamed,
+            WirelessPhaseView::Pairing {
+                code: "042137".into(),
+                phone_name: None
+            }
+        );
+        // The code is for the screen, never for logs.
+        assert!(!format!("{pairing:?}").contains("042137"));
+        for failure in [
+            WirelessFailure::PairingDenied,
+            WirelessFailure::PairingFailed,
+            WirelessFailure::PairingBusy,
+        ] {
+            let json = serde_json::to_string(&failure).unwrap();
+            assert_eq!(
+                serde_json::from_str::<WirelessFailure>(&json).unwrap(),
+                failure
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&WirelessFailure::PairingBusy).unwrap(),
+            r#"{"code":"pairing_busy"}"#
+        );
+        let held: WirelessStatus = serde_json::from_str(
+            r#"{"phase":{"phase":"waiting"},"hint":{"code":"several_phones"}}"#,
+        )
+        .unwrap();
+        assert_eq!(held.hint, Some(WirelessFailure::SeveralPhones));
+        let plain = WirelessStatus {
+            phase: WirelessPhaseView::Waiting,
+            ssid: None,
+            weak: false,
+            name_clash: false,
+            last_error: None,
+            hint: None,
+        };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("hint"));
     }
 
     #[test]

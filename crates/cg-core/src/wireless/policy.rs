@@ -29,6 +29,9 @@ pub const RETRY_FOR: Duration = Duration::from_secs(60);
 pub const FRESH_PAIRING_GRACE: Duration = Duration::from_secs(10);
 /// TCP connect, TLS handshake and the request line, all together (the phone allows 5 s).
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(4);
+/// The phone turned code pairing away (its pairing channel closed before the first line: another
+/// pairing in progress, or the 60 s lockout after three failures): not asked again for this long.
+pub const PAIRING_BUSY_WAIT: Duration = Duration::from_secs(60);
 /// Two unknown identities from one verified address at least this far apart, with nothing else
 /// in between, mean the phone really has forgotten the pairing.
 pub const UNKNOWN_IDENTITY_SPAN: Duration = Duration::from_secs(5);

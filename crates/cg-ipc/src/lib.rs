@@ -534,6 +534,7 @@ mod tests {
                 weak: true,
                 name_clash: false,
                 last_error: Some(Reason::NoExit),
+                hint: None,
             }),
             ..Snapshot::default()
         };

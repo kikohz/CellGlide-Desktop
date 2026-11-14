@@ -259,6 +259,11 @@ pub enum Command {
     SetWireless {
         enabled: bool,
     },
+    /// The user's answer to the code shown in the wireless phase `Pairing`: whether the iPhone
+    /// shows the same code. Refused (`BadRequest`, nothing changes) when no code is shown.
+    ConfirmCode {
+        matches: bool,
+    },
 }
 
 enum Message {
@@ -468,6 +473,9 @@ struct Wireless {
     probes: HashMap<String, UsbProbe>,
     /// The probe in flight, if any: (serial, mux id) and its task.
     probing: Option<(String, u32, JoinHandle<()>)>,
+    /// While the phase is `Pairing`: where the user's answer goes. Dropped (the question
+    /// withdrawn) whenever the attempt ends.
+    confirm: Option<tokio::sync::oneshot::Sender<bool>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -581,6 +589,7 @@ impl Actor {
                 last_error: None,
                 probes: HashMap::new(),
                 probing: None,
+                confirm: None,
             },
         }
     }
@@ -715,6 +724,7 @@ impl Actor {
             }
             Command::ConnectWireless => return self.connect_wireless(events).await,
             Command::CancelWireless => self.end_wireless(WirelessPhase::Off).await,
+            Command::ConfirmCode { matches } => return self.confirm_code(matches).await,
             Command::SetWireless { enabled } => {
                 self.settings.update(|s| s.wireless_enabled = enabled);
                 if !self.wireless_enabled() && self.wireless.phase.owns() {
@@ -798,14 +808,39 @@ impl Actor {
         self.wireless.attempt += 1;
         self.wireless.phase = WirelessPhase::Starting;
         self.wireless.last_error = None;
-        self.wireless.task = Some(wireless_session::Task::spawn(wireless_session::Context {
+        let context = wireless_session::Context {
             attempt: self.wireless.attempt,
             ports,
             store,
             timing: self.config.wireless_timing,
             events: events.clone(),
-        }));
+        };
+        let computer_name = self.config.computer_name.clone();
+        self.wireless.task = Some(wireless_session::Task::spawn(context, computer_name));
         tracing::info!("wireless: starting");
+        Ok(())
+    }
+
+    /// The user's answer to the code shown. A match goes to the task, which waits for the
+    /// phone's answer too and only then saves; a mismatch ends the attempt at once (the task,
+    /// and with it the pairing channel, is gone before this returns; nothing was saved).
+    async fn confirm_code(&mut self, matches: bool) -> Result<()> {
+        if !matches!(self.wireless.phase, WirelessPhase::Pairing { .. }) {
+            return Err(CoreError::BadRequest);
+        }
+        let Some(reply) = self.wireless.confirm.take() else {
+            return Err(CoreError::BadRequest);
+        };
+        if !matches {
+            tracing::info!("wireless: the code was not confirmed");
+            drop(reply);
+            self.end_wireless(WirelessPhase::Failed(WirelessFailure::PairingFailed))
+                .await;
+            return Ok(());
+        }
+        tracing::info!("wireless: the code was confirmed; waiting for the phone");
+        let _ = reply.send(true);
+        self.wireless.phase = WirelessPhase::Dialing;
         Ok(())
     }
 
@@ -822,6 +857,8 @@ impl Actor {
         if let Some((_, _, probe)) = self.wireless.probing.take() {
             probe.abort();
         }
+        // A question still on screen is withdrawn with the task (which held the other end).
+        self.wireless.confirm = None;
         self.wireless.last_error = None;
         if self.active_is_wireless() {
             self.teardown().await;
@@ -838,6 +875,8 @@ impl Actor {
                     if let WirelessPhase::Waiting { ssid, .. } = &phase {
                         self.wireless.ssid = Some(ssid.clone());
                     }
+                    // The task has moved on from any question it asked.
+                    self.wireless.confirm = None;
                     self.wireless.phase = phase;
                 }
             }
@@ -876,6 +915,17 @@ impl Actor {
                         self.wireless.last_error = Some(reason);
                         let _ = reply.send(Err(why));
                     }
+                }
+            }
+            WirelessEvent::Confirm {
+                code,
+                phone_name,
+                reply,
+            } => {
+                // Otherwise the reply is dropped: a "no" to a task that is going away anyway.
+                if self.wireless.phase.owns() {
+                    self.wireless.phase = WirelessPhase::Pairing { code, phone_name };
+                    self.wireless.confirm = Some(reply);
                 }
             }
             WirelessEvent::Done(failure) => {
@@ -1825,6 +1875,7 @@ impl Actor {
                 .is_some_and(|a| a.is_wireless() && a.weak()),
             name_clash: phase.name_clash(),
             last_error: self.wireless.last_error.clone().filter(|_| phase.owns()),
+            hint: phase.hint(),
         })
     }
 
