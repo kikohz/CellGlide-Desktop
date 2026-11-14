@@ -9,6 +9,7 @@ use crate::forwarder::{self, Forwarder};
 use crate::health::judge::JudgeConfig;
 use crate::health::log::HealthLog;
 use crate::health::monitor::HealthMonitor;
+use crate::health::weak::Handshakes;
 use crate::lockdown;
 use crate::mux::{self, MuxEndpoint};
 use crate::phone::{self, Ended, Phone};
@@ -21,9 +22,14 @@ use crate::tunnel::{
     TunnelPlan,
 };
 use crate::wireless::cable_pairing;
-use crate::wireless::ports::WirelessPorts;
+use crate::wireless::ports::{DialError, WirelessPorts};
 use crate::wireless::store::WirelessStore;
 use crate::{CoreError, Result};
+use cg_ipc::wireless::{WirelessFailure, WirelessStatus};
+use wireless_session::{NotEstablished, WirelessEvent};
+pub use wireless_session::{WirelessPhase, WirelessTiming};
+
+mod wireless_session;
 use cg_ipc::health::{DayStart, EventKind, HistoryDay};
 use cg_ipc::phone::{PhoneLabel, UsbPhone};
 use cg_ipc::{ConnState, DnsMode, PhoneChoice, Reason, Snapshot, StrictDns};
@@ -73,6 +79,11 @@ pub struct ControllerConfig {
     /// The platform's access point, discovery and TLS dialer; `None` where wireless sessions
     /// are not available.
     pub wireless_ports: Option<WirelessPorts>,
+    /// The wireless attempt's windows (`wireless::policy`'s values by default).
+    pub wireless_timing: WirelessTiming,
+    /// Health checks of a wireless session: `health` and `health_watch` stay with USB.
+    pub wireless_health: HealthTiming,
+    pub wireless_health_watch: HealthWatchTiming,
 }
 
 /// How often the timeline's checks run, as the Mac's `HealthController`.
@@ -212,6 +223,9 @@ impl ControllerConfig {
             wireless: None,
             wireless_forced: false,
             wireless_ports: None,
+            wireless_timing: WirelessTiming::default(),
+            wireless_health: HealthTiming::wireless(),
+            wireless_health_watch: HealthWatchTiming::wireless(),
         }
     }
 }
@@ -235,10 +249,20 @@ pub enum Command {
     Sleep {
         sleeping: bool,
     },
+    /// Starts the access point and connects to a paired iPhone over it. Refused (`BadRequest`)
+    /// unless the wireless switch is on, the platform and the pairing store are there, no session
+    /// runs and no iPhone is on USB; while an attempt already runs it does nothing.
+    ConnectWireless,
+    /// Ends the wireless attempt (and its session), closing the access point.
+    CancelWireless,
+    /// The wireless switch. Turning it off ends a wireless attempt (`TurnedOff`).
+    SetWireless {
+        enabled: bool,
+    },
 }
 
 enum Message {
-    Command(Command, tokio::sync::oneshot::Sender<()>),
+    Command(Command, tokio::sync::oneshot::Sender<Result<()>>),
     Shutdown(tokio::sync::oneshot::Sender<()>),
 }
 
@@ -301,14 +325,15 @@ impl Controller {
         )
     }
 
-    /// Returns once the command has taken effect (a disconnect: once the tunnel is down).
+    /// Returns once the command has taken effect (a disconnect: once the tunnel is down), or
+    /// `CoreError::BadRequest` for one that does not apply now.
     pub async fn send(&self, command: Command) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.messages
             .send(Message::Command(command, tx))
             .await
             .map_err(|_| CoreError::ShuttingDown)?;
-        rx.await.map_err(|_| CoreError::ShuttingDown)
+        rx.await.map_err(|_| CoreError::ShuttingDown)?
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -351,6 +376,8 @@ enum Event {
     HealthChannel(u64, Option<Duration>),
     /// The timeline's tunnel check.
     HealthTunnel(u64, bool),
+    /// From the wireless attempt's task, tagged with the attempt.
+    Wireless(u64, WirelessEvent),
 }
 
 /// Aborts the session's helper tasks unless the session is handed over.
@@ -401,12 +428,48 @@ struct Active {
     next_tunnel: Instant,
     channel_running: bool,
     tunnel_running: bool,
+    /// The checks' tier: the controller's for USB, the wireless one for a wireless session.
+    health: HealthTiming,
+    watch: HealthWatchTiming,
+    /// The latest SOCKS handshake times, for "weak".
+    handshakes: Handshakes,
+    /// A wireless session's task waits on the other end: dropping this (with the session,
+    /// after the tunnel is stopped) tells it the session is over.
+    ended: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Active {
+    fn is_wireless(&self) -> bool {
+        self.phone.is_wireless()
+    }
+
+    /// The median of the last handshakes is above this tier's limit (never for USB).
+    fn weak(&self) -> bool {
+        self.watch
+            .weak_median
+            .is_some_and(|limit| self.handshakes.median().is_some_and(|m| m > limit))
+    }
+}
+
+/// The wireless attempt, as the actor sees it.
+struct Wireless {
+    phase: WirelessPhase,
+    /// Tags the task's events; bumped whenever an attempt ends, so a late event is ignored.
+    attempt: u64,
+    task: Option<wireless_session::Task>,
+    /// The access point's network name, once it is up.
+    ssid: Option<String>,
 }
 
 enum Choice {
     Waiting,
     Choose,
     Selected(Device),
+}
+
+/// The id `Phone::id` gives a wireless phone.
+fn is_wireless_id(serial: &str) -> bool {
+    serial.starts_with("wireless:")
 }
 
 /// A phone chosen by serial is never replaced; otherwise only a single phone is used.
@@ -452,6 +515,7 @@ struct Actor {
     label_tasks: HashMap<String, (u64, JoinHandle<()>)>,
     label_seq: u64,
     monitor: HealthMonitor,
+    wireless: Wireless,
 }
 
 impl Actor {
@@ -494,6 +558,12 @@ impl Actor {
             label_tasks: HashMap::new(),
             label_seq: 0,
             monitor,
+            wireless: Wireless {
+                phase: WirelessPhase::Off,
+                attempt: 0,
+                task: None,
+                ssid: None,
+            },
         }
     }
 
@@ -507,17 +577,19 @@ impl Actor {
             tokio::select! {
                 message = messages.recv() => match message {
                     Some(Message::Command(command, done)) => {
-                        self.command(command).await;
+                        let result = self.command(command, &events_tx).await;
                         self.publish();
-                        let _ = done.send(());
+                        let _ = done.send(result);
                     }
                     Some(Message::Shutdown(done)) => {
+                        self.end_wireless(WirelessPhase::Off).await;
                         self.teardown().await;
                         self.publish();
                         let _ = done.send(());
                         return;
                     }
                     None => {
+                        self.end_wireless(WirelessPhase::Off).await;
                         self.teardown().await;
                         return;
                     }
@@ -525,7 +597,7 @@ impl Actor {
                 event = async { self.mux_events.as_mut().unwrap().recv().await }, if self.mux_events.is_some() => {
                     self.mux_event(event, &events_tx).await;
                 }
-                Some(event) = events.recv() => self.session_event(event).await,
+                Some(event) = events.recv() => self.session_event(event, &events_tx).await,
                 _ = tick.tick() => self.tick(&events_tx).await,
             }
             self.publish();
@@ -541,9 +613,21 @@ impl Actor {
         }
     }
 
-    /// The current session uses a different phone than `serial`.
+    /// The current USB session uses a different phone than `serial`. A wireless session is
+    /// never replaced by choosing a USB phone (an iPhone that shows up on USB is).
     fn active_is_other(&self, serial: &str) -> bool {
-        self.active.as_ref().is_some_and(|a| a.phone.id() != serial)
+        self.active
+            .as_ref()
+            .is_some_and(|a| !a.is_wireless() && a.phone.id() != serial)
+    }
+
+    fn active_is_wireless(&self) -> bool {
+        self.active.as_ref().is_some_and(Active::is_wireless)
+    }
+
+    /// The wireless switch as it applies now.
+    fn wireless_enabled(&self) -> bool {
+        self.settings.get().wireless_enabled || self.config.wireless_forced
     }
 
     fn chosen(&self) -> Option<&str> {
@@ -557,8 +641,13 @@ impl Actor {
         }
     }
 
-    async fn command(&mut self, command: Command) {
+    async fn command(&mut self, command: Command, events: &mpsc::Sender<Event>) -> Result<()> {
         match command {
+            // A wireless phone is never chosen by serial (a client echoing `selected` back);
+            // it is reached with `ConnectWireless` only.
+            Command::Connect {
+                serial: Some(serial),
+            } if is_wireless_id(&serial) => return Err(CoreError::BadRequest),
             Command::Connect { serial } => {
                 if let Some(serial) = &serial
                     && self.active_is_other(serial)
@@ -582,6 +671,11 @@ impl Actor {
                     if sleeping { "suspend" } else { "resume" }
                 );
                 self.monitor.sleep_changed(Timestamp::now());
+                // Suspending ends a wireless attempt; resuming does not start it again.
+                if sleeping && self.wireless.phase.owns() {
+                    tracing::info!("wireless: ending for suspend");
+                    self.end_wireless(WirelessPhase::Off).await;
+                }
                 if !sleeping {
                     self.next_listen = Instant::now();
                     if self.wants() && self.active.is_none() {
@@ -598,7 +692,18 @@ impl Actor {
                 self.manual = false;
                 self.retry_at = None;
                 self.last_error = None;
+                self.end_wireless(WirelessPhase::Off).await;
                 self.teardown().await;
+            }
+            Command::ConnectWireless => return self.connect_wireless(events),
+            Command::CancelWireless => self.end_wireless(WirelessPhase::Off).await,
+            Command::SetWireless { enabled } => {
+                self.settings.update(|s| s.wireless_enabled = enabled);
+                if !self.wireless_enabled() && self.wireless.phase.owns() {
+                    tracing::info!("wireless: switched off; ending");
+                    self.end_wireless(WirelessPhase::Failed(WirelessFailure::TurnedOff))
+                        .await;
+                }
             }
             Command::SetSettings {
                 auto_connect,
@@ -612,6 +717,10 @@ impl Actor {
                 let chosen = match phone {
                     None => self.settings.get().chosen_serial.clone(),
                     Some(PhoneChoice::Auto) => None,
+                    // A wireless phone is not a USB choice: the choice stays as it was.
+                    Some(PhoneChoice::Serial { serial }) if is_wireless_id(&serial) => {
+                        self.settings.get().chosen_serial.clone()
+                    }
                     Some(PhoneChoice::Serial { serial }) => Some(serial),
                 };
                 if let Some(serial) = &chosen
@@ -631,7 +740,7 @@ impl Actor {
                     // Keep the user's session (connected, or retrying after a failure) when
                     // auto connect goes off; with nothing going on, auto off means "wait
                     // for a Connect".
-                    let in_progress = self.active.is_some()
+                    let in_progress = self.active.as_ref().is_some_and(|a| !a.is_wireless())
                         || self.retry_at.is_some()
                         || self.last_error.is_some();
                     self.manual = was_wanted && in_progress;
@@ -640,6 +749,127 @@ impl Actor {
                 self.retry_soon();
             }
         }
+        Ok(())
+    }
+
+    fn connect_wireless(&mut self, events: &mpsc::Sender<Event>) -> Result<()> {
+        if self.wireless.phase.owns() {
+            return Ok(());
+        }
+        let refused = if !self.wireless_enabled() {
+            Some("the switch is off")
+        } else if self.config.wireless_ports.is_none() || self.config.wireless.is_none() {
+            Some("not available here")
+        } else if self.active.is_some() {
+            Some("a session runs")
+        } else if !self.devices.is_empty() {
+            Some("an iPhone is on USB")
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            tracing::info!("wireless: not starting: {why}");
+            return Err(CoreError::BadRequest);
+        }
+        let (Some(ports), Some(store)) = (
+            self.config.wireless_ports.clone(),
+            self.config.wireless.clone(),
+        ) else {
+            return Err(CoreError::BadRequest);
+        };
+        self.wireless.attempt += 1;
+        self.wireless.phase = WirelessPhase::Starting;
+        self.wireless.task = Some(wireless_session::Task::spawn(wireless_session::Context {
+            attempt: self.wireless.attempt,
+            ports,
+            store,
+            timing: self.config.wireless_timing,
+            events: events.clone(),
+        }));
+        tracing::info!("wireless: starting");
+        Ok(())
+    }
+
+    /// Ends the wireless attempt, if one runs or failed, and leaves `then`: the task (and with
+    /// it the access point) is gone before its session's tunnel is stopped and this returns.
+    async fn end_wireless(&mut self, then: WirelessPhase) {
+        if self.wireless.phase == WirelessPhase::Off && self.wireless.task.is_none() {
+            return;
+        }
+        self.wireless.attempt += 1;
+        if let Some(task) = self.wireless.task.take() {
+            task.stop().await;
+        }
+        if self.active_is_wireless() {
+            self.teardown().await;
+        }
+        self.wireless.phase = then;
+        self.wireless.ssid = None;
+    }
+
+    /// What the wireless attempt's task asks or reports.
+    async fn wireless_event(&mut self, event: WirelessEvent, events: &mpsc::Sender<Event>) {
+        match event {
+            WirelessEvent::Phase(phase) => {
+                if self.wireless.phase.owns() {
+                    if let WirelessPhase::Waiting { ssid, .. } = &phase {
+                        self.wireless.ssid = Some(ssid.clone());
+                    }
+                    self.wireless.phase = phase;
+                }
+            }
+            WirelessEvent::Establish { link, reply } => {
+                if !self.wireless.phase.owns() || self.active.is_some() {
+                    return;
+                }
+                match self.establish(Phone::wireless(link), events).await {
+                    Ok(mut active) => {
+                        let (ended, end) = tokio::sync::oneshot::channel();
+                        active.ended = Some(ended);
+                        self.begin_session(active);
+                        if reply.send(Ok(end)).is_ok() {
+                            self.wireless.phase = WirelessPhase::Connected;
+                            tracing::info!("wireless: connected");
+                        } else {
+                            // Nobody waits for this session any more.
+                            self.teardown().await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("wireless: connect failed: {error}");
+                        let why = match error {
+                            CoreError::Dial(DialError::UnknownIdentity) => {
+                                NotEstablished::UnknownIdentity
+                            }
+                            _ => NotEstablished::Other,
+                        };
+                        let _ = reply.send(Err(why));
+                    }
+                }
+            }
+            WirelessEvent::Done(failure) => {
+                // The task has dropped the access point and is ending on its own.
+                self.wireless.task = None;
+                self.end_wireless(WirelessPhase::Failed(failure)).await;
+            }
+        }
+    }
+
+    /// An iPhone that can be used on USB ends the wireless attempt and connects over USB, even
+    /// with auto connect off: the user asked for a connection.
+    async fn switch_to_usb(&mut self) {
+        if !self.wireless.phase.owns()
+            || !matches!(choose(&self.devices, self.chosen()), Choice::Selected(_))
+        {
+            return;
+        }
+        tracing::info!("wireless: an iPhone is on USB; switching to it");
+        self.end_wireless(WirelessPhase::Off).await;
+        self.settings.update(|s| s.user_disconnected = false);
+        self.manual = true;
+        self.failures = 0;
+        self.last_error = None;
+        self.retry_at = Some(Instant::now());
     }
 
     /// Reads the name and model of each attached phone that has not been asked yet. These
@@ -729,18 +959,25 @@ impl Actor {
                 self.label_tasks
                     .drain()
                     .for_each(|(_, (_, task))| task.abort());
-                self.teardown().await;
+                // A wireless session does not depend on usbmuxd.
+                if !self.active_is_wireless() {
+                    self.teardown().await;
+                }
                 self.next_listen = Instant::now() + self.config.relisten_delay;
             }
         }
     }
 
-    async fn session_event(&mut self, event: Event) {
+    async fn session_event(&mut self, event: Event, events: &mpsc::Sender<Event>) {
         match event {
             Event::Ended(g) if g == self.generation && self.active.is_some() => {
                 tracing::info!("phone session ended; rebuilding");
+                let wireless = self.active_is_wireless();
                 self.teardown().await;
-                self.phone_ended_session();
+                // A wireless session is rebuilt by its own task; USB's wishes stay as they were.
+                if !wireless {
+                    self.phone_ended_session();
+                }
                 self.retry_soon();
             }
             Event::DnsChanged(g) if g == self.generation && self.active.is_some() => {
@@ -755,8 +992,8 @@ impl Actor {
                 self.feed.receive(&m, at);
                 self.monitor
                     .phone_frame(&sanitize(&m), Timestamp::now(), at);
-                let spacing = self.config.health.early_spacing;
                 if let Some(active) = self.active.as_mut() {
+                    let spacing = active.health.early_spacing;
                     let now = Instant::now();
                     let fell = exit_ok == Some(false) && active.last_exit_ok != Some(false);
                     if fell
@@ -771,8 +1008,8 @@ impl Actor {
                 }
             }
             Event::QuickCheck(g, ok) if g == self.generation => {
-                let fail_after = self.config.health.quick_fail_after;
                 if let Some(active) = self.active.as_mut() {
+                    let fail_after = active.health.quick_fail_after;
                     active.quick_check_running = false;
                     if quick_check_counted(&mut active.quick_failures, ok, fail_after) {
                         active.next_full = Instant::now();
@@ -793,6 +1030,9 @@ impl Actor {
             Event::HealthChannel(g, rtt) if g == self.generation => {
                 if let Some(active) = self.active.as_mut() {
                     active.channel_running = false;
+                    // A greeting that went unanswered took at least the time limit.
+                    let took = rtt.unwrap_or(active.watch.channel_timeout);
+                    active.handshakes.push(took);
                     self.monitor.channel(rtt, Timestamp::now());
                 }
             }
@@ -800,7 +1040,7 @@ impl Actor {
                 if let Some(active) = self.active.as_mut() {
                     active.tunnel_running = false;
                     self.monitor.tunnel(ok, Timestamp::now());
-                    let watch = self.config.health_watch;
+                    let watch = active.watch;
                     let wait = if !ok || self.monitor.wants_fast_tunnel() {
                         watch.fast
                     } else {
@@ -821,7 +1061,11 @@ impl Actor {
                     self.labels.insert(serial, label);
                 }
             }
-            // Anything else belongs to a session that has already been torn down.
+            Event::Wireless(attempt, event) if attempt == self.wireless.attempt => {
+                self.wireless_event(event, events).await;
+            }
+            // Anything else belongs to a session (or a wireless attempt) that has already
+            // been torn down.
             _ => {}
         }
     }
@@ -838,14 +1082,27 @@ impl Actor {
             .is_some_and(|t| t.has_exited())
         {
             tracing::warn!("hev exited; tearing the tunnel down");
+            let wireless = self.active_is_wireless();
             self.teardown().await;
-            self.last_error = Some(Reason::ForwardingStopped);
+            if !wireless {
+                self.last_error = Some(Reason::ForwardingStopped);
+            }
             self.retry_soon();
         }
         self.take_notices();
         self.health_checks(events);
+        if let Some(task) = self.wireless.task.as_mut()
+            && task.panicked().await
+        {
+            tracing::error!("wireless: the attempt's task failed");
+            self.end_wireless(WirelessPhase::Failed(WirelessFailure::Lost))
+                .await;
+        }
+        self.switch_to_usb().await;
+        // While a wireless attempt runs, USB connects only through `switch_to_usb`.
         if self.wants()
             && self.active.is_none()
+            && !self.wireless.phase.owns()
             && self.mux_events.is_some()
             && self.retry_at.is_some_and(|t| now >= t)
         {
@@ -869,7 +1126,6 @@ impl Actor {
 
     /// Starts the checks that are due; their results come back as events.
     fn health_checks(&mut self, events: &mpsc::Sender<Event>) {
-        let timing = self.config.health;
         let now = Instant::now();
         let generation = self.generation;
         let full = self
@@ -880,6 +1136,7 @@ impl Actor {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        let (timing, watch) = (active.health, active.watch);
         if !active.quick_check_running && now >= active.next_quick {
             active.next_quick = now + timing.quick;
             active.quick_check_running = true;
@@ -901,7 +1158,6 @@ impl Actor {
             });
         }
         // The timeline's checks: only results come back to the actor.
-        let watch = self.config.health_watch;
         if !active.channel_running && now >= active.next_channel {
             self.monitor
                 .frames_stale(std::time::Instant::now(), Timestamp::now());
@@ -930,10 +1186,10 @@ impl Actor {
     }
 
     async fn full_check_done(&mut self, outcome: FullCheck) {
-        let timing = self.config.health;
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        let timing = active.health;
         active.full_check_running = false;
         let now = Instant::now();
         match outcome {
@@ -986,7 +1242,12 @@ impl Actor {
     /// A failed check: back to the original network, retry with backoff.
     async fn release(&mut self, reason: Reason) {
         tracing::warn!("health check failed: {reason:?}; releasing the session");
+        let wireless = self.active_is_wireless();
         self.teardown_because(Some(release_detail(&reason))).await;
+        // The wireless attempt reconnects on its own clock (`wireless::policy`), not USB's.
+        if wireless {
+            return;
+        }
         self.failures = (self.failures + 1).min(5);
         self.last_error = Some(reason);
         self.retry_at = Some(Instant::now() + backoff(self.failures));
@@ -1053,30 +1314,17 @@ impl Actor {
         };
         self.connecting = true;
         self.publish();
-        let result = self.establish(device, events).await;
+        let phone = Phone::usb(self.config.endpoint.clone(), device);
+        let result = self.establish(phone, events).await;
         self.connecting = false;
         match result {
             Ok(mut active) => {
                 self.start_cable_pairing(&mut active);
-                let now = Timestamp::now();
-                self.monitor.tunnel_started(&active.hello.session_id, now);
-                if active.dns == DnsMode::Unmanaged {
-                    self.monitor.note(EventKind::DnsNotAuthorized, None, now);
+                self.begin_session(active);
+                // A wireless failure shown until now is old news once USB is up.
+                if matches!(self.wireless.phase, WirelessPhase::Failed(_)) {
+                    self.wireless.phase = WirelessPhase::Off;
                 }
-                if let StrictDns::Off { .. } = active.strict_dns {
-                    self.monitor
-                        .note(EventKind::StrictDnsUnavailable, None, now);
-                }
-                let stored = self.settings.get().last_versions.clone();
-                let previous = stored.computer.zip(stored.phone);
-                let (computer, phone) = self.monitor.versions(previous, &active.hello.version, now);
-                self.settings.update(|s| {
-                    s.last_versions = LastVersions {
-                        computer: Some(computer),
-                        phone: Some(phone),
-                    }
-                });
-                self.active = Some(active);
                 self.failures = 0;
                 self.last_error = None;
                 self.retry_at = None;
@@ -1090,8 +1338,47 @@ impl Actor {
         }
     }
 
-    async fn establish(&mut self, device: Device, events: &mpsc::Sender<Event>) -> Result<Active> {
-        let phone = Phone::usb(self.config.endpoint.clone(), device);
+    /// What every new session does once established, USB or wireless: the timeline (on the
+    /// session's tier), and the versions.
+    fn begin_session(&mut self, active: Active) {
+        let now = Timestamp::now();
+        self.monitor.session_started(
+            &active.hello.session_id,
+            active.is_wireless(),
+            active.watch,
+            now,
+        );
+        if active.dns == DnsMode::Unmanaged {
+            self.monitor.note(EventKind::DnsNotAuthorized, None, now);
+        }
+        if let StrictDns::Off { .. } = active.strict_dns {
+            self.monitor
+                .note(EventKind::StrictDnsUnavailable, None, now);
+        }
+        let stored = self.settings.get().last_versions.clone();
+        let previous = stored.computer.zip(stored.phone);
+        let (computer, phone) = self.monitor.versions(previous, &active.hello.version, now);
+        self.settings.update(|s| {
+            s.last_versions = LastVersions {
+                computer: Some(computer),
+                phone: Some(phone),
+            }
+        });
+        self.active = Some(active);
+    }
+
+    /// Builds a session on `phone`, the same way for both links. A wireless one gets the
+    /// wireless health tier, and none of what only USB has (link speed, lockdown battery
+    /// readings, cable pairing).
+    async fn establish(&mut self, phone: Phone, events: &mpsc::Sender<Event>) -> Result<Active> {
+        let (health, watch) = if phone.is_wireless() {
+            (
+                self.config.wireless_health,
+                self.config.wireless_health_watch,
+            )
+        } else {
+            (self.config.health, self.config.health_watch)
+        };
         let hello = phone::read_hello(&phone).await?;
         hello.validate()?;
         if !hello.has(capability::UDP_OVER_USB) {
@@ -1224,18 +1511,22 @@ impl Actor {
             forwarder,
             checks,
             _resolver: resolver,
-            next_quick: Instant::now() + self.config.health.quick,
+            next_quick: Instant::now() + health.quick,
             quick_check_running: false,
             quick_failures: 0,
-            next_full: Instant::now() + self.config.health.full,
+            next_full: Instant::now() + health.full,
             full_check_running: false,
             exit_retried: false,
             last_early: None,
             last_exit_ok: None,
-            next_channel: Instant::now() + self.config.health_watch.channel,
+            next_channel: Instant::now() + watch.channel,
             next_tunnel: Instant::now(),
             channel_running: false,
             tunnel_running: false,
+            health,
+            watch,
+            handshakes: Handshakes::new(),
+            ended: None,
         })
     }
 
@@ -1331,12 +1622,31 @@ impl Actor {
         if let Some(tunnel) = active.tunnel.take() {
             stop_tunnel(tunnel).await;
         }
+        // A wireless session that ends on its own is brought back by its task, which learns
+        // of the end from this drop, after the tunnel is down.
+        if active.is_wireless() && self.wireless.phase == WirelessPhase::Connected {
+            self.wireless.phase = WirelessPhase::Reconnecting {
+                since: Instant::now(),
+                name_clash: false,
+            };
+        }
         drop(active);
         self.feed.reset();
         self.usb = None;
     }
 
     fn state(&self) -> ConnState {
+        // A wireless attempt does not depend on usbmuxd: whatever usbmuxd does, the state is
+        // the attempt's.
+        if self.wireless.phase.owns() {
+            return match &self.active {
+                Some(active) => ConnState::Connected {
+                    phone_version: active.hello.version.clone(),
+                    dns: active.dns,
+                },
+                None => ConnState::Connecting,
+            };
+        }
         if !self.mux_up {
             return ConnState::NoUsbService;
         }
@@ -1373,6 +1683,20 @@ impl Actor {
         ConnState::Idle
     }
 
+    /// The wireless attempt for the snapshot; never the passphrase.
+    fn wireless_status(&self) -> Option<WirelessStatus> {
+        let phase = &self.wireless.phase;
+        Some(WirelessStatus {
+            phase: phase.view()?,
+            ssid: self.wireless.ssid.clone().filter(|_| phase.owns()),
+            weak: self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.is_wireless() && a.weak()),
+            name_clash: phase.name_clash(),
+        })
+    }
+
     fn publish(&self) {
         let stored = self.settings.get();
         let next = Snapshot {
@@ -1402,6 +1726,7 @@ impl Actor {
                 chosen_serial: stored.chosen_serial.clone(),
                 strict_dns: stored.strict_dns,
             },
+            wireless: self.wireless_status(),
         };
         self.snapshot.send_if_modified(|current| {
             let changed = *current != next;
@@ -3628,6 +3953,9 @@ mod tests {
         assert_eq!(page.days.len(), 7);
         assert_eq!(page.days.last(), Some(&page.day));
     }
+
+    /// Wireless sessions (`controller/tests/wireless.rs`).
+    mod wireless;
 
     mod cable_pairing {
         use super::*;

@@ -89,6 +89,8 @@ pub(super) struct Observed {
     pub open_relays: AtomicUsize,
     /// Connections to lockdownd that are still open.
     pub open_sessions: AtomicUsize,
+    /// Connections to lockdownd and to the relay ever made.
+    pub connections: AtomicUsize,
 }
 
 /// Counts a connection as open until it is dropped, however the serving task ends.
@@ -244,6 +246,7 @@ fn value(options: &FakeLockdown, key: &str) -> Option<Value> {
 
 async fn serve_lockdown(mut stream: Box<dyn Stream>, fake: Arc<Fake>) {
     let _open = Open::new(&fake.observed.open_sessions);
+    fake.observed.connections.fetch_add(1, Ordering::SeqCst);
     while let Some(message) = receive(&mut stream).await {
         let request = text(&message, "Request");
         let mut reply = Dictionary::new();
@@ -306,6 +309,7 @@ async fn serve_lockdown(mut stream: Box<dyn Stream>, fake: Arc<Fake>) {
 
 async fn serve_relay(mut stream: Box<dyn Stream>, fake: Arc<Fake>) {
     let _open = Open::new(&fake.observed.open_relays);
+    fake.observed.connections.fetch_add(1, Ordering::SeqCst);
     if fake.options.session_tls {
         match upgrade(stream, &fake).await {
             Some(tls) => stream = tls,

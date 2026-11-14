@@ -219,6 +219,13 @@ impl FakePhone {
             .map_or(0, |o| o.open_relays.load(Ordering::SeqCst))
     }
 
+    /// Connections ever made to lockdownd or its diagnostics relay.
+    pub fn lockdown_connections(&self) -> usize {
+        self.lockdown
+            .as_ref()
+            .map_or(0, |o| o.connections.load(Ordering::SeqCst))
+    }
+
     /// Lockdownd connections (sessions) still open.
     pub fn open_lockdown_sessions(&self) -> usize {
         self.lockdown

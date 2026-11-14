@@ -37,6 +37,9 @@ pub enum CoreError {
     /// A wireless connection to the phone did not come up.
     #[error("wireless: {0}")]
     Dial(crate::wireless::ports::DialError),
+    /// A command that does not apply now (e.g. a wireless connection while a session runs).
+    #[error("bad request")]
+    BadRequest,
 }
 
 impl CoreError {
@@ -71,6 +74,7 @@ impl CoreError {
             CoreError::Dial(error) => Reason::Internal {
                 detail: format!("wireless: {error}"),
             },
+            CoreError::BadRequest => Reason::BadRequest,
         }
     }
 }

@@ -52,21 +52,8 @@ pub enum DialError {
     Io(String),
 }
 
-/// Why the access point could not be started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
-pub enum ApFailure {
-    #[error("this computer has no wireless adapter")]
-    NoAdapter,
-    #[error("wireless is turned off")]
-    RadioOff,
-    /// Windows' Mobile Hotspot is on; the two can't run together and it wins.
-    #[error("Mobile Hotspot is on")]
-    MobileHotspotOn,
-    #[error("the wireless adapter is in use by something else")]
-    InUse,
-    #[error("the wireless adapter can't host an access point")]
-    Unsupported,
-}
+/// Why the access point could not be started (defined beside the snapshot, which reports it).
+pub use cg_ipc::wireless::ApFailure;
 
 /// Starts this computer's temporary access point.
 pub trait AccessPoint: Send + Sync {
@@ -85,7 +72,9 @@ pub trait RunningAccessPoint: Send {
     /// Addresses of the devices that joined.
     fn clients(&self) -> Vec<IpAddr>;
 
-    /// Completes when the system stopped the access point on its own (aborted).
+    /// Completes when the system stopped the access point on its own (aborted). It may be
+    /// called again after the future is dropped, and then completes at once if the access point
+    /// was already lost.
     fn lost(&mut self) -> BoxFuture<'_, ()>;
 }
 

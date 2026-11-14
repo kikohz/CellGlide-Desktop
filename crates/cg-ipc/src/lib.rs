@@ -15,6 +15,7 @@ pub mod carrier;
 pub mod describe;
 pub mod health;
 pub mod phone;
+pub mod wireless;
 
 use phone::{PhoneCard, PhoneLabel};
 use std::collections::BTreeMap;
@@ -337,6 +338,9 @@ pub struct Snapshot {
     /// Strict DNS, while connected (`NotApplicable` otherwise and on Linux).
     #[serde(default)]
     pub strict_dns: StrictDns,
+    /// The wireless attempt while one runs, or after it failed; left out of the JSON otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireless: Option<wireless::WirelessStatus>,
 }
 
 impl Snapshot {
@@ -513,6 +517,30 @@ mod tests {
         let parsed: Contact = serde_json::from_str(r#"{"note":"x"}"#).unwrap();
         assert_eq!(parsed.email, None);
         assert_eq!(parsed.note.as_deref(), Some("x"));
+    }
+
+    /// The wireless status is left out unless there is one, and a snapshot from before it
+    /// (version 6) still reads.
+    #[test]
+    fn the_wireless_status_is_optional_on_the_wire() {
+        let none = String::from_utf8(to_line(&Snapshot::default())).unwrap();
+        assert!(!none.contains("wireless"), "{none}");
+        let old: Snapshot = from_line(none.trim_end().as_bytes()).unwrap();
+        assert_eq!(old.wireless, None);
+        let with = Snapshot {
+            wireless: Some(wireless::WirelessStatus {
+                phase: wireless::WirelessPhaseView::Connected,
+                ssid: Some("CellGlide-AB12".into()),
+                weak: true,
+                name_clash: false,
+            }),
+            ..Snapshot::default()
+        };
+        let line = to_line(&with);
+        assert_eq!(
+            from_line::<Snapshot>(&line[..line.len() - 1]).unwrap(),
+            with
+        );
     }
 
     #[test]

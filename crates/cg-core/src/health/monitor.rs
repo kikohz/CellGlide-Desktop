@@ -63,6 +63,33 @@ impl HealthMonitor {
     }
 
     pub fn tunnel_started(&mut self, session: &str, now: Timestamp) {
+        self.started(format!("session {session}"), now);
+    }
+
+    /// A session starts on its link's tier (`timing`, which the judge and the stale-frame check
+    /// use until the next session); a wireless one is marked so on the timeline. USB sessions
+    /// are written exactly as `tunnel_started` writes them.
+    pub fn session_started(
+        &mut self,
+        session: &str,
+        wireless: bool,
+        timing: HealthWatchTiming,
+        now: Timestamp,
+    ) {
+        if self.running {
+            return;
+        }
+        self.timing = timing;
+        self.judge.set_config(timing.judge);
+        let detail = if wireless {
+            format!("session {session}, wireless")
+        } else {
+            format!("session {session}")
+        };
+        self.started(detail, now);
+    }
+
+    fn started(&mut self, detail: String, now: Timestamp) {
         if self.running {
             return;
         }
@@ -73,7 +100,7 @@ impl HealthMonitor {
         self.judge.start(now);
         self.window.reset();
         self.write(HealthEvent {
-            detail: Some(format!("session {session}")),
+            detail: Some(detail),
             ..HealthEvent::new(now, EventKind::TunnelStarted)
         });
     }

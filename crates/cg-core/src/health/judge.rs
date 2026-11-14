@@ -109,6 +109,11 @@ impl HealthJudge {
         }
     }
 
+    /// Judges the next session with `config` (its link's tier); call it before `start`.
+    pub fn set_config(&mut self, config: JudgeConfig) {
+        self.config = config;
+    }
+
     pub fn start(&mut self, at: Timestamp) {
         self.clear_counts();
         self.judging_from = Some(plus(at, self.config.warmup));
