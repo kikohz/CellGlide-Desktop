@@ -78,7 +78,7 @@ pub struct PairedPhoneView {
     pub name: String,
     /// "Paired with a code" or "Paired over the cable".
     pub method: String,
-    /// The iPhone no longer accepts this pairing: show "Pair again" with its button.
+    /// The iPhone no longer accepts this pairing: show "Needs pairing again" with the "Pair Again" button.
     pub stale: bool,
 }
 

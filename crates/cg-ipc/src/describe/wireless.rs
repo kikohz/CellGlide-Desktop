@@ -195,7 +195,7 @@ pub fn pairing_method_text(method: PairingMethod) -> String {
     }
 }
 
-/// One paired iPhone: "Name · Paired with a code", and "· Pair again" when it went stale.
+/// One paired iPhone: "Name · Paired with a code", and "· Needs pairing again" when it went stale.
 pub fn paired_phone_line(phone: &PairedPhone) -> String {
     let mut parts = vec![phone.name.clone(), pairing_method_text(phone.method)];
     if phone.stale {
@@ -516,7 +516,7 @@ mod tests {
         phone.method = PairingMethod::Code;
         assert_eq!(
             paired_phone_line(&phone),
-            "Test iPhone · Paired with a code · Pair again"
+            "Test iPhone · Paired with a code · Needs pairing again"
         );
         let mut info = WirelessInfo {
             available: Some(true),

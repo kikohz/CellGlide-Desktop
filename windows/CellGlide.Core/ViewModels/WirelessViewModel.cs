@@ -16,7 +16,8 @@ public sealed class WirelessViewModel : CoreViewModel
     WirelessSettingsView? _settings;
     WirelessInfoView? _info;
     CodePrompt? _code;
-    bool _askingInfo;
+    /// <summary>The steps card was shown with the last state.</summary>
+    bool _stepsShown;
 
     public WirelessViewModel(EventHub hub)
         : base(hub)
@@ -113,14 +114,18 @@ public sealed class WirelessViewModel : CoreViewModel
             ? new CodePrompt(code, view.Title, view.Detail, view.Confirmed)
             : null;
         OnPropertyChanged(nameof(SwitchBusy));
-        if (view?.ShowSteps != true)
+        // Asked once each time the steps card appears: a refusal (a read-only client, say) is said once, not again
+        // with every state while the card stays.
+        var steps = view?.ShowSteps == true;
+        if (!steps)
         {
             Info = null;
         }
-        else if (Info is null && !_askingInfo)
+        else if (!_stepsShown)
         {
             InfoAsked = AskInfoAsync();
         }
+        _stepsShown = steps;
     }
 
     /// <summary>The last ask for the steps card's info (for the tests).</summary>
@@ -129,17 +134,9 @@ public sealed class WirelessViewModel : CoreViewModel
     /// <summary>The steps card appeared: its network name and password.</summary>
     async Task AskInfoAsync()
     {
-        _askingInfo = true;
-        try
+        if (await RunAsync(new WirelessInfoCommand()) is WirelessValue value && View?.ShowSteps == true)
         {
-            if (await RunAsync(new WirelessInfoCommand()) is WirelessValue value && View?.ShowSteps == true)
-            {
-                Info = value.View;
-            }
-        }
-        finally
-        {
-            _askingInfo = false;
+            Info = value.View;
         }
     }
 }
@@ -186,6 +183,8 @@ public sealed class CodeDialogTracker
 {
     string? _dismissed;
     bool _closing;
+    /// <summary>"They Match" was pressed and the service has not answered: the state still asks.</summary>
+    bool _matched;
 
     /// <summary>The prompt the open dialog shows; null while none is open.</summary>
     public CodePrompt? Shown { get; private set; }
@@ -207,6 +206,7 @@ public sealed class CodeDialogTracker
                 return CodeDialogStep.None;
             }
             Shown = null;
+            _matched = false;
             _closing = true;
             return CodeDialogStep.Close;
         }
@@ -216,6 +216,12 @@ public sealed class CodeDialogTracker
             {
                 return CodeDialogStep.None;
             }
+            if (_matched && prompt == Shown with { Confirmed = false })
+            {
+                // Confirmed here; the state has not caught up yet (or the reply says it was refused: <see cref="Unconfirmed"/>).
+                return CodeDialogStep.None;
+            }
+            _matched = false;
             Shown = prompt;
             return CodeDialogStep.Update;
         }
@@ -236,10 +242,26 @@ public sealed class CodeDialogTracker
     /// </summary>
     public CodePrompt? Matched()
     {
-        if (Shown is not null)
+        if (Shown is { Confirmed: false })
         {
             Shown = Shown with { Confirmed = true };
+            _matched = true;
         }
+        return Shown;
+    }
+
+    /// <summary>
+    /// The service refused the confirmation: the open dialog asks again. Returns the prompt to show, or null when
+    /// there is nothing to take back (no dialog, or the state already says confirmed).
+    /// </summary>
+    public CodePrompt? Unconfirmed()
+    {
+        if (Shown is null || !_matched)
+        {
+            return null;
+        }
+        _matched = false;
+        Shown = Shown with { Confirmed = false };
         return Shown;
     }
 
@@ -252,6 +274,7 @@ public sealed class CodeDialogTracker
     {
         var code = Shown?.Code;
         Shown = null;
+        _matched = false;
         if (_closing)
         {
             _closing = false;

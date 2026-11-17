@@ -744,9 +744,197 @@ public class ViewModelTests
         var tracker = new CodeDialogTracker();
         tracker.Follow(Prompt(), canShow: true);
         tracker.Matched();
-        // The next state still asks (the confirm failed): the dialog asks again.
-        Assert.Equal(CodeDialogStep.Update, tracker.Follow(Prompt(), canShow: true));
-        Assert.False(tracker.Shown!.Confirmed);
+        // States that still ask (the reply has not come) leave the dialog confirmed.
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(), canShow: true));
+        Assert.True(tracker.Shown!.Confirmed);
+        // The reply says it was refused: the question again.
+        Assert.Equal(Prompt(), tracker.Unconfirmed());
+        Assert.Null(tracker.Unconfirmed());
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(), canShow: true));
+    }
+
+    /// <summary>The code dialog as the controller sees it: what it was told to show, and how the test closes it.</summary>
+    sealed class FakePresenter : ICodeDialogPresenter
+    {
+        TaskCompletionSource<CodeDialogClose>? _open;
+
+        public bool CanShow { get; set; } = true;
+
+        /// <summary>The next ShowAsync fails (another dialog is up).</summary>
+        public bool FailNext { get; set; }
+
+        public int Shows { get; private set; }
+
+        public int Hides { get; private set; }
+
+        public bool IsOpen => _open is not null;
+
+        public List<(CodePrompt Prompt, string? Error)> Fills { get; } = [];
+
+        public event Action? Matched;
+
+        public Task<CodeDialogClose> ShowAsync(CodePrompt prompt)
+        {
+            if (FailNext)
+            {
+                FailNext = false;
+                return Task.FromResult(CodeDialogClose.NotShown);
+            }
+            Shows++;
+            Fills.Add((prompt, null));
+            _open = new TaskCompletionSource<CodeDialogClose>();
+            return _open.Task;
+        }
+
+        public void Fill(CodePrompt prompt, string? error) => Fills.Add((prompt, error));
+
+        public void Hide()
+        {
+            Hides++;
+            Close(CodeDialogClose.Dismissed);
+        }
+
+        public void Close(CodeDialogClose how)
+        {
+            var open = _open;
+            _open = null;
+            open?.SetResult(how);
+        }
+
+        public void PressMatch() => Matched?.Invoke();
+    }
+
+    static (ScriptedCore Core, WirelessViewModel Wireless, FakePresenter Dialog, CodeDialogController Controller) CodeDialog()
+    {
+        var core = new ScriptedCore();
+        var wireless = new WirelessViewModel(new EventHub(core, new InlineDispatcher()));
+        var dialog = new FakePresenter();
+        return (core, wireless, dialog, new CodeDialogController(wireless, dialog));
+    }
+
+    [Fact]
+    public async Task A_refused_confirmation_asks_the_question_again_with_the_reason()
+    {
+        var (core, wireless, dialog, controller) = CodeDialog();
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        Assert.Equal(1, dialog.Shows);
+        core.Next = new ReplyErr("The request isn't valid right now");
+        dialog.PressMatch();
+        await controller.Matching;
+        Assert.IsType<WirelessConfirmCommand>(Assert.Single(core.Sent));
+        // Shown confirmed at once, then the question again with the reason; the dialog stayed open throughout.
+        Assert.True(dialog.Fills[1].Prompt.Confirmed);
+        var (again, error) = dialog.Fills[^1];
+        Assert.False(again.Confirmed);
+        Assert.Equal("The request isn't valid right now", error);
+        Assert.True(dialog.IsOpen);
+        Assert.Equal(0, dialog.Hides);
+        // Asked again, the same answer goes out once more.
+        core.Next = new ReplyOk(new DoneValue());
+        dialog.PressMatch();
+        await controller.Matching;
+        Assert.Equal(2, core.Sent.Count);
+        Assert.True(dialog.Fills[^1].Prompt.Confirmed);
+        Assert.Null(dialog.Fills[^1].Error);
+    }
+
+    [Fact]
+    public async Task An_accepted_confirmation_waits_and_the_dialog_closes_with_the_phase()
+    {
+        var (core, wireless, dialog, controller) = CodeDialog();
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        dialog.PressMatch();
+        await controller.Matching;
+        Assert.True(dialog.Fills[^1].Prompt.Confirmed);
+        // The state catches up: shown as it says, still open.
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing_confirmed.json")));
+        Assert.True(dialog.Fills[^1].Prompt.Confirmed);
+        Assert.True(dialog.IsOpen);
+        // Connected: it closes by itself and sends nothing more.
+        core.Raise(new StateEvent(StateOf("state_wireless_connected.json")));
+        await controller.Opening;
+        Assert.Equal(1, dialog.Hides);
+        Assert.False(dialog.IsOpen);
+        Assert.IsType<WirelessConfirmCommand>(Assert.Single(core.Sent));
+    }
+
+    [Fact]
+    public async Task Cancel_while_waiting_for_the_iphone_ends_the_attempt()
+    {
+        var (core, wireless, dialog, controller) = CodeDialog();
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing_confirmed.json")));
+        Assert.Equal(1, dialog.Shows);
+        dialog.Close(CodeDialogClose.Cancelled);
+        await controller.Opening;
+        Assert.IsType<WirelessCancelCommand>(Assert.Single(core.Sent));
+    }
+
+    [Fact]
+    public async Task A_code_dialog_that_could_not_be_shown_shows_when_another_dialog_closes()
+    {
+        var (core, wireless, dialog, controller) = CodeDialog();
+        dialog.FailNext = true;
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        await controller.Opening;
+        Assert.Equal(0, dialog.Shows);
+        Assert.Empty(core.Sent);
+        // The same state again changes nothing (the code is the same)...
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        Assert.Equal(0, dialog.Shows);
+        // ...but another dialog closing lets it show.
+        controller.Retry();
+        Assert.Equal(1, dialog.Shows);
+    }
+
+    [Fact]
+    public async Task A_code_dialog_that_could_not_be_shown_shows_on_an_error_or_a_window()
+    {
+        var (core, wireless, dialog, controller) = CodeDialog();
+        dialog.CanShow = false;
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        Assert.Equal(0, dialog.Shows);
+        dialog.CanShow = true;
+        dialog.FailNext = true;
+        controller.Retry();
+        await controller.Opening;
+        Assert.Equal(0, dialog.Shows);
+        // A refused command (its Error changes): looked at again.
+        core.Next = new ReplyErr("refused");
+        await wireless.RegenerateCommand.ExecuteAsync(null);
+        Assert.Equal(1, dialog.Shows);
+    }
+
+    [Fact]
+    public async Task A_refused_info_is_asked_once_per_steps_card()
+    {
+        var core = new ScriptedCore { Next = new ReplyErr("Not allowed") };
+        var wireless = new WirelessViewModel(new EventHub(core, new InlineDispatcher()));
+        var errors = new List<string?>();
+        wireless.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(WirelessViewModel.Error))
+            {
+                errors.Add(wireless.Error);
+            }
+        };
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        await wireless.InfoAsked;
+        Assert.Equal("Not allowed", wireless.Error);
+        // The card stays: not asked again, the refusal not said again.
+        foreach (var _ in Enumerable.Range(0, 3))
+        {
+            core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+            await wireless.InfoAsked;
+        }
+        Assert.Single(core.Sent);
+        Assert.Single(errors, e => e is not null);
+        // The card goes and comes back: asked again, once.
+        core.Raise(new StateEvent(StateOf("state_wireless_reconnecting.json")));
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        await wireless.InfoAsked;
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        Assert.Equal(2, core.Sent.Count);
+        Assert.All(core.Sent, c => Assert.IsType<WirelessInfoCommand>(c));
     }
 
     [Fact]

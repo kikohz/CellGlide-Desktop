@@ -461,14 +461,7 @@ public sealed partial class SpeedPage : Page
     /// <summary>Shows a dialog; one that cannot be shown (another is up) counts as dismissed.</summary>
     static async Task<ContentDialogResult> ShowAsync(ContentDialog dialog)
     {
-        try
-        {
-            return await dialog.ShowAsync();
-        }
-        catch (Exception)
-        {
-            return ContentDialogResult.None;
-        }
+        return await Dialogs.ShowAsync(dialog) ?? ContentDialogResult.None;
     }
 
     /// <summary>Changes the app's preferences (read first if they never came); a failure is shown on the page.</summary>

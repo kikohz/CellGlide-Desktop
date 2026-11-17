@@ -40,6 +40,15 @@ public class XBindTests
         }
         var window = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml.cs"));
         Assert.Contains("new CodeDialogHost(", window);
+        // Every dialog goes through Dialogs.ShowAsync, so a code dialog that could not be shown is tried again
+        // when another closes.
+        var direct = AppSources.CodeFiles()
+            .Where(f => !f.File.EndsWith("Dialogs.cs", StringComparison.Ordinal))
+            .Where(f => System.Text.RegularExpressions.Regex.IsMatch(f.Text, @"(?<!Dialogs)\.ShowAsync\(\)"))
+            .Select(f => f.File)
+            .ToList();
+        Assert.Empty(direct);
+        Assert.Contains("Dialogs.Closed += _controller.Retry", host);
     }
 
     /// <summary>

@@ -105,7 +105,10 @@ public sealed partial class AboutPage : Page
         Render();
         try
         {
-            await new LicensesDialog(about.Licenses) { XamlRoot = XamlRoot }.ShowAsync();
+            if (await Dialogs.ShowAsync(new LicensesDialog(about.Licenses) { XamlRoot = XamlRoot }) is null)
+            {
+                Debug.WriteLine("CellGlide: the licenses dialog could not be shown (another dialog is up)");
+            }
         }
         catch (Exception ex)
         {

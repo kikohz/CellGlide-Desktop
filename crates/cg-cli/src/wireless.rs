@@ -765,7 +765,7 @@ mod tests {
             list_lines(&[phone("A", "Anna's iPhone"), stale], &zone),
             [
                 "1. Anna's iPhone · Paired with a code · 2025-11-13",
-                "2. Ben's iPhone · Paired over the cable · Pair again · 2025-11-13",
+                "2. Ben's iPhone · Paired over the cable · Needs pairing again · 2025-11-13",
             ]
         );
     }

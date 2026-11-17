@@ -511,7 +511,7 @@ wireless:
   paired:
     code: "Paired with a code"
     cable: "Paired over the cable"
-    stale: "Pair again"
+    stale: "Needs pairing again"
   action:
     connect: "Connect Wirelessly"
     cancel: "Cancel"

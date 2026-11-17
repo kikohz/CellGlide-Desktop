@@ -382,14 +382,7 @@ public sealed partial class SettingsPage : Page
             DefaultButton = ContentDialogButton.Close,
         };
         AutomationProperties.SetName(dialog, question);
-        try
-        {
-            return await dialog.ShowAsync() == ContentDialogResult.Primary;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+        return await Dialogs.ShowAsync(dialog) == ContentDialogResult.Primary;
     }
 
     async void OnPhoneChanged(object sender, SelectionChangedEventArgs e)
