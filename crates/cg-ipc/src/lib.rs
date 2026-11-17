@@ -154,6 +154,9 @@ pub enum Reason {
     /// The wireless pairings (and the access point's name and passphrase) can't be read or
     /// saved.
     WirelessStoreUnavailable,
+    /// Turning the wireless switch on was overtaken by a request turning it off before the
+    /// access point had been tried.
+    WirelessSwitchedOff,
 }
 
 #[cfg(test)]
@@ -183,6 +186,7 @@ impl Reason {
                 cause: wireless::ApFailure::MobileHotspotOn,
             },
             Reason::WirelessStoreUnavailable,
+            Reason::WirelessSwitchedOff,
         ];
         for reason in &all {
             match reason {
@@ -204,7 +208,8 @@ impl Reason {
                 | Reason::ShuttingDown
                 | Reason::BadDay
                 | Reason::WirelessUnavailable { .. }
-                | Reason::WirelessStoreUnavailable => {}
+                | Reason::WirelessStoreUnavailable
+                | Reason::WirelessSwitchedOff => {}
             }
         }
         all
@@ -234,6 +239,7 @@ impl Reason {
             Reason::BadDay => "reason.bad_day",
             Reason::WirelessUnavailable { .. } => "reason.wireless_unavailable",
             Reason::WirelessStoreUnavailable => "reason.wireless_store_unavailable",
+            Reason::WirelessSwitchedOff => "reason.wireless_switched_off",
         }
     }
 
@@ -367,9 +373,14 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireless: Option<wireless::WirelessStatus>,
     /// Offer "Connect wirelessly": the switch is on, this computer has the access point and the
-    /// pairing store, no session or wireless attempt runs and nothing is on USB.
+    /// pairing store, no session or wireless attempt runs, and no device on USB is in play (one a
+    /// connection would use that is not known to stay silent; two with none chosen are not).
     #[serde(default)]
     pub wireless_offered: bool,
+    /// The wireless switch is being turned on: the access point is being tried (a few seconds;
+    /// the switch shows as busy).
+    #[serde(default)]
+    pub wireless_checking: bool,
 }
 
 impl Snapshot {
@@ -586,7 +597,8 @@ mod tests {
     #[test]
     fn the_wireless_status_is_optional_on_the_wire() {
         let none = String::from_utf8(to_line(&Snapshot::default())).unwrap();
-        assert!(!none.contains("\"wireless\":"), "{none}");
+        let top: serde_json::Value = serde_json::from_str(&none).unwrap();
+        assert!(top.get("wireless").is_none(), "{none}");
         let old: Snapshot = from_line(none.trim_end().as_bytes()).unwrap();
         assert_eq!(old.wireless, None);
         let with = Snapshot {

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+use zeroize::Zeroize;
 
 pub trait DoctorApi: Send + Sync + 'static {
     fn run(&self) -> BoxFuture<'_, Vec<Check>>;
@@ -160,7 +161,7 @@ async fn client<C: AsyncRead + AsyncWrite + Unpin>(
                 return;
             }
         };
-        let reply = match from_line::<Request>(&line) {
+        let mut reply = match from_line::<Request>(&line) {
             Err(_) => Response::Error {
                 reason: Reason::BadRequest,
             },
@@ -253,7 +254,14 @@ async fn client<C: AsyncRead + AsyncWrite + Unpin>(
                 }
             }
         };
-        if w.write_all(&to_line(&reply)).await.is_err() {
+        let mut bytes = to_line(&reply);
+        let written = w.write_all(&bytes).await;
+        // The access point's passphrase is not left behind in memory once it went out.
+        if let Response::Wireless { info } = &mut reply {
+            info.passphrase.zeroize();
+            bytes.zeroize();
+        }
+        if written.is_err() {
             return;
         }
     }

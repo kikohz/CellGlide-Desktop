@@ -187,6 +187,7 @@ pub const KEYS: &[&str] = &[
     "reason.bad_day",
     "reason.wireless_unavailable",
     "reason.wireless_store_unavailable",
+    "reason.wireless_switched_off",
     "health.cause.channel",
     "health.cause.phone_network",
     "health.cause.computer_relay",

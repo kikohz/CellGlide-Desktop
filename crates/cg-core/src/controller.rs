@@ -49,6 +49,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use zeroize::Zeroizing;
 
 pub struct ControllerConfig {
     pub endpoint: MuxEndpoint,
@@ -462,6 +463,8 @@ enum Event {
     Wireless(u64, WirelessEvent),
     /// Whether the USB device (serial, mux id) answered the phone app's hello.
     UsbProbe(String, u32, bool),
+    /// How the switch check of that generation went (the access point is closed again).
+    SwitchCheck(u64, std::result::Result<(), SwitchFailure>),
 }
 
 /// Aborts the session's helper tasks unless the session is handed over.
@@ -549,7 +552,7 @@ struct Wireless {
     /// they are due again (they appeared since).
     probes: HashMap<String, UsbProbe>,
     /// The probe in flight, if any: (serial, mux id) and its task.
-    probing: Option<(String, u32, JoinHandle<()>)>,
+    probing: Option<(String, u32, JoinHandle<bool>)>,
     /// While the phase is `Pairing`: where the user's answer goes. Dropped (the question
     /// withdrawn) whenever the attempt ends.
     confirm: Option<tokio::sync::oneshot::Sender<bool>>,
@@ -558,10 +561,64 @@ struct Wireless {
     peer: Option<String>,
 }
 
+/// Why turning the wireless switch on did not work.
+#[derive(Clone, Copy, Debug)]
+enum SwitchFailure {
+    AccessPoint(ApFailure),
+    Store,
+}
+
+impl SwitchFailure {
+    fn error(self) -> CoreError {
+        match self {
+            SwitchFailure::AccessPoint(cause) => CoreError::WirelessUnavailable(cause),
+            SwitchFailure::Store => CoreError::WirelessStore,
+        }
+    }
+}
+
+/// The check that runs while the switch is being turned on, and who waits for it.
+struct SwitchCheck {
+    /// Tags its event; a cancelled check's late event is ignored.
+    generation: u64,
+    task: JoinHandle<()>,
+    replies: Vec<tokio::sync::oneshot::Sender<Result<()>>>,
+}
+
+/// Opens the access point with the stored name and passphrase, the way an attempt starts it,
+/// and drops it at once (the platform stops one access point before it starts the next).
+async fn open_and_close_access_point(
+    ports: &WirelessPorts,
+    store: Arc<WirelessStore>,
+) -> std::result::Result<(), SwitchFailure> {
+    let (ssid, passphrase) = match tokio::task::spawn_blocking(move || store.access_point()).await {
+        Ok(Ok((ssid, passphrase))) => (ssid, Zeroizing::new(passphrase)),
+        Ok(Err(error)) => {
+            tracing::warn!("wireless: no access point name: {error}");
+            return Err(SwitchFailure::Store);
+        }
+        Err(error) => {
+            tracing::warn!("wireless: no access point name: {error}");
+            return Err(SwitchFailure::Store);
+        }
+    };
+    let started = ports.access_point.start(&ssid, &passphrase).await;
+    drop(passphrase);
+    match started {
+        Ok(access_point) => {
+            drop(access_point);
+            Ok(())
+        }
+        Err(cause) => Err(SwitchFailure::AccessPoint(cause)),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct UsbProbe {
     last: Instant,
     due: bool,
+    /// Whether the phone app answered its hello, since the device last appeared.
+    answers: Option<bool>,
 }
 
 enum Choice {
@@ -619,6 +676,10 @@ struct Actor {
     label_seq: u64,
     monitor: HealthMonitor,
     wireless: Wireless,
+    /// Turning the wireless switch on, while the access point is tried.
+    switch_check: Option<SwitchCheck>,
+    /// Switch checks started, for their generations.
+    switch_checks: u64,
 }
 
 impl Actor {
@@ -672,6 +733,8 @@ impl Actor {
                 confirm: None,
                 peer: None,
             },
+            switch_check: None,
+            switch_checks: 0,
         }
     }
 
@@ -684,12 +747,20 @@ impl Actor {
         loop {
             tokio::select! {
                 message = messages.recv() => match message {
+                    // Turning the switch on is answered once the access point was tried, by
+                    // `Event::SwitchCheck`; the actor goes on meanwhile.
+                    Some(Message::Command(Command::SetWireless { enabled: true }, done))
+                        if !self.wireless_enabled() =>
+                    {
+                        self.check_switch(done, &events_tx);
+                    }
                     Some(Message::Command(command, done)) => {
                         let result = self.command(command, &events_tx).await;
                         self.publish();
                         let _ = done.send(result);
                     }
                     Some(Message::Shutdown(done)) => {
+                        self.cancel_switch_check(|| CoreError::ShuttingDown).await;
                         self.end_wireless(WirelessPhase::Off).await;
                         self.teardown().await;
                         self.publish();
@@ -697,6 +768,7 @@ impl Actor {
                         return;
                     }
                     None => {
+                        self.cancel_switch_check(|| CoreError::ShuttingDown).await;
                         self.end_wireless(WirelessPhase::Off).await;
                         self.teardown().await;
                         return;
@@ -815,11 +887,11 @@ impl Actor {
             Command::ConfirmCode { matches } => return self.confirm_code(matches).await,
             Command::ForgetPhone { peer_id } => return self.forget_phone(peer_id).await,
             Command::RegenerateAccessPoint => return self.regenerate_access_point().await,
+            // Turning it on from off goes to `check_switch` (in `run`); here it is already on.
             Command::SetWireless { enabled } => {
-                // Turning it on: see first that this computer can open the access point. An
-                // attempt can only run with the switch on, so none runs while this checks.
-                if enabled && !self.wireless_enabled() {
-                    self.check_access_point().await?;
+                if !enabled {
+                    self.cancel_switch_check(|| CoreError::WirelessSwitchedOff)
+                        .await;
                 }
                 self.settings.update(|s| s.wireless_enabled = enabled);
                 if !self.wireless_enabled() && self.wireless.phase.owns() {
@@ -883,40 +955,77 @@ impl Actor {
             .is_some_and(|store| store.records().iter().any(|r| r.peer_id == peer_id))
     }
 
-    /// Opens the access point and drops it at once, the way an attempt starts it (the platform
-    /// stops one access point before it starts the next). Without the platform the cause is
-    /// `Unsupported`; without the store, `WirelessStore`.
-    async fn check_access_point(&mut self) -> Result<()> {
+    /// Turning the switch on: opens the access point once and drops it at once, on a task of
+    /// its own (the start takes up to about 10 s, and the platform first waits for an earlier
+    /// access point to stop), so the actor goes on meanwhile. `done` is answered when it is over
+    /// (`Event::SwitchCheck`); a second request meanwhile waits for the same check. Without the
+    /// platform the cause is `Unsupported`; without the store, `WirelessStore`.
+    fn check_switch(
+        &mut self,
+        done: tokio::sync::oneshot::Sender<Result<()>>,
+        events: &mpsc::Sender<Event>,
+    ) {
+        if let Some(check) = self.switch_check.as_mut() {
+            check.replies.push(done);
+            return;
+        }
         let Some(ports) = self.config.wireless_ports.clone() else {
-            return Err(CoreError::WirelessUnavailable(ApFailure::Unsupported));
+            let _ = done.send(Err(CoreError::WirelessUnavailable(ApFailure::Unsupported)));
+            return;
         };
         let Some(store) = self.config.wireless.clone() else {
-            return Err(CoreError::WirelessStore);
+            let _ = done.send(Err(CoreError::WirelessStore));
+            return;
         };
-        let (ssid, passphrase) =
-            match tokio::task::spawn_blocking(move || store.access_point()).await {
-                Ok(Ok(pair)) => pair,
-                Ok(Err(error)) => {
-                    tracing::warn!("wireless: no access point name: {error}");
-                    return Err(CoreError::WirelessStore);
-                }
-                Err(error) => {
-                    tracing::warn!("wireless: no access point name: {error}");
-                    return Err(CoreError::WirelessStore);
-                }
-            };
-        let started = ports.access_point.start(&ssid, &passphrase).await;
-        drop(passphrase);
-        match started {
-            Ok(access_point) => {
-                drop(access_point);
+        self.switch_checks += 1;
+        let generation = self.switch_checks;
+        let tx = events.clone();
+        let task = tokio::spawn(async move {
+            let outcome = open_and_close_access_point(&ports, store).await;
+            let _ = tx.send(Event::SwitchCheck(generation, outcome)).await;
+        });
+        tracing::info!("wireless: checking that the access point can be opened");
+        self.switch_check = Some(SwitchCheck {
+            generation,
+            task,
+            replies: vec![done],
+        });
+    }
+
+    /// The switch check is over (the access point it opened is already closed): the switch is
+    /// on if it worked, and everyone who asked is answered.
+    fn switch_checked(&mut self, generation: u64, outcome: std::result::Result<(), SwitchFailure>) {
+        let Some(check) = self
+            .switch_check
+            .take_if(|check| check.generation == generation)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(()) => {
                 tracing::info!("wireless: the access point can be opened; switched on");
-                Ok(())
+                self.settings.update(|s| s.wireless_enabled = true);
             }
-            Err(cause) => {
-                tracing::warn!("wireless: the access point can't be opened ({cause}); stays off");
-                Err(CoreError::WirelessUnavailable(cause))
-            }
+            Err(failure) => tracing::warn!("wireless: {failure:?}; the switch stays off"),
+        }
+        self.publish();
+        for reply in check.replies {
+            let _ = reply.send(outcome.map_err(SwitchFailure::error));
+        }
+    }
+
+    /// Ends a switch check that is still running (turned off, or shutting down): the start is
+    /// dropped (the platform stops an access point that comes up after that at once), and
+    /// everyone who asked gets `error`.
+    async fn cancel_switch_check(&mut self, error: impl Fn() -> CoreError) {
+        let Some(check) = self.switch_check.take() else {
+            return;
+        };
+        check.task.abort();
+        let _ = check.task.await;
+        tracing::info!("wireless: the switch check was cancelled");
+        for reply in check.replies {
+            let _ = reply.send(Err(error()));
         }
     }
 
@@ -929,6 +1038,10 @@ impl Actor {
         if !self.is_paired(&peer_id) {
             return Err(CoreError::BadRequest);
         }
+        // Only an attempt that is about this phone (its session, a reconnect to it, or pairing
+        // it again) is ended. One still waiting or dialling without having picked it is left
+        // alone: every round reads the records again, and a dial takes the key from the store
+        // (`store.key`), so once the pairing is gone the phone is never dialled with it.
         if self.wireless.phase.owns() && self.wireless.peer.as_deref() == Some(peer_id.as_str()) {
             tracing::info!("wireless: forgetting the phone in use; ending the attempt");
             self.end_wireless(WirelessPhase::Off).await;
@@ -1167,27 +1280,77 @@ impl Actor {
 
     /// Whether the USB device a connection would use answers the phone app's hello (CellGlide
     /// sharing over the cable), asked here and now (bounded by the hello's own time limit).
+    /// A probe already on its way to this device is waited for rather than asked again.
     async fn usb_phone_answers(&mut self) -> bool {
         let Some(device) = self.selected_usb() else {
             return false;
         };
+        if self
+            .wireless
+            .probing
+            .as_ref()
+            .is_some_and(|(s, m, _)| *s == device.serial && *m == device.mux_id)
+            && let Some((_, _, task)) = self.wireless.probing.take()
+            && let Ok(answers) = task.await
+        {
+            self.note_usb_answer(&device.serial, answers);
+            return answers;
+        }
         self.wireless.probes.insert(
             device.serial.clone(),
             UsbProbe {
                 last: Instant::now(),
                 due: false,
+                answers: None,
             },
         );
-        let phone = Phone::usb(self.config.endpoint.clone(), device);
-        phone::read_hello(&phone).await.is_ok()
+        let phone = Phone::usb(self.config.endpoint.clone(), device.clone());
+        let answers = phone::read_hello(&phone).await.is_ok();
+        self.note_usb_answer(&device.serial, answers);
+        answers
     }
 
-    /// While a wireless attempt runs, asks the USB device a connection would use whether the
-    /// phone app answers, in the background: once after it appears (attach or usbmuxd joined
-    /// again), and at most once per `usb_probe_every`. An iPad, or an iPhone only charging, is
-    /// left alone and the wireless session goes on.
+    /// Remembers whether the phone app on this USB device answered its hello (a probe, or the
+    /// USB connection's own hello), until the device appears again.
+    fn note_usb_answer(&mut self, serial: &str, answers: bool) {
+        self.wireless
+            .probes
+            .entry(serial.to_string())
+            .and_modify(|probe| probe.answers = Some(answers))
+            .or_insert(UsbProbe {
+                last: Instant::now(),
+                due: false,
+                answers: Some(answers),
+            });
+    }
+
+    /// Whether USB is in play for the wireless button: there is a device a connection would use
+    /// and it is not known to stay silent (a charging iPad, an iPhone not sharing). Two devices
+    /// with none chosen are not in play.
+    fn usb_in_play(&self) -> bool {
+        self.selected_usb().is_some_and(|device| {
+            self.wireless
+                .probes
+                .get(&device.serial)
+                .and_then(|probe| probe.answers)
+                != Some(false)
+        })
+    }
+
+    /// Asks the USB device a connection would use whether the phone app answers, in the
+    /// background: once after it appears (attach or usbmuxd joined again), and at most once per
+    /// `usb_probe_every`. While a wireless attempt runs, one that answers takes over; an iPad,
+    /// or an iPhone only charging, is left alone and the wireless session goes on. With the
+    /// switch on and nothing going on, the answer decides whether wireless is offered.
     fn probe_usb(&mut self, events: &mpsc::Sender<Event>) {
-        if !self.wireless.phase.owns()
+        let idle = self.wireless_enabled()
+            && self.config.wireless_ports.is_some()
+            && self.config.wireless.is_some()
+            && self.active.is_none()
+            && !self.connecting
+            // A USB connection that is wanted asks the hello itself.
+            && !self.wants();
+        if !(self.wireless.phase.owns() || idle)
             || self
                 .wireless
                 .probing
@@ -1211,6 +1374,7 @@ impl Actor {
             UsbProbe {
                 last: now,
                 due: false,
+                answers: None,
             },
         );
         let (serial, mux_id) = (device.serial.clone(), device.mux_id);
@@ -1221,16 +1385,18 @@ impl Actor {
             async move {
                 let answers = phone::read_hello(&phone).await.is_ok();
                 let _ = tx.send(Event::UsbProbe(serial, mux_id, answers)).await;
+                answers
             }
         });
         self.wireless.probing = Some((serial, mux_id, task));
     }
 
     /// A device appeared on USB (attached, or listed when usbmuxd was joined again): it may be
-    /// asked again.
+    /// asked again, and what it answered before no longer counts.
     fn usb_probe_due(&mut self, serial: &str) {
         if let Some(probe) = self.wireless.probes.get_mut(serial) {
             probe.due = true;
+            probe.answers = None;
         }
     }
 
@@ -1442,7 +1608,9 @@ impl Actor {
             Event::Wireless(attempt, event) if attempt == self.wireless.attempt => {
                 self.wireless_event(event, events).await;
             }
+            Event::SwitchCheck(generation, outcome) => self.switch_checked(generation, outcome),
             Event::UsbProbe(serial, mux_id, answers) => {
+                self.note_usb_answer(&serial, answers);
                 if self
                     .wireless
                     .probing
@@ -1458,7 +1626,7 @@ impl Actor {
                         .is_some_and(|d| d.serial == serial && d.mux_id == mux_id)
                 {
                     self.switch_to_usb().await;
-                } else if !answers {
+                } else if !answers && self.wireless.phase.owns() {
                     tracing::info!("wireless: the device on USB does not share; staying wireless");
                 }
             }
@@ -1673,6 +1841,7 @@ impl Actor {
                     }
                     if let Some(probe) = self.wireless.probes.get_mut(&device.serial) {
                         probe.due = true;
+                        probe.answers = None;
                     }
                 }
                 self.devices = devices;
@@ -1780,7 +1949,12 @@ impl Actor {
         } else {
             (self.config.health, self.config.health_watch)
         };
-        let hello = phone::read_hello(&phone).await?;
+        let hello = phone::read_hello(&phone).await;
+        // Whether a USB device answers decides whether wireless is offered beside it.
+        if let Some(device) = phone.usb_device() {
+            self.note_usb_answer(&device.serial, hello.is_ok());
+        }
+        let hello = hello?;
         hello.validate()?;
         if !hello.has(capability::UDP_OVER_USB) {
             return Err(CoreError::PhoneTooOld);
@@ -2087,15 +2261,15 @@ impl Actor {
     }
 
     /// Whether to offer "Connect wirelessly": the switch is on, the platform and the store are
-    /// there, no session or attempt runs and nothing is on USB (an iPhone plugged in is used
-    /// over the cable).
+    /// there, no session or attempt runs and USB is not in play (`usb_in_play`: an iPhone that
+    /// shares over the cable is used over the cable).
     fn wireless_offered(&self) -> bool {
         self.wireless_enabled()
             && self.config.wireless_ports.is_some()
             && self.config.wireless.is_some()
             && self.active.is_none()
             && !self.wireless.phase.owns()
-            && self.devices.is_empty()
+            && !self.usb_in_play()
     }
 
     /// The wireless attempt for the snapshot; never the passphrase.
@@ -2146,6 +2320,7 @@ impl Actor {
             },
             wireless: self.wireless_status(),
             wireless_offered: self.wireless_offered(),
+            wireless_checking: self.switch_check.is_some(),
         };
         self.snapshot.send_if_modified(|current| {
             let changed = *current != next;
@@ -2185,6 +2360,7 @@ fn release_detail(reason: &Reason) -> String {
         Reason::BadDay => "badDay",
         Reason::WirelessUnavailable { .. } => "wirelessUnavailable",
         Reason::WirelessStoreUnavailable => "wirelessStoreUnavailable",
+        Reason::WirelessSwitchedOff => "wirelessSwitchedOff",
     };
     format!("released {name}")
 }

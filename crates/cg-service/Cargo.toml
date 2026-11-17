@@ -26,6 +26,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zeroize.workspace = true
 zbus.workspace = true
 
 # nix does not build on Windows; the service is Unix-only.

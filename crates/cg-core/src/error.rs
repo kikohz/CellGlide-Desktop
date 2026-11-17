@@ -46,6 +46,9 @@ pub enum CoreError {
     /// The wireless pairing store is missing or could not be read or written.
     #[error("the wireless pairing store is unavailable")]
     WirelessStore,
+    /// Turning the wireless switch on was overtaken by turning it off.
+    #[error("the wireless switch was turned off during its check")]
+    WirelessSwitchedOff,
 }
 
 impl CoreError {
@@ -83,6 +86,7 @@ impl CoreError {
             CoreError::BadRequest => Reason::BadRequest,
             CoreError::WirelessUnavailable(cause) => Reason::WirelessUnavailable { cause: *cause },
             CoreError::WirelessStore => Reason::WirelessStoreUnavailable,
+            CoreError::WirelessSwitchedOff => Reason::WirelessSwitchedOff,
         }
     }
 }

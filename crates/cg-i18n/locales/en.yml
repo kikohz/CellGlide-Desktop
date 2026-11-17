@@ -62,6 +62,7 @@ reason:
   bad_day: "Only the last 7 days can be viewed (date format YYYY-MM-DD)"
   wireless_unavailable: "This computer can't open a wireless network for the iPhone: %{cause}"
   wireless_store_unavailable: "The wireless pairings can't be read or saved"
+  wireless_switched_off: "Wireless connection was turned off before the check finished"
 check:
   fix: "Fix: %{fix}"
   service:

@@ -753,6 +753,7 @@ dependencies = [
  "windows 0.62.2",
  "windows-service",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]

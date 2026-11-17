@@ -1928,13 +1928,13 @@ async fn wireless_is_offered_only_when_it_can_start() {
     w.r.controller.send(Command::CancelWireless).await.unwrap();
     wait_for(&w.r.controller, "offered", offered).await;
 
-    // A USB session, then just a device on USB.
+    // A USB session, then the same iPhone (it answered: it shares) still on USB.
     connect_phone(&w.r).await;
     assert!(!offered(&w.r.controller.snapshot()));
     w.r.controller.send(Command::Disconnect).await.unwrap();
     let snap = wait_for(&w.r.controller, "not connected", |s| !connected(s)).await;
     assert!(!snap.devices.is_empty());
-    assert!(!offered(&snap), "a device on USB");
+    assert!(!offered(&snap), "an iPhone that shares on USB");
     w.r.mux.detach(1);
     wait_for(&w.r.controller, "offered", offered).await;
 
@@ -2339,4 +2339,167 @@ async fn a_phone_found_takes_the_not_sharing_hint_away() {
     .await;
     assert!(p.fake.browse_count() >= 40);
     assert!(p.fake.is_up(), "the window is not over");
+}
+
+// --- Task 7 fix round 1.
+
+fn switch_off_config(config: &mut ControllerConfig) {
+    config.settings = SettingsSource::Memory(Stored {
+        auto_connect: false,
+        wireless_enabled: false,
+        ..Stored::default()
+    });
+}
+
+fn checking(s: &Snapshot) -> bool {
+    s.wireless_checking
+}
+
+/// I1: while the switch check waits for the access point, the controller goes on (other
+/// commands are answered, snapshots flow); turning the switch off ends the check, its
+/// request is answered with `WirelessSwitchedOff`, and no access point is left.
+#[tokio::test]
+async fn the_switch_check_does_not_hold_the_controller_up() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), switch_off_config).await;
+    w.fake.set_start_delay(Duration::from_secs(60));
+    let controller = w.r.controller.clone();
+    let on = tokio::spawn(async move {
+        controller
+            .send(Command::SetWireless { enabled: true })
+            .await
+    });
+    wait_for(&w.r.controller, "checking", checking).await;
+    eventually("the start", Duration::from_secs(5), || {
+        w.fake.start_attempts() == 1
+    })
+    .await;
+    let answered = tokio::time::timeout(
+        Duration::from_secs(2),
+        w.r.controller.send(Command::SetSettings {
+            auto_connect: Some(true),
+            phone: None,
+            strict_dns: None,
+        }),
+    )
+    .await;
+    assert!(matches!(answered, Ok(Ok(()))), "{answered:?}");
+    let snap = wait_for(&w.r.controller, "auto connect on", |s| {
+        s.settings.auto_connect
+    })
+    .await;
+    assert!(checking(&snap) && !snap.settings.wireless_enabled && !offered(&snap));
+    assert!(!on.is_finished());
+
+    w.r.controller
+        .send(Command::SetWireless { enabled: false })
+        .await
+        .unwrap();
+    let result = on.await.unwrap();
+    assert_eq!(result.unwrap_err().reason(), Reason::WirelessSwitchedOff);
+    let snap = w.r.controller.snapshot();
+    assert!(!checking(&snap) && !snap.settings.wireless_enabled);
+    assert_eq!(w.fake.starts(), 0, "the start was dropped");
+    assert!(!w.fake.is_up());
+}
+
+/// I1: a second request to turn the switch on while it is being checked waits for the same
+/// check: one access point, opened and closed once, and both answered.
+#[tokio::test]
+async fn turning_the_switch_on_twice_checks_once() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), switch_off_config).await;
+    w.fake.set_start_delay(Duration::from_millis(300));
+    let (a, b) = (w.r.controller.clone(), w.r.controller.clone());
+    let first = tokio::spawn(async move { a.send(Command::SetWireless { enabled: true }).await });
+    wait_for(&w.r.controller, "checking", checking).await;
+    let second = tokio::spawn(async move { b.send(Command::SetWireless { enabled: true }).await });
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(w.fake.start_attempts(), 1);
+    assert_eq!((w.fake.starts(), w.fake.stops()), (1, 1));
+    assert!(!w.fake.is_up());
+    let snap = w.r.controller.snapshot();
+    assert!(snap.settings.wireless_enabled && !checking(&snap));
+}
+
+/// I1: shutting down during the check answers it, and leaves no access point.
+#[tokio::test]
+async fn shutting_down_during_the_switch_check() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), switch_off_config).await;
+    w.fake.set_start_delay(Duration::from_secs(60));
+    let controller = w.r.controller.clone();
+    let on = tokio::spawn(async move {
+        controller
+            .send(Command::SetWireless { enabled: true })
+            .await
+    });
+    wait_for(&w.r.controller, "checking", checking).await;
+    w.r.controller.shutdown().await;
+    let result = tokio::time::timeout(Duration::from_secs(2), on)
+        .await
+        .expect("answered")
+        .unwrap();
+    assert_eq!(result.unwrap_err().reason(), Reason::ShuttingDown);
+    assert_eq!(w.fake.starts(), 0);
+    assert!(!w.fake.is_up());
+}
+
+/// I2: a device on USB whose phone app never answers (a charging iPad) does not hide the
+/// wireless button once it was asked; replugged, it is in play again until asked again.
+#[tokio::test]
+async fn a_silent_usb_device_is_offered_beside_after_its_probe() {
+    let w = wireless_rig().await;
+    let (addr, count) = not_sharing().await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.r.mux.attach(device("aaaa", 1));
+    wait_for(&w.r.controller, "offered after the probe", |s| {
+        s.devices.len() == 1 && offered(s)
+    })
+    .await;
+    assert_eq!(probes(&count), 1);
+}
+
+/// I2: an iPhone sharing over USB (auto connect off, so nothing connects it) is in play: no
+/// wireless button.
+#[tokio::test]
+async fn a_sharing_iphone_on_usb_is_not_offered_beside() {
+    let w = wireless_rig().await;
+    w.r.mux.attach(device("aaaa", 1));
+    wait_for(&w.r.controller, "idle", |s| s.state == ConnState::Idle).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let snap = w.r.controller.snapshot();
+    assert!(!connected(&snap) && !offered(&snap), "{snap:?}");
+}
+
+/// I2: two devices with none chosen: no connection would use either, so wireless is offered.
+#[tokio::test]
+async fn two_devices_none_chosen_are_offered_beside() {
+    let w = wireless_rig().await;
+    w.r.mux.attach(device("aaaa", 1));
+    w.r.mux.attach(device("bbbb", 2));
+    wait_for(&w.r.controller, "offered beside two devices", |s| {
+        s.devices.len() == 2 && offered(s)
+    })
+    .await;
+}
+
+/// M1: the not-sharing minute counts from the first device seen joined, not from the start.
+#[tokio::test(start_paused = true)]
+async fn the_not_sharing_minute_counts_from_the_first_device_joined() {
+    let p = paused_rig();
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    paused_wait(&p.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(100)).await;
+    assert_eq!(hint(&p.controller.snapshot()), None);
+    p.fake.add_client(at(77));
+    let joined = tokio::time::Instant::now();
+    paused_wait(&p.controller, "the hint", |s| {
+        hint(s) == Some(WirelessFailure::NotSharing)
+    })
+    .await;
+    let after = joined.elapsed();
+    assert!(after >= Duration::from_secs(60), "after {after:?}");
+    assert!(after <= Duration::from_secs(66), "after {after:?}");
 }

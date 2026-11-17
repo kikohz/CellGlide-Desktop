@@ -317,7 +317,7 @@ async fn drive(
         .await;
     let store = context.store.clone();
     let (ssid, passphrase) = match tokio::task::spawn_blocking(move || store.access_point()).await {
-        Ok(Ok(pair)) => pair,
+        Ok(Ok((ssid, passphrase))) => (ssid, zeroize::Zeroizing::new(passphrase)),
         Ok(Err(error)) => {
             tracing::warn!("wireless: no access point name: {error}");
             return WirelessFailure::StoreUnavailable;
@@ -505,6 +505,9 @@ impl<'a> Attempt<'a> {
         let mut unknown_seen = false;
         // Any phone advertising CellGlide in this window (for the not-sharing hint).
         let mut found_any = false;
+        // When something was first seen joined to the access point in this window: the
+        // not-sharing hint counts its minute from then.
+        let mut first_client: Option<Instant> = None;
         // What holds the attempt up while it waits (several unpaired phones, a busy phone).
         let mut hint: Option<WirelessFailure> = None;
         // The (name clash, hint) last shown with the window's phase.
@@ -525,6 +528,9 @@ impl<'a> Attempt<'a> {
                 found = self.browse(local) => found,
                 () = access_point.lost() => return Err(lost()),
             };
+            if first_client.is_none() && !access_point.clients().is_empty() {
+                first_client = Some(round);
+            }
             if !found.is_empty() {
                 found_any = true;
                 if hint == Some(WirelessFailure::NotSharing) {
@@ -533,8 +539,7 @@ impl<'a> Attempt<'a> {
             } else if window.pairs()
                 && !found_any
                 && hint.is_none()
-                && round.duration_since(window.since) >= NOT_SHARING_AFTER
-                && !access_point.clients().is_empty()
+                && first_client.is_some_and(|at| round.duration_since(at) >= NOT_SHARING_AFTER)
             {
                 // Something joined, yet nothing advertises CellGlide: its app is not sharing, or
                 // its VPN mode is on.
