@@ -527,4 +527,4 @@ wireless:
     paired: "已配对的 iPhone"
   cli:
     confirm_prompt: "iPhone 上显示的验证码一致吗？(y/N)"
-    not_terminal: "这里无法询问（不是终端），按「不一致」处理。请在 CellGlide 应用里确认验证码。"
+    not_terminal: "这里无法询问（不是终端）。验证码只能在终端或 CellGlide 应用里确认，所以这次无线连接已取消。"

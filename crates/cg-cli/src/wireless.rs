@@ -8,7 +8,7 @@ use cg_ipc::wireless::{PairedPhone, WirelessInfo, WirelessPhaseView, WirelessSta
 use cg_ipc::{ConnState, Request, Response, Snapshot, describe};
 use std::future::Future;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// The whole attempt may take this long: the service gives up after 300 seconds.
 pub const LIMIT: Duration = Duration::from_secs(330);
@@ -20,37 +20,78 @@ pub trait Service {
 
 /// Asks the person whether the code on the iPhone is the same.
 pub trait Asker {
-    /// Whether a person can answer. Without one the question is not asked: it counts as no.
+    /// Whether a person can answer. Without one the question is not asked.
     fn interactive(&self) -> bool;
-    /// Starts asking; the answer arrives later, so Ctrl-C is heard meanwhile.
-    fn ask(&self) -> oneshot::Receiver<bool>;
+    /// Shows the question for the code now on screen. What was typed before this is thrown
+    /// away: it was not an answer to this question.
+    fn prompt(&self);
+    /// The answer to the latest question: `Some(matches)` for a line typed, `None` when there
+    /// will be none (input ended or failed, e.g. a Ctrl-C interrupting the read). Safe to
+    /// drop and call again.
+    async fn answer(&self) -> Option<bool>;
 }
 
-/// The terminal: the question goes to stderr and the answer is read on a thread of its own,
-/// which a Ctrl-C leaves behind (the process exits).
-pub struct Terminal;
+/// Answers from lines of input that one long-lived reader thread forwards. A new question takes
+/// the next line, never a thread of its own: an abandoned read would eat the next answer.
+pub struct LineAsker {
+    interactive: bool,
+    /// Lines typed; `None` ends the input (end of file or a read error).
+    lines: tokio::sync::Mutex<mpsc::UnboundedReceiver<Option<String>>>,
+}
 
-impl Asker for Terminal {
-    fn interactive(&self) -> bool {
-        use std::io::IsTerminal;
-        std::io::stdin().is_terminal()
+impl LineAsker {
+    pub fn new(interactive: bool, lines: mpsc::UnboundedReceiver<Option<String>>) -> LineAsker {
+        LineAsker {
+            interactive,
+            lines: tokio::sync::Mutex::new(lines),
+        }
     }
 
-    fn ask(&self) -> oneshot::Receiver<bool> {
+    /// Standard input. Not a terminal: nothing is read. The reader thread is left behind when
+    /// the process exits.
+    pub fn terminal() -> LineAsker {
+        use std::io::IsTerminal;
+        let interactive = std::io::stdin().is_terminal();
+        let (tx, rx) = mpsc::unbounded_channel();
+        if interactive {
+            std::thread::spawn(move || {
+                loop {
+                    let mut line = String::new();
+                    match std::io::stdin().read_line(&mut line) {
+                        Ok(n) if n > 0 => {
+                            if tx.send(Some(line)).is_err() {
+                                break;
+                            }
+                        }
+                        _ => {
+                            let _ = tx.send(None);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        LineAsker::new(interactive, rx)
+    }
+}
+
+impl Asker for LineAsker {
+    fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn prompt(&self) {
         use std::io::Write;
-        let (tx, rx) = oneshot::channel();
-        if !self.interactive() {
-            let _ = tx.send(false);
-            return rx;
+        if let Ok(mut lines) = self.lines.try_lock() {
+            while lines.try_recv().is_ok() {}
         }
         eprint!("{} ", tr("wireless.cli.confirm_prompt", &[]));
         let _ = std::io::stderr().flush();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let yes = std::io::stdin().read_line(&mut line).is_ok() && is_yes(&line);
-            let _ = tx.send(yes);
-        });
-        rx
+    }
+
+    async fn answer(&self) -> Option<bool> {
+        let line = self.lines.lock().await.recv().await??;
+        Some(is_yes(&line))
     }
 }
 
@@ -231,6 +272,8 @@ pub enum Outcome {
     Cancelled,
     /// 330 seconds passed: the attempt was cancelled.
     TimedOut,
+    /// A code needs an answer and nobody can give one here: the attempt was cancelled.
+    NoTerminal,
     ServiceStopped,
 }
 
@@ -239,7 +282,11 @@ impl Outcome {
         match self {
             Outcome::Connected => 0,
             Outcome::Cancelled => 130,
-            Outcome::Failed | Outcome::Gone | Outcome::TimedOut | Outcome::ServiceStopped => 1,
+            Outcome::Failed
+            | Outcome::Gone
+            | Outcome::TimedOut
+            | Outcome::NoTerminal
+            | Outcome::ServiceStopped => 1,
         }
     }
 }
@@ -255,7 +302,7 @@ pub async fn drive<S: Service, A: Asker>(
     emit: &mut impl FnMut(String),
 ) -> Outcome {
     let mut printer = PhasePrinter::default();
-    let mut pending: Option<oneshot::Receiver<bool>> = None;
+    let mut pending = false;
     let deadline = tokio::time::sleep(limit);
     tokio::pin!(deadline, cancel);
     loop {
@@ -266,15 +313,12 @@ pub async fn drive<S: Service, A: Asker>(
                 emit(tr("cli.wireless_cancelled", &[]));
                 return Outcome::Cancelled;
             }
-            answer = async {
-                match pending.as_mut() {
-                    Some(rx) => rx.await,
-                    None => std::future::pending().await,
-                }
-            }, if pending.is_some() => {
-                pending = None;
-                let matches = answer.unwrap_or(false);
-                if let Err(error) = service.send(Request::ConfirmCode { matches }).await {
+            answer = asker.answer(), if pending => {
+                pending = false;
+                // No answer (input ended or was interrupted) is not a no: nothing is sent.
+                if let Some(matches) = answer
+                    && let Err(error) = service.send(Request::ConfirmCode { matches }).await
+                {
                     emit(tr("cli.wireless_answer_failed", &[("error", &error)]));
                 }
             }
@@ -296,8 +340,11 @@ pub async fn drive<S: Service, A: Asker>(
                 if progress.ask {
                     if !asker.interactive() {
                         emit(tr("wireless.cli.not_terminal", &[]));
+                        let _ = service.send(Request::CancelWireless).await;
+                        return Outcome::NoTerminal;
                     }
-                    pending = Some(asker.ask());
+                    asker.prompt();
+                    pending = true;
                 }
             }
             () = &mut deadline => {
@@ -456,39 +503,6 @@ mod tests {
         }
     }
 
-    /// A person who answers at once, or never (a prompt that stays blocked on stdin).
-    struct Person {
-        interactive: bool,
-        answer: Option<bool>,
-        silent: Mutex<Vec<oneshot::Sender<bool>>>,
-    }
-
-    impl Person {
-        fn new(interactive: bool, answer: Option<bool>) -> Person {
-            Person {
-                interactive,
-                answer,
-                silent: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Asker for Person {
-        fn interactive(&self) -> bool {
-            self.interactive
-        }
-        fn ask(&self) -> oneshot::Receiver<bool> {
-            let (tx, rx) = oneshot::channel();
-            match self.answer {
-                Some(answer) => {
-                    let _ = tx.send(answer);
-                }
-                None => self.silent.lock().unwrap().push(tx),
-            }
-            rx
-        }
-    }
-
     fn channel(snapshots: Vec<Snapshot>) -> (mpsc::Sender<Snapshot>, mpsc::Receiver<Snapshot>) {
         let (tx, rx) = mpsc::channel(32);
         for snapshot in snapshots {
@@ -497,20 +511,53 @@ mod tests {
         (tx, rx)
     }
 
+    /// One more thing to happen at a given time: a snapshot, or a line typed (`None`: the
+    /// input ended or failed).
+    enum Step {
+        Snap(Box<Snapshot>),
+        Line(Option<&'static str>),
+    }
+
+    fn shown(snapshot: Snapshot) -> Step {
+        Step::Snap(Box::new(snapshot))
+    }
+
+    type Lines = mpsc::UnboundedSender<Option<String>>;
+
+    /// A person at a terminal (or not) whose lines come from the sender.
+    fn person(interactive: bool) -> (LineAsker, Lines) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (LineAsker::new(interactive, rx), tx)
+    }
+
+    /// Runs `drive` while a task plays the timeline (milliseconds from the start) into it.
     async fn run(
         service: &Fake,
-        person: &Person,
-        snapshots: Vec<Snapshot>,
+        (asker, lines): (LineAsker, Lines),
+        timeline: Vec<(u64, Step)>,
         cancel: impl Future<Output = ()>,
         limit: Duration,
     ) -> (Outcome, Vec<String>) {
-        let (_tx, mut rx) = channel(snapshots);
-        let mut lines = Vec::new();
-        let outcome = drive(service, person, &mut rx, cancel, limit, &mut |l| {
-            lines.push(l)
+        let (snaps, mut rx) = mpsc::channel(32);
+        let player = tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            for (at, step) in timeline {
+                tokio::time::sleep_until(start + Duration::from_millis(at)).await;
+                match step {
+                    Step::Snap(snapshot) => snaps.send(*snapshot).await.unwrap(),
+                    Step::Line(line) => lines.send(line.map(str::to_string)).unwrap(),
+                }
+            }
+            // Nothing ends on its own: the senders stay open.
+            std::future::pending::<()>().await;
+        });
+        let mut out = Vec::new();
+        let outcome = drive(service, &asker, &mut rx, cancel, limit, &mut |l| {
+            out.push(l)
         })
         .await;
-        (outcome, lines)
+        player.abort();
+        (outcome, out)
     }
 
     #[test]
@@ -723,48 +770,51 @@ mod tests {
         );
     }
 
+    fn code(code: &str, confirmed: bool) -> WirelessPhaseView {
+        WirelessPhaseView::Pairing {
+            code: code.into(),
+            phone_name: None,
+            confirmed,
+        }
+    }
+
     #[tokio::test]
-    async fn without_a_terminal_the_code_question_counts_as_no() {
+    async fn without_a_terminal_the_code_cancels_the_attempt() {
         let _lang = english();
         let service = Fake::default();
-        let person = Person::new(false, Some(false));
         let (outcome, lines) = run(
             &service,
-            &person,
-            vec![
-                snap(status(pairing(false))),
-                snap(status(WirelessPhaseView::Failed {
-                    reason: WirelessFailure::PairingFailed,
-                })),
-            ],
+            person(false),
+            vec![(0, shown(snap(status(pairing(false)))))],
             std::future::pending(),
             LIMIT,
         )
         .await;
-        assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(
-            *service.sent.lock().unwrap(),
-            [Request::ConfirmCode { matches: false }]
-        );
+        assert_eq!(outcome, Outcome::NoTerminal);
+        assert_eq!(outcome.exit_code(), 1);
+        // Not a "no" to the iPhone: the attempt is cancelled.
+        assert_eq!(*service.sent.lock().unwrap(), [Request::CancelWireless]);
+        let note = lines.last().unwrap();
         assert!(
-            lines.iter().any(|l| l.starts_with("Can't ask here")),
+            note.starts_with("Can't ask here") && note.contains("cancelled"),
             "{lines:?}"
         );
-        assert!(lines.contains(&"Pairing didn't finish, and nothing was saved".to_string()));
     }
 
     #[tokio::test]
-    async fn a_yes_is_sent_as_a_match() {
+    async fn a_yes_is_sent_as_a_match_and_earlier_typing_is_not_an_answer() {
         let _lang = english();
         let service = Fake::default();
-        let person = Person::new(true, Some(true));
         let (outcome, lines) = run(
             &service,
-            &person,
+            person(true),
             vec![
-                snap(status(pairing(false))),
-                snap(status(pairing(true))),
-                snap(status(WirelessPhaseView::Connected)),
+                // Typed before the question was shown.
+                (0, Step::Line(Some("n\n"))),
+                (0, shown(snap(status(pairing(false))))),
+                (40, Step::Line(Some("y\n"))),
+                (80, shown(snap(status(pairing(true))))),
+                (120, shown(snap(status(WirelessPhaseView::Connected)))),
             ],
             std::future::pending(),
             LIMIT,
@@ -776,8 +826,92 @@ mod tests {
             *service.sent.lock().unwrap(),
             [Request::ConfirmCode { matches: true }]
         );
-        // Interactive: no "can't ask" note.
         assert!(!lines.iter().any(|l| l.starts_with("Can't ask here")));
+    }
+
+    #[tokio::test]
+    async fn an_answer_typed_after_the_code_changed_belongs_to_the_new_code() {
+        let _lang = english();
+        let service = Fake::default();
+        let (outcome, lines) = run(
+            &service,
+            person(true),
+            vec![
+                (0, shown(snap(status(code("384271", false))))),
+                // The first question is never answered; the code changes.
+                (40, shown(snap(status(code("102938", false))))),
+                (80, Step::Line(Some("y\n"))),
+                (120, shown(snap(status(WirelessPhaseView::Connected)))),
+            ],
+            std::future::pending(),
+            LIMIT,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Connected);
+        assert_eq!(
+            *service.sent.lock().unwrap(),
+            [Request::ConfirmCode { matches: true }]
+        );
+        assert!(lines.iter().any(|l| l.contains("384 271")));
+        assert!(lines.iter().any(|l| l.contains("102 938")), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn a_no_is_sent_as_no() {
+        let _lang = english();
+        let service = Fake::default();
+        let (outcome, _) = run(
+            &service,
+            person(true),
+            vec![
+                (0, shown(snap(status(pairing(false))))),
+                (40, Step::Line(Some("\n"))),
+                (
+                    80,
+                    shown(snap(status(WirelessPhaseView::Failed {
+                        reason: WirelessFailure::PairingFailed,
+                    }))),
+                ),
+            ],
+            std::future::pending(),
+            LIMIT,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(
+            *service.sent.lock().unwrap(),
+            [Request::ConfirmCode { matches: false }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_end_of_input_is_no_answer_so_ctrl_c_only_cancels() {
+        let _lang = english();
+        let service = Fake::default();
+        let (outcome, _) = run(
+            &service,
+            person(true),
+            vec![
+                (0, shown(snap(status(pairing(false))))),
+                // A Ctrl-C interrupting the console read, or a closed input.
+                (40, Step::Line(None)),
+            ],
+            async { tokio::time::sleep(Duration::from_millis(100)).await },
+            LIMIT,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert_eq!(*service.sent.lock().unwrap(), [Request::CancelWireless]);
+    }
+
+    #[test]
+    fn only_y_is_a_yes() {
+        for yes in ["y", "Y", "y\n", " y\r\n", "\ty "] {
+            assert!(is_yes(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "N", "yes", "Yes", "yy", "no", "1"] {
+            assert!(!is_yes(no), "{no:?}");
+        }
     }
 
     #[tokio::test]
@@ -785,13 +919,11 @@ mod tests {
         let _lang = english();
         let service = Fake::default();
         // The person never answers: the read stays blocked.
-        let person = Person::new(true, None);
-        let cancel = async { tokio::time::sleep(Duration::from_millis(40)).await };
         let (outcome, lines) = run(
             &service,
-            &person,
-            vec![snap(status(pairing(false)))],
-            cancel,
+            person(true),
+            vec![(0, shown(snap(status(pairing(false)))))],
+            async { tokio::time::sleep(Duration::from_millis(40)).await },
             LIMIT,
         )
         .await;
@@ -805,11 +937,10 @@ mod tests {
     async fn the_limit_cancels_the_attempt_too() {
         let _lang = english();
         let service = Fake::default();
-        let person = Person::new(true, Some(true));
         let (outcome, lines) = run(
             &service,
-            &person,
-            vec![snap(status(WirelessPhaseView::Waiting))],
+            person(true),
+            vec![(0, shown(snap(status(WirelessPhaseView::Waiting))))],
             std::future::pending(),
             Duration::from_millis(40),
         )
@@ -824,13 +955,13 @@ mod tests {
     async fn a_service_that_goes_away_ends_the_wait() {
         let _lang = english();
         let service = Fake::default();
-        let person = Person::new(true, Some(true));
+        let (asker, _lines) = person(true);
         let (tx, mut rx) = channel(vec![]);
         drop(tx);
         let mut lines = Vec::new();
         let outcome = drive(
             &service,
-            &person,
+            &asker,
             &mut rx,
             std::future::pending(),
             LIMIT,

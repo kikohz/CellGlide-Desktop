@@ -328,7 +328,7 @@ mod cli {
         };
         let outcome = wireless::drive(
             &service,
-            &wireless::Terminal,
+            &wireless::LineAsker::terminal(),
             &mut updates,
             async {
                 // Ends only by Ctrl-C; a listener that could not start never fires.
@@ -346,17 +346,21 @@ mod cli {
         }
     }
 
+    /// A script without --yes must not hang on a prompt, nor change anything: these commands
+    /// ask first, so without a terminal they refuse.
+    fn needs_yes(command: &Cmd, terminal: bool) -> bool {
+        matches!(
+            command,
+            Cmd::Wireless {
+                command: WirelessCmd::Forget { yes: false, .. }
+                    | WirelessCmd::Regenerate { yes: false }
+            }
+        ) && !terminal
+    }
+
     /// `cellglide wireless ...`.
     async fn wireless_command(cli: &Cli, command: &WirelessCmd) -> Result<()> {
-        use std::io::IsTerminal;
         let zone = jiff::tz::TimeZone::system();
-        // A script without --yes must not hang on a prompt, nor change anything.
-        if let WirelessCmd::Forget { yes: false, .. } | WirelessCmd::Regenerate { yes: false } =
-            command
-            && !std::io::stdin().is_terminal()
-        {
-            bail!("{}", tr("cli.wireless_needs_yes", &[]));
-        }
         match command {
             WirelessCmd::List => {
                 let info = wireless_info(cli).await?;
@@ -605,6 +609,13 @@ mod cli {
         utf8_console();
         cg_i18n::init();
         let cli = Cli::parse();
+        // Before any word with the service.
+        if needs_yes(
+            &cli.command,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        ) {
+            bail!("{}", tr("cli.wireless_needs_yes", &[]));
+        }
         // Doctor must work without a service, and the saved speed results are a local file.
         if !matches!(
             cli.command,
@@ -890,6 +901,31 @@ mod cli {
             let cli =
                 Cli::try_parse_from(["cellglide", "--socket", "/tmp/c.sock", "status"]).unwrap();
             assert_eq!(cli.endpoint(), Endpoint::parse("/tmp/c.sock"));
+        }
+
+        #[test]
+        fn forget_and_regenerate_refuse_without_a_terminal_unless_told_yes() {
+            let cmd = |args: &[&str]| {
+                Cli::try_parse_from(std::iter::once("cellglide").chain(args.iter().copied()))
+                    .unwrap()
+                    .command
+            };
+            for args in [
+                &["wireless", "forget", "1"][..],
+                &["wireless", "regenerate"],
+            ] {
+                assert!(needs_yes(&cmd(args), false), "{args:?}");
+                assert!(!needs_yes(&cmd(args), true), "{args:?}");
+            }
+            for args in [
+                &["wireless", "forget", "1", "--yes"][..],
+                &["wireless", "regenerate", "--yes"],
+                &["wireless", "list"],
+                &["wireless", "repair", "1"],
+                &["status"],
+            ] {
+                assert!(!needs_yes(&cmd(args), false), "{args:?}");
+            }
         }
 
         #[test]
