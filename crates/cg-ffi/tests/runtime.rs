@@ -59,14 +59,15 @@ async fn get_and_set_prefs_round_trip() {
 }
 
 #[tokio::test]
-async fn the_prefs_event_follows_the_reply() {
+async fn the_prefs_event_comes_before_the_reply() {
+    // Whoever waits for the reply has heard the preferences it saved by then.
     let dir = tempfile::tempdir().unwrap();
     let (sink, events) = collect();
     let rt = Runtime::start(config_at(missing_endpoint(dir.path()), dir.path()), sink);
     let id = rt.send(Command::SetPrefs {
         prefs: Prefs::default(),
     });
-    wait_for(&events, |e| matches!(e, Event::Prefs { .. })).await;
+    reply_of(&events, id).await;
     let got = events.lock().unwrap().clone();
     let reply = got
         .iter()
@@ -76,7 +77,7 @@ async fn the_prefs_event_follows_the_reply() {
         .iter()
         .position(|e| matches!(e, Event::Prefs { .. }))
         .unwrap();
-    assert!(reply < prefs, "{got:#?}");
+    assert!(prefs < reply, "{got:#?}");
     rt.shutdown();
 }
 

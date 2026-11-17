@@ -175,7 +175,8 @@ pub(crate) struct Context {
     pub(crate) speed: Arc<crate::speed::Speed>,
     pub(crate) leak: Arc<crate::leak::Leak>,
     /// Held while the preferences are saved and announced: two `SetPrefs` at once are written
-    /// one after the other, and their `Event::Prefs` go out in the order they were written.
+    /// one after the other, and their `Event::Prefs` go out in the order they were written,
+    /// each before its reply.
     pub(crate) prefs: Arc<tokio::sync::Mutex<()>>,
     /// Cancelled at shutdown; tasks that outlive their command stop with it.
     pub(crate) cancel: CancellationToken,
@@ -424,14 +425,19 @@ async fn dispatch(id: u64, command: Command, context: Context) {
     match command {
         Command::SetPrefs { prefs } => {
             let path = context.config.prefs_path.clone();
-            let saved = prefs.clone();
             let _one_at_a_time = context.prefs.lock().await;
-            let result = run_guarded(id, events, async move { set_prefs(&path, &saved) }).await;
-            if matches!(result, Some(ReplyResult::Ok { .. })) {
-                events.emit(Event::Prefs { prefs });
-                // "Also test Wi‑Fi or Ethernet" changes what the speed page says.
-                context.shared.pages_changed();
-            }
+            // The event goes out before the reply: whoever waits for the reply has heard the
+            // preferences it saved by then.
+            guarded(id, events, async {
+                let result = set_prefs(&path, &prefs);
+                if matches!(result, ReplyResult::Ok { .. }) {
+                    events.emit(Event::Prefs { prefs });
+                    // "Also test Wi‑Fi or Ethernet" changes what the speed page says.
+                    context.shared.pages_changed();
+                }
+                result
+            })
+            .await;
         }
         command => guarded(id, events, handle(command, &context)).await,
     }
@@ -454,7 +460,7 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
         Command::GetAbout => ReplyResult::Ok {
             value: crate::about::about(),
         },
-        // `dispatch` takes it: the reply is followed by `Event::Prefs`, which only it sends.
+        // `dispatch` takes it: `Event::Prefs`, which only it sends, comes before the reply.
         Command::SetPrefs { .. } => unreachable!("dispatch handles SetPrefs"),
         Command::Request { request } => crate::requests::request(&config.endpoint, request).await,
         Command::Subscribe => crate::subscription::subscribe(context),
@@ -490,23 +496,8 @@ fn set_prefs(path: &std::path::Path, prefs: &cg_tools::prefs::Prefs) -> ReplyRes
 /// Runs a command's handler: a panic becomes a [`Event::Fault`] and an error reply, anything
 /// else the reply `f` gives.
 pub async fn guarded<F: Future<Output = ReplyResult>>(id: u64, events: &Events, f: F) {
-    run_guarded(id, events, f).await;
-}
-
-/// [`guarded`], also giving back the reply it sent (`None` after a panic).
-async fn run_guarded<F: Future<Output = ReplyResult>>(
-    id: u64,
-    events: &Events,
-    f: F,
-) -> Option<ReplyResult> {
     match AssertUnwindSafe(f).catch_unwind().await {
-        Ok(result) => {
-            events.emit(Event::Reply {
-                id,
-                result: result.clone(),
-            });
-            Some(result)
-        }
+        Ok(result) => events.emit(Event::Reply { id, result }),
         Err(payload) => {
             let message = panic_message(&*payload);
             events.emit(Event::Fault {
@@ -516,7 +507,6 @@ async fn run_guarded<F: Future<Output = ReplyResult>>(
                 id,
                 result: ReplyResult::err(tr("reason.internal", &[("detail", &message)])),
             });
-            None
         }
     }
 }
