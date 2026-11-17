@@ -74,6 +74,10 @@
 - 前后网络快照 `identical`；`C:\ProgramData\CellGlide` 的无线文件没有被改动。
 - **iPhone 的已配对列表里没有出现「DESKTOP-2H99NV0」：iPhone 没有保存这次配对。** 最可能的原因是计划 B 任务 6 审查的 I1：电脑发出 `F` 后立即以 `SO_LINGER 0` 重置连接，`F` 没有被 iPhone 的应用层读到。修复后重测。
 
+### 修复后重测（提交 5142da8：发出 `F` 后等 iPhone 先挂断，最多 3 秒）
+
+2026-11-17 11:31，同样的命令。验证码 967500 两边一致，用户在 iPhone 上点「允许」，电脑这边确认；发出 `F` 后 174 ms iPhone 自己关闭了连接。**iPhone 的已配对列表里出现了「DESKTOP-2H99NV0」**：验证码配对在真机上完整走通。前后网络快照 `identical`；`C:\ProgramData\CellGlide` 的无线文件没被改动。测试留下的配对记录由用户在 iPhone 上删除。
+
 ## 留下的东西
 
 - `C:\ProgramData\CellGlide\wireless.json` 和 `wireless-keys.bin` 保留（1.0.0 的服务不读它们）；iPhone 的「已配对」列表里有这台电脑。
