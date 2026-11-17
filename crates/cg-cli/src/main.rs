@@ -482,6 +482,7 @@ mod cli {
                                 },
                             }),
                             strict_dns: strict_dns.as_deref().map(|v| v == "on"),
+                            wireless: None,
                         },
                     )
                     .await?;

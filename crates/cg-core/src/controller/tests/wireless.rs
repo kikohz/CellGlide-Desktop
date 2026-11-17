@@ -206,7 +206,8 @@ async fn a_paired_phone_connects_and_disconnect_closes_the_access_point() {
         snap.state,
         ConnState::Connected {
             phone_version: "2.2.0".into(),
-            dns: DnsMode::Phone
+            dns: DnsMode::Phone,
+            wireless: true,
         }
     );
     let status = snap.wireless.clone().unwrap();
@@ -1893,4 +1894,449 @@ async fn no_answer_for_75_seconds_fails_and_saves_nothing() {
     let store = WirelessStore::open(p._dir.path(), Arc::new(PlainSecrets)).unwrap();
     assert!(store.records().iter().all(|r| r.peer_id != NEW_ID));
     assert!(p.fake.pairings().iter().all(|r| r.f_valid.is_none()));
+}
+
+// --- The IPC surface (Plan B Task 7): the switch's check, offering, forgetting, a new access
+// point, pairing again and what `wireless_info` reads.
+
+fn offered(s: &Snapshot) -> bool {
+    s.wireless_offered
+}
+
+/// Each condition of `wireless_offered`: the switch, the platform, the store, no session, no
+/// attempt, nothing on USB. A failed attempt offers it again (to retry).
+#[tokio::test]
+async fn wireless_is_offered_only_when_it_can_start() {
+    let w = wireless_rig().await;
+    wait_for(&w.r.controller, "offered", offered).await;
+    assert!(w.r.controller.snapshot().settings.wireless_enabled);
+
+    // An attempt that failed, then one running.
+    w.fake.fail_starts(Some(ApFailure::RadioOff));
+    w.start().await;
+    let snap = wait_for(&w.r.controller, "the failure", |s| {
+        matches!(phase(s), Some(WirelessPhaseView::Failed { .. }))
+    })
+    .await;
+    assert!(offered(&snap), "a failure offers it again: {snap:?}");
+    w.fake.fail_starts(None);
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting) && !offered(s)
+    })
+    .await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    wait_for(&w.r.controller, "offered", offered).await;
+
+    // A USB session, then just a device on USB.
+    connect_phone(&w.r).await;
+    assert!(!offered(&w.r.controller.snapshot()));
+    w.r.controller.send(Command::Disconnect).await.unwrap();
+    let snap = wait_for(&w.r.controller, "not connected", |s| !connected(s)).await;
+    assert!(!snap.devices.is_empty());
+    assert!(!offered(&snap), "a device on USB");
+    w.r.mux.detach(1);
+    wait_for(&w.r.controller, "offered", offered).await;
+
+    // The switch off.
+    w.r.controller
+        .send(Command::SetWireless { enabled: false })
+        .await
+        .unwrap();
+    let snap = w.r.controller.snapshot();
+    assert!(!offered(&snap) && !snap.settings.wireless_enabled);
+
+    // Without the platform or the store.
+    for (ports, store) in [(false, true), (true, false)] {
+        let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+            if !ports {
+                config.wireless_ports = None;
+            }
+            if !store {
+                config.wireless = None;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let snap = w.r.controller.snapshot();
+        assert!(snap.settings.wireless_enabled);
+        assert!(!offered(&snap), "ports {ports}, store {store}");
+    }
+}
+
+/// Turning the switch on opens the access point and closes it again; if it can't be opened,
+/// the switch stays off and the cause comes back.
+#[tokio::test]
+async fn turning_the_switch_on_checks_the_access_point() {
+    let off = |config: &mut ControllerConfig| {
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: false,
+            wireless_enabled: false,
+            ..Stored::default()
+        });
+    };
+    let w = wireless_rig_with(FakePhoneOptions::default(), off).await;
+    w.fake.fail_starts(Some(ApFailure::MobileHotspotOn));
+    let result =
+        w.r.controller
+            .send(Command::SetWireless { enabled: true })
+            .await;
+    assert!(
+        matches!(
+            result,
+            Err(CoreError::WirelessUnavailable(ApFailure::MobileHotspotOn))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        result.unwrap_err().reason(),
+        Reason::WirelessUnavailable {
+            cause: ApFailure::MobileHotspotOn
+        }
+    );
+    let snap = w.r.controller.snapshot();
+    assert!(!snap.settings.wireless_enabled, "stays off");
+    assert!(!offered(&snap));
+    assert_eq!(w.fake.start_attempts(), 1);
+    assert!(!w.fake.is_up());
+    assert_eq!(snap.wireless, None, "no attempt");
+
+    // It can: on, and the access point is closed again at once.
+    w.fake.fail_starts(None);
+    w.r.controller
+        .send(Command::SetWireless { enabled: true })
+        .await
+        .unwrap();
+    assert_eq!(w.fake.starts(), 1);
+    assert_eq!(w.fake.stops(), 1);
+    assert!(!w.fake.is_up());
+    let (ssid, passphrase) = w.store.access_point().unwrap();
+    assert_eq!(w.fake.started_with().last(), Some(&(ssid, passphrase)));
+    let snap = wait_for(&w.r.controller, "offered", offered).await;
+    assert!(snap.settings.wireless_enabled);
+    assert_eq!(snap.wireless, None, "a check, not an attempt");
+    // Already on: nothing is opened again.
+    w.r.controller
+        .send(Command::SetWireless { enabled: true })
+        .await
+        .unwrap();
+    assert_eq!(w.fake.start_attempts(), 2);
+
+    // Without the platform the cause is "unsupported"; without the store, the store.
+    for (ports, store, expected) in [
+        (
+            false,
+            true,
+            Reason::WirelessUnavailable {
+                cause: ApFailure::Unsupported,
+            },
+        ),
+        (true, false, Reason::WirelessStoreUnavailable),
+    ] {
+        let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+            off(config);
+            if !ports {
+                config.wireless_ports = None;
+            }
+            if !store {
+                config.wireless = None;
+            }
+        })
+        .await;
+        let result =
+            w.r.controller
+                .send(Command::SetWireless { enabled: true })
+                .await;
+        assert_eq!(result.unwrap_err().reason(), expected);
+        assert!(!w.r.controller.snapshot().settings.wireless_enabled);
+        assert_eq!(w.fake.start_attempts(), 0);
+    }
+}
+
+/// Forgetting the phone of the session in use ends the session (and the access point) first,
+/// then removes the pairing; forgetting another leaves the session alone.
+#[tokio::test]
+async fn forgetting_the_phone_in_use_ends_the_session_first() {
+    let w = connected_rig(|_| {}).await;
+    let other = Record {
+        peer_id: OTHER_ID.into(),
+        name: "Other iPhone".into(),
+        identity: "5C6D7E8F-9A0B-4C1D-8E2F-3A4B5C6D7E8F".into(),
+        created_at: 2,
+        method: Method::Code,
+        stale: false,
+    };
+    w.store.save(other, Key::from_bytes([9; 32])).unwrap();
+    w.r.controller
+        .send(Command::ForgetPhone {
+            peer_id: OTHER_ID.into(),
+        })
+        .await
+        .unwrap();
+    assert!(on_air(&w.r.controller.snapshot()), "another phone: stays");
+    assert_eq!(w.saved(OTHER_ID), None);
+
+    assert!(bad_request(
+        w.r.controller
+            .send(Command::ForgetPhone {
+                peer_id: NEW_ID.into(),
+            })
+            .await
+    ));
+    w.r.controller
+        .send(Command::ForgetPhone {
+            peer_id: PHONE_ID.into(),
+        })
+        .await
+        .unwrap();
+    // The command returned with the session gone and the access point closed, and the pairing
+    // removed after that.
+    let snap = w.r.controller.snapshot();
+    assert!(!connected(&snap), "{snap:?}");
+    assert_eq!(snap.wireless, None);
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.backend.stopped(), 1);
+    assert_eq!(w.saved(PHONE_ID), None);
+    assert!(w.store.key(IDENTITY).is_none());
+}
+
+/// Forgetting the phone a reconnect waits for ends the attempt too.
+#[tokio::test]
+async fn forgetting_the_phone_being_reconnected_ends_the_attempt() {
+    let w = connected_rig(|_| {}).await;
+    w.fake
+        .script_dials(DialMatch::address(at(205)), vec![DialOutcome::Hang; 100]);
+    w.r.phone.end_session();
+    wait_for(&w.r.controller, "reconnecting", |s| {
+        phase(s) == Some(WirelessPhaseView::Reconnecting)
+    })
+    .await;
+    w.r.controller
+        .send(Command::ForgetPhone {
+            peer_id: PHONE_ID.into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert!(!w.fake.is_up());
+    assert_eq!(w.saved(PHONE_ID), None);
+}
+
+#[tokio::test]
+async fn a_new_access_point_name_unless_one_is_up() {
+    let w = wireless_rig().await;
+    let before = w.store.access_point().unwrap();
+    w.r.controller
+        .send(Command::RegenerateAccessPoint)
+        .await
+        .unwrap();
+    let after = w.store.access_point().unwrap();
+    assert_ne!(before.0, after.0);
+    assert_ne!(before.1, after.1);
+
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    assert!(bad_request(
+        w.r.controller.send(Command::RegenerateAccessPoint).await
+    ));
+    assert_eq!(w.store.access_point().unwrap(), after);
+    assert!(w.fake.is_up(), "the attempt goes on");
+
+    let none = wireless_rig_with(FakePhoneOptions::default(), |c| c.wireless = None).await;
+    assert!(matches!(
+        none.r.controller.send(Command::RegenerateAccessPoint).await,
+        Err(CoreError::WirelessStore)
+    ));
+}
+
+/// `RepairPhone`: the phone's pairing still looks good here (the phone forgot it), so a plain
+/// `ConnectWireless` would never pair it by code; asked to pair it again, it is paired by code,
+/// the new pairing replaces the old, and another paired phone on the access point is left out.
+#[tokio::test]
+async fn pairing_a_good_pairing_again_replaces_it() {
+    let w = pairing_rig(|_| {}).await;
+    const OTHER_IDENTITY: &str = "5C6D7E8F-9A0B-4C1D-8E2F-3A4B5C6D7E8F";
+    let other_key = Key::from_bytes([9; 32]);
+    w.store
+        .save(
+            Record {
+                peer_id: OTHER_ID.into(),
+                name: "Other iPhone".into(),
+                identity: OTHER_IDENTITY.into(),
+                created_at: 2,
+                method: Method::Cable,
+                stale: false,
+            },
+            other_key.clone(),
+        )
+        .unwrap();
+    // The other phone, paired and good, is on the access point too (a newer pairing: it would
+    // win a plain pick).
+    w.fake.add_phone(
+        WirelessPhone::new(OTHER_ID, at(50))
+            .serving(&w.r.mux)
+            .paired(OTHER_IDENTITY, &other_key),
+        Rounds::all(),
+    );
+    w.fake.add_phone(w.stranger(PHONE_ID, 205), Rounds::all());
+    assert!(bad_request(
+        w.r.controller
+            .send(Command::RepairPhone {
+                peer_id: NEW_ID.into(),
+            })
+            .await
+    ));
+    assert_eq!(w.fake.start_attempts(), 0);
+    w.r.controller
+        .send(Command::RepairPhone {
+            peer_id: PHONE_ID.into(),
+        })
+        .await
+        .unwrap();
+    let (snap, _) = w.code_shown().await;
+    assert!(
+        matches!(
+            phase(&snap),
+            Some(WirelessPhaseView::Pairing { phone_name: Some(name), .. }) if name == "Test iPhone"
+        ),
+        "{snap:?}"
+    );
+    assert_eq!(w.fake.pairings()[0].phone, PHONE_ID);
+    // While it runs, asking again is refused.
+    assert!(bad_request(
+        w.r.controller
+            .send(Command::RepairPhone {
+                peer_id: PHONE_ID.into(),
+            })
+            .await
+    ));
+    w.confirm(true).await.unwrap();
+    let snap = w.connected().await;
+    assert_eq!(snap.selected, Some(SELECTED.to_string()));
+    let saved = w.saved(PHONE_ID).unwrap();
+    assert_eq!(saved.identity, PAIRED_IDENTITY);
+    assert_eq!(saved.method, Method::Code);
+    assert!(w.store.key(IDENTITY).is_none(), "the old key is gone");
+    assert!(
+        w.fake.dials().iter().all(|d| d.to.ip() != at(50)),
+        "the other phone was never dialled"
+    );
+    assert!(w.saved(OTHER_ID).is_some());
+}
+
+/// Without `RepairPhone`, the same phone (whose pairing looks good) is never paired by code.
+#[tokio::test]
+async fn a_plain_connect_never_pairs_a_good_pairing_by_code() {
+    let w = pairing_rig(|_| {}).await;
+    w.fake.add_phone(w.stranger(PHONE_ID, 205), Rounds::all());
+    w.start().await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!w.fake.dials().is_empty(), "it was dialled");
+    assert_eq!(pairing_dials(&w.fake), 0);
+    assert!(!pairing(&w.r.controller.snapshot()));
+    assert_eq!(w.saved(PHONE_ID), Some(record()));
+}
+
+#[tokio::test]
+async fn wireless_info_reads_the_store() {
+    let w = wireless_rig().await;
+    let info = w.r.controller.wireless_info().await;
+    let (ssid, passphrase) = w.store.access_point().unwrap();
+    assert_eq!(info.available, Some(true));
+    assert_eq!(info.unavailable, None);
+    assert_eq!(
+        (info.ssid.clone(), info.passphrase.clone()),
+        (ssid, passphrase.clone())
+    );
+    assert_eq!(
+        info.paired,
+        vec![PairedPhone {
+            peer_id: PHONE_ID.into(),
+            name: "Test iPhone".into(),
+            method: PairingMethod::Cable,
+            stale: false,
+            created_at: 1,
+        }]
+    );
+    assert!(!format!("{info:?}").contains(&passphrase));
+    // Never in the snapshot.
+    w.add_phone(Rounds::all());
+    w.start().await;
+    let snap = w.connected().await;
+    assert!(
+        !String::from_utf8(cg_ipc::to_line(&snap))
+            .unwrap()
+            .contains(&passphrase)
+    );
+
+    let no_store = wireless_rig_with(FakePhoneOptions::default(), |c| c.wireless = None).await;
+    let info = no_store.r.controller.wireless_info().await;
+    assert_eq!(info.available, Some(false));
+    assert_eq!(info.unavailable, Some(Reason::WirelessStoreUnavailable));
+    assert!(info.ssid.is_empty() && info.passphrase.is_empty() && info.paired.is_empty());
+    let no_platform =
+        wireless_rig_with(FakePhoneOptions::default(), |c| c.wireless_ports = None).await;
+    let info = no_platform.r.controller.wireless_info().await;
+    assert_eq!(info.available, None);
+    assert_eq!(info.unavailable, None);
+}
+
+/// Design §4.4: something joined the access point but no iPhone advertised CellGlide for a
+/// minute: the hint to open CellGlide and start sharing (VPN mode off). The window then ends with
+/// it; with nothing joined it ends as no phone (`no_phone_for_300_seconds…`).
+#[tokio::test(start_paused = true)]
+async fn something_joined_but_nothing_shares_is_hinted_after_a_minute() {
+    let p = paused_rig();
+    p.fake.add_client(at(77));
+    let asked = tokio::time::Instant::now();
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    paused_wait(&p.controller, "the hint", |s| {
+        hint(s) == Some(WirelessFailure::NotSharing)
+    })
+    .await;
+    let after = asked.elapsed();
+    assert!(after >= Duration::from_secs(60), "after {after:?}");
+    assert!(after <= Duration::from_secs(66), "after {after:?}");
+    assert_eq!(
+        phase(&p.controller.snapshot()),
+        Some(WirelessPhaseView::Waiting)
+    );
+    paused_wait(&p.controller, "the end", |s| {
+        failed(s, WirelessFailure::NotSharing)
+    })
+    .await;
+    assert!(asked.elapsed() >= Duration::from_secs(300));
+    assert!(!p.fake.is_up());
+}
+
+/// The hint goes once a phone advertises, even one that is not dialled (its name at two
+/// addresses).
+#[tokio::test(start_paused = true)]
+async fn a_phone_found_takes_the_not_sharing_hint_away() {
+    let p = paused_rig();
+    p.fake.add_client(at(77));
+    for address in [at(9), at(10)] {
+        p.fake.advertise(
+            crate::wireless::ports::FoundPhone {
+                instance: NEW_ID.into(),
+                address,
+                port: 4000,
+            },
+            Rounds::starting(40),
+        );
+    }
+    p.controller.send(Command::ConnectWireless).await.unwrap();
+    paused_wait(&p.controller, "the hint", |s| {
+        hint(s) == Some(WirelessFailure::NotSharing)
+    })
+    .await;
+    paused_wait(&p.controller, "the hint gone, still waiting", |s| {
+        hint(s).is_none() && phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    assert!(p.fake.browse_count() >= 40);
+    assert!(p.fake.is_up(), "the window is not over");
 }

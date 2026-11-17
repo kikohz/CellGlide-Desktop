@@ -247,6 +247,16 @@ async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, shared: Sh
             Request::SetSettings { .. } => replies.set_settings.clone(),
             Request::Connect { .. } => replies.connect.clone(),
             Request::Disconnect => replies.disconnect.clone(),
+            // Task 9 scripts these; until then the fake service has nothing wireless.
+            Request::ConnectWireless
+            | Request::CancelWireless
+            | Request::ConfirmCode { .. }
+            | Request::WirelessInfo
+            | Request::ForgetPhone { .. }
+            | Request::RegenerateAccessPoint
+            | Request::RepairPhone { .. } => Response::Error {
+                reason: cg_ipc::Reason::BadRequest,
+            },
         };
         if w.write_all(&cg_ipc::to_line(&reply)).await.is_err() {
             return;

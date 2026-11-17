@@ -203,6 +203,7 @@ mod tests {
         snapshot.state = ConnState::Connected {
             phone_version: "2.4.0".into(),
             dns: DnsMode::Unmanaged,
+            wireless: false,
         };
         snapshot
     }

@@ -60,6 +60,8 @@ reason:
   shutting_down: "The CellGlide service is shutting down"
   version_mismatch: "The CellGlide service (protocol %{service}) doesn't match this program (protocol %{client}). Please restart CellGlide"
   bad_day: "Only the last 7 days can be viewed (date format YYYY-MM-DD)"
+  wireless_unavailable: "This computer can't open a wireless network for the iPhone: %{cause}"
+  wireless_store_unavailable: "The wireless pairings can't be read or saved"
 check:
   fix: "Fix: %{fix}"
   service:
@@ -424,3 +426,88 @@ settings:
   autostart_failed: "Couldn't change start at login: %{error}"
 doctor:
   running: "Checking…"
+wireless:
+  closer: "Move the iPhone closer, or plug in a cable"
+  cause:
+    no_adapter: "it has no Wi‑Fi adapter"
+    radio_off: "Wi‑Fi is turned off"
+    mobile_hotspot_on: "turn off Windows' Mobile Hotspot first"
+    in_use: "the Wi‑Fi adapter is busy with something else"
+    unsupported: "its Wi‑Fi adapter doesn't support it"
+  failure:
+    access_point: "Couldn't open the wireless network: %{cause}"
+    no_phone: "No iPhone showed up"
+    several_phones: "More than one iPhone wants to pair. Leave only one on the network and try again"
+    pairing_stale: "This iPhone no longer lets this computer connect wirelessly. Pair again"
+    pairing_refused: "The iPhone didn't accept this computer's pairing. If you removed this computer on the iPhone, pair again"
+    name_clash: "Another device on the network uses this iPhone's name, so nothing was connected"
+    lost: "The wireless connection dropped and couldn't be restored"
+    turned_off: "Wireless connection was turned off"
+    store_unavailable: "The saved wireless settings can't be read"
+    phone_refused: "The iPhone can't be used: %{reason}"
+    pairing_denied: "Pairing was declined on the iPhone"
+    pairing_failed: "Pairing didn't finish, and nothing was saved"
+    pairing_busy: "The iPhone isn't taking pairing requests right now. Try again in a minute"
+    not_sharing: "No iPhone showed up. Open CellGlide on the iPhone and start sharing; if VPN mode is on, turn it off first"
+  hint:
+    several_phones: "More than one iPhone wants to pair. Leave only one on this network"
+    pairing_busy: "The iPhone isn't taking pairing requests right now; asking again in a minute"
+    not_sharing: "Open CellGlide on the iPhone and start sharing; if VPN mode is on, turn it off first"
+    name_clash: "Another device on the network uses this iPhone's name; waiting until only one is left"
+  step:
+    join: "On the iPhone, go to Settings → Wi‑Fi and join %{ssid} with the password %{passphrase}."
+    share: "Go back to CellGlide on the iPhone, tap Start Sharing and keep it open."
+    wait: "This computer connects on its own."
+    note: "The iPhone may say this network has no internet connection. That's expected: the internet comes over cellular."
+  line:
+    starting: "Wireless: opening the network…"
+    waiting: "Wireless: waiting for the iPhone to join %{ssid}"
+    pairing: "Wireless: confirm the code %{code} on the iPhone"
+    pairing_confirmed: "Wireless: waiting for the iPhone to confirm the code"
+    connecting: "Wireless: connecting…"
+    connected: "Connected wirelessly · a cable is steadier"
+    connected_weak: "Connected wirelessly · weak signal: move the iPhone closer, or plug in a cable"
+    reconnecting: "Reconnecting… move the iPhone closer, or plug in a cable"
+    failed: "Wireless connection failed: %{reason}"
+  starting:
+    title: "Opening the wireless network…"
+    detail: "This takes a few seconds."
+  waiting:
+    title: "Waiting for the iPhone"
+    detail: "Join %{ssid} on the iPhone, then start sharing in CellGlide."
+  pairing:
+    title: "Confirm the code %{code} on the iPhone"
+    detail: "Compare it with the number on the iPhone's screen."
+    detail_named: "Compare it with the number on %{name}'s screen."
+    confirmed: "Waiting for the iPhone to confirm too…"
+  connecting:
+    title: "Connecting wirelessly…"
+    detail: "Found the iPhone; setting up the connection."
+  connected:
+    title: "Connected wirelessly"
+    detail: "A cable is steadier."
+  reconnecting:
+    title: "Reconnecting…"
+  failed:
+    title: "Wireless connection failed"
+  paired:
+    code: "Paired with a code"
+    cable: "Paired over the cable"
+    stale: "Pair again"
+  action:
+    connect: "Connect Wirelessly"
+    cancel: "Cancel"
+    retry: "Try Again"
+    match: "They Match"
+    copy: "Copy"
+    forget: "Remove"
+    repair: "Pair Again"
+    regenerate: "New Network Name and Password"
+    regenerate_confirm: "iPhones that joined the current network will need to join the new one. Continue?"
+  settings:
+    switch: "Wireless connection"
+    note: "When you don't have a cable, let the iPhone connect through a temporary Wi‑Fi network this computer opens."
+    paired: "Paired iPhones"
+  cli:
+    confirm_prompt: "Does the iPhone show the same code? (y/N)"
+    not_terminal: "Can't ask here (not a terminal), so this counts as no. Confirm the code in the CellGlide app instead."

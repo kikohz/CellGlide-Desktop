@@ -324,6 +324,7 @@ mod tests {
                     auto_connect: None,
                     phone: None,
                     strict_dns: Some(true),
+                    wireless: None,
                 },
             },
             Command::Request {

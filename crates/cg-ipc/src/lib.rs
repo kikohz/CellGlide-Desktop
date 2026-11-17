@@ -86,7 +86,7 @@ pub const MAX_LINE: usize = 64 * 1024;
 /// Replies (history, diagnostics) can be far longer than requests.
 pub const MAX_REPLY_LINE: usize = 4 * 1024 * 1024;
 /// Bumped whenever a message changes shape; clients check it with `Request::Hello`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// `CellGlide-Linux/<version>` (`CellGlide-Windows/<version>` on Windows), sent as the
 /// User-Agent of every request CellGlide makes, the service's probes included.
@@ -147,6 +147,13 @@ pub enum Reason {
     ShuttingDown,
     /// `history` asked for a day that isn't `YYYY-MM-DD` or not among the last seven.
     BadDay,
+    /// The wireless switch could not be turned on: this computer can't open the access point.
+    WirelessUnavailable {
+        cause: wireless::ApFailure,
+    },
+    /// The wireless pairings (and the access point's name and passphrase) can't be read or
+    /// saved.
+    WirelessStoreUnavailable,
 }
 
 #[cfg(test)]
@@ -172,6 +179,10 @@ impl Reason {
             Reason::BadRequest,
             Reason::ShuttingDown,
             Reason::BadDay,
+            Reason::WirelessUnavailable {
+                cause: wireless::ApFailure::MobileHotspotOn,
+            },
+            Reason::WirelessStoreUnavailable,
         ];
         for reason in &all {
             match reason {
@@ -191,7 +202,9 @@ impl Reason {
                 | Reason::NotAllowed
                 | Reason::BadRequest
                 | Reason::ShuttingDown
-                | Reason::BadDay => {}
+                | Reason::BadDay
+                | Reason::WirelessUnavailable { .. }
+                | Reason::WirelessStoreUnavailable => {}
             }
         }
         all
@@ -219,12 +232,17 @@ impl Reason {
             Reason::BadRequest => "reason.bad_request",
             Reason::ShuttingDown => "reason.shutting_down",
             Reason::BadDay => "reason.bad_day",
+            Reason::WirelessUnavailable { .. } => "reason.wireless_unavailable",
+            Reason::WirelessStoreUnavailable => "reason.wireless_store_unavailable",
         }
     }
 
+    /// The placeholders of [`Reason::key`]'s text. A wireless `cause` is the cause's own key,
+    /// which `describe::reason_text` puts into words.
     pub fn args(&self) -> Vec<(&'static str, String)> {
         match self {
             Reason::ResolverPortBusy { port } => vec![("port", port.to_string())],
+            Reason::WirelessUnavailable { cause } => vec![("cause", cause.key().to_string())],
             Reason::Tunnel { detail } | Reason::Internal { detail } => {
                 vec![("detail", detail.clone())]
             }
@@ -278,6 +296,9 @@ pub enum ConnState {
     Connected {
         phone_version: String,
         dns: DnsMode,
+        /// Over the access point rather than the cable (absent before version 7: USB).
+        #[serde(default)]
+        wireless: bool,
     },
     /// Asked to connect; the last attempt failed and will be retried.
     Retrying {
@@ -292,6 +313,9 @@ pub struct Settings {
     /// Windows' strict DNS while connected; on by default (and from a service before it).
     #[serde(default = "default_true")]
     pub strict_dns: bool,
+    /// The wireless switch; off by default (and from a service before it).
+    #[serde(default)]
+    pub wireless_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -304,6 +328,7 @@ impl Default for Settings {
             auto_connect: true,
             chosen_serial: None,
             strict_dns: true,
+            wireless_enabled: false,
         }
     }
 }
@@ -341,6 +366,10 @@ pub struct Snapshot {
     /// The wireless attempt while one runs, or after it failed; left out of the JSON otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireless: Option<wireless::WirelessStatus>,
+    /// Offer "Connect wirelessly": the switch is on, this computer has the access point and the
+    /// pairing store, no session or wireless attempt runs and nothing is on USB.
+    #[serde(default)]
+    pub wireless_offered: bool,
 }
 
 impl Snapshot {
@@ -366,6 +395,10 @@ pub enum Request {
         /// Windows' strict DNS; takes effect at once while connected.
         #[serde(default)]
         strict_dns: Option<bool>,
+        /// The wireless switch. Turning it on first checks that this computer can open the
+        /// access point; if not, the switch stays off (`Reason::WirelessUnavailable`).
+        #[serde(default)]
+        wireless: Option<bool>,
     },
     Doctor,
     Subscribe,
@@ -379,6 +412,30 @@ pub enum Request {
         range: DiagRange,
         #[serde(default)]
         contact: Option<Contact>,
+    },
+    /// Opens the access point and connects to the iPhone that joins it, pairing it by code
+    /// if it has no pairing. The progress is `Snapshot::wireless`.
+    ConnectWireless,
+    /// Ends the wireless attempt or session and closes the access point.
+    CancelWireless,
+    /// The answer to the code shown in the wireless phase `pairing`: whether the iPhone shows
+    /// the same code.
+    ConfirmCode {
+        matches: bool,
+    },
+    /// The access point's name and passphrase and the paired iPhones (`Response::Wireless`).
+    WirelessInfo,
+    /// Removes a pairing; a wireless session with that iPhone is ended first.
+    ForgetPhone {
+        peer_id: String,
+    },
+    /// Replaces the access point's name and passphrase (iPhones join the new network again).
+    /// Refused while a wireless attempt runs.
+    RegenerateAccessPoint,
+    /// Like `ConnectWireless`, but only for this paired iPhone, which is paired by code again
+    /// even if its pairing still looks good; the new pairing replaces it once saved.
+    RepairPhone {
+        peer_id: String,
     },
 }
 
@@ -457,6 +514,11 @@ pub enum Response {
     Diagnostics {
         json: String,
     },
+    /// The answer to `WirelessInfo`, which only full-access clients may ask (it holds the
+    /// passphrase).
+    Wireless {
+        info: wireless::WirelessInfo,
+    },
 }
 
 pub fn to_line<T: Serialize>(value: &T) -> Vec<u8> {
@@ -524,7 +586,7 @@ mod tests {
     #[test]
     fn the_wireless_status_is_optional_on_the_wire() {
         let none = String::from_utf8(to_line(&Snapshot::default())).unwrap();
-        assert!(!none.contains("wireless"), "{none}");
+        assert!(!none.contains("\"wireless\":"), "{none}");
         let old: Snapshot = from_line(none.trim_end().as_bytes()).unwrap();
         assert_eq!(old.wireless, None);
         let with = Snapshot {
@@ -543,6 +605,142 @@ mod tests {
             from_line::<Snapshot>(&line[..line.len() - 1]).unwrap(),
             with
         );
+    }
+
+    /// A whole version 6 snapshot (connected over USB, before any wireless field) still reads:
+    /// over USB, the switch off, nothing offered.
+    #[test]
+    fn a_version_6_snapshot_still_reads() {
+        let v6 = br#"{"state":{"state":"connected","phone_version":"2.2.0","dns":"phone"},"devices":["00008110-000A"],"selected":"00008110-000A","wants_connection":true,"phone":null,"labels":{},"settings":{"auto_connect":true,"chosen_serial":null,"strict_dns":true},"health":{},"socks_port":41234,"strict_dns":{"state":"on"}}"#;
+        let snap: Snapshot = from_line(v6).unwrap();
+        assert_eq!(
+            snap.state,
+            ConnState::Connected {
+                phone_version: "2.2.0".into(),
+                dns: DnsMode::Phone,
+                wireless: false,
+            }
+        );
+        assert!(!snap.settings.wireless_enabled);
+        assert!(!snap.wireless_offered);
+        assert_eq!(snap.wireless, None);
+        assert_eq!(snap.socks_port, Some(41234));
+    }
+
+    #[test]
+    fn version_7_fields_on_the_wire() {
+        let snap = Snapshot {
+            state: ConnState::Connected {
+                phone_version: "2.2.0".into(),
+                dns: DnsMode::Phone,
+                wireless: true,
+            },
+            settings: Settings {
+                wireless_enabled: true,
+                ..Settings::default()
+            },
+            wireless_offered: true,
+            ..Snapshot::default()
+        };
+        let line = String::from_utf8(to_line(&snap)).unwrap();
+        for part in [
+            r#""state":{"state":"connected","phone_version":"2.2.0","dns":"phone","wireless":true}"#,
+            r#""wireless_enabled":true"#,
+            r#""wireless_offered":true"#,
+        ] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert_eq!(
+            from_line::<Snapshot>(line.trim_end().as_bytes()).unwrap(),
+            snap
+        );
+        let requests = [
+            (Request::ConnectWireless, r#"{"cmd":"connect_wireless"}"#),
+            (Request::CancelWireless, r#"{"cmd":"cancel_wireless"}"#),
+            (
+                Request::ConfirmCode { matches: true },
+                r#"{"cmd":"confirm_code","matches":true}"#,
+            ),
+            (Request::WirelessInfo, r#"{"cmd":"wireless_info"}"#),
+            (
+                Request::ForgetPhone {
+                    peer_id: "A1".into(),
+                },
+                r#"{"cmd":"forget_phone","peer_id":"A1"}"#,
+            ),
+            (
+                Request::RegenerateAccessPoint,
+                r#"{"cmd":"regenerate_access_point"}"#,
+            ),
+            (
+                Request::RepairPhone {
+                    peer_id: "A1".into(),
+                },
+                r#"{"cmd":"repair_phone","peer_id":"A1"}"#,
+            ),
+            (
+                Request::SetSettings {
+                    auto_connect: None,
+                    phone: None,
+                    strict_dns: None,
+                    wireless: Some(true),
+                },
+                r#"{"cmd":"set_settings","auto_connect":null,"phone":null,"strict_dns":null,"wireless":true}"#,
+            ),
+        ];
+        for (request, json) in requests {
+            assert_eq!(
+                String::from_utf8(to_line(&request)).unwrap(),
+                format!("{json}\n")
+            );
+            assert_eq!(from_line::<Request>(json.as_bytes()).unwrap(), request);
+        }
+        assert_eq!(
+            to_line(&Response::Error {
+                reason: Reason::WirelessUnavailable {
+                    cause: wireless::ApFailure::RadioOff
+                }
+            }),
+            b"{\"type\":\"error\",\"reason\":{\"code\":\"wireless_unavailable\",\"cause\":\"radio_off\"}}\n"
+        );
+        assert_eq!(
+            to_line(&Response::Error {
+                reason: Reason::WirelessStoreUnavailable
+            }),
+            b"{\"type\":\"error\",\"reason\":{\"code\":\"wireless_store_unavailable\"}}\n"
+        );
+    }
+
+    /// The passphrase is on the wire for the client that asked, and never in `Debug` (logs).
+    #[test]
+    fn the_wireless_reply_carries_the_passphrase_but_never_prints_it() {
+        let reply = Response::Wireless {
+            info: wireless::WirelessInfo {
+                available: Some(true),
+                unavailable: None,
+                ssid: "CellGlide-AB12".into(),
+                passphrase: "abcd-efgh-2345".into(),
+                paired: vec![wireless::PairedPhone {
+                    peer_id: "A1".into(),
+                    name: "Test iPhone".into(),
+                    method: wireless::PairingMethod::Code,
+                    stale: false,
+                    created_at: 1_763_000_000,
+                }],
+            },
+        };
+        let line = String::from_utf8(to_line(&reply)).unwrap();
+        assert_eq!(
+            line,
+            "{\"type\":\"wireless\",\"info\":{\"available\":true,\"unavailable\":null,\"ssid\":\"CellGlide-AB12\",\"passphrase\":\"abcd-efgh-2345\",\"paired\":[{\"peer_id\":\"A1\",\"name\":\"Test iPhone\",\"method\":\"code\",\"stale\":false,\"created_at\":1763000000}]}}\n"
+        );
+        assert_eq!(
+            from_line::<Response>(line.trim_end().as_bytes()).unwrap(),
+            reply
+        );
+        let printed = format!("{reply:?}");
+        assert!(!printed.contains("abcd-efgh-2345"), "{printed}");
+        assert!(printed.contains("CellGlide-AB12"), "{printed}");
     }
 
     #[test]
@@ -577,13 +775,15 @@ mod tests {
                     serial: "ab".into()
                 }),
                 strict_dns: Some(false),
+                wireless: None,
             }),
-            b"{\"cmd\":\"set_settings\",\"auto_connect\":false,\"phone\":{\"mode\":\"serial\",\"serial\":\"ab\"},\"strict_dns\":false}\n"
+            b"{\"cmd\":\"set_settings\",\"auto_connect\":false,\"phone\":{\"mode\":\"serial\",\"serial\":\"ab\"},\"strict_dns\":false,\"wireless\":null}\n"
         );
         let connected = Snapshot {
             state: ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Unmanaged,
+                wireless: false,
             },
             ..Snapshot::default()
         };
@@ -592,7 +792,7 @@ mod tests {
                 .unwrap()
                 .contains("\"dns\":\"unmanaged\"")
         );
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
         assert_eq!(
             to_line(&Request::History {
                 day: Some("2026-10-16".into())
@@ -710,7 +910,8 @@ mod tests {
             Request::SetSettings {
                 auto_connect: None,
                 phone: None,
-                strict_dns: None
+                strict_dns: None,
+                wireless: None,
             }
         );
     }
@@ -726,8 +927,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_is_six() {
-        assert_eq!(PROTOCOL_VERSION, 6);
+    fn protocol_is_seven() {
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 
     #[test]

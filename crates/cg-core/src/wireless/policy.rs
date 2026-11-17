@@ -32,6 +32,9 @@ pub const DIAL_TIMEOUT: Duration = Duration::from_secs(4);
 /// The phone turned code pairing away (its pairing channel closed before the first line: another
 /// pairing in progress, or the 60 s lockout after three failures): not asked again for this long.
 pub const PAIRING_BUSY_WAIT: Duration = Duration::from_secs(60);
+/// While waiting, something joined the access point yet no iPhone advertised CellGlide for this
+/// long: the hint to open CellGlide and start sharing (and to turn VPN mode off), design §4.4.
+pub const NOT_SHARING_AFTER: Duration = Duration::from_secs(60);
 /// Two unknown identities from one verified address at least this far apart, with nothing else
 /// in between, mean the phone really has forgotten the pairing.
 pub const UNKNOWN_IDENTITY_SPAN: Duration = Duration::from_secs(5);

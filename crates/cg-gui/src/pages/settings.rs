@@ -132,6 +132,7 @@ fn save(
             auto_connect,
             phone,
             strict_dns: None,
+            wireless: None,
         },
         Reply::Settings(field),
     )
@@ -383,7 +384,8 @@ mod tests {
                 Request::SetSettings {
                     auto_connect: Some(false),
                     phone: None,
-                    strict_dns: None
+                    strict_dns: None,
+                    wireless: None,
                 },
                 Reply::Settings(SettingField::AutoConnect)
             )
@@ -398,7 +400,8 @@ mod tests {
                 Request::SetSettings {
                     auto_connect: None,
                     phone: Some(PhoneChoice::Auto),
-                    strict_dns: None
+                    strict_dns: None,
+                    wireless: None,
                 },
                 Reply::Settings(SettingField::Phone)
             )
@@ -561,6 +564,7 @@ mod tests {
         unmanaged.state = cg_ipc::ConnState::Connected {
             phone_version: "2.4.0".into(),
             dns: DnsMode::Unmanaged,
+            wireless: false,
         };
         unmanaged.settings.chosen_serial = Some("gone".into());
         let ctx = Ctx::for_test(Some(unmanaged));

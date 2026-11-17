@@ -25,6 +25,9 @@ use jiff::tz::TimeZone;
 /// that a version bump leaves the fixtures alone.
 const VERSION_LINE: &str = "CellGlide 1.0.0";
 
+/// A paired iPhone's id, as the wireless requests name it.
+const WIRELESS_PEER: &str = "4961212D-61DD-4BD0-9FE9-8989FB6B8952";
+
 /// Every command, at least once; the name is the fixture's file name.
 pub fn command_samples() -> Vec<(&'static str, Command)> {
     let request = |request| Command::Request { request };
@@ -51,6 +54,7 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
                     serial: SERIAL.into(),
                 }),
                 strict_dns: Some(true),
+                wireless: None,
             }),
         ),
         (
@@ -59,6 +63,16 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
                 auto_connect: None,
                 phone: None,
                 strict_dns: Some(false),
+                wireless: None,
+            }),
+        ),
+        (
+            "request_set_settings_wireless",
+            request(Request::SetSettings {
+                auto_connect: None,
+                phone: None,
+                strict_dns: None,
+                wireless: Some(true),
             }),
         ),
         ("request_doctor", request(Request::Doctor)),
@@ -98,6 +112,32 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             request(Request::Diagnostics {
                 range: DiagRange::Day,
                 contact: None,
+            }),
+        ),
+        (
+            "request_connect_wireless",
+            request(Request::ConnectWireless),
+        ),
+        ("request_cancel_wireless", request(Request::CancelWireless)),
+        (
+            "request_confirm_code",
+            request(Request::ConfirmCode { matches: true }),
+        ),
+        ("request_wireless_info", request(Request::WirelessInfo)),
+        (
+            "request_forget_phone",
+            request(Request::ForgetPhone {
+                peer_id: WIRELESS_PEER.into(),
+            }),
+        ),
+        (
+            "request_regenerate_access_point",
+            request(Request::RegenerateAccessPoint),
+        ),
+        (
+            "request_repair_phone",
+            request(Request::RepairPhone {
+                peer_id: WIRELESS_PEER.into(),
             }),
         ),
         ("toggle", Command::Toggle),
@@ -183,7 +223,14 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
                     | Request::Doctor
                     | Request::Subscribe
                     | Request::History { .. }
-                    | Request::Diagnostics { .. },
+                    | Request::Diagnostics { .. }
+                    | Request::ConnectWireless
+                    | Request::CancelWireless
+                    | Request::ConfirmCode { .. }
+                    | Request::WirelessInfo
+                    | Request::ForgetPhone { .. }
+                    | Request::RegenerateAccessPoint
+                    | Request::RepairPhone { .. },
             }
             | Command::Subscribe
             | Command::Toggle

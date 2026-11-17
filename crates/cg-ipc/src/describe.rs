@@ -13,6 +13,13 @@ use jiff::{SignedDuration, Timestamp};
 use std::fmt::Write as _;
 
 pub mod ui;
+mod wireless;
+
+pub use wireless::{
+    paired_phone_line, pairing_method_text, wireless_cause_text, wireless_code,
+    wireless_failure_text, wireless_hint_text, wireless_line, wireless_note, wireless_phase_text,
+    wireless_steps, wireless_unavailable_text,
+};
 
 fn tr_args(key: &str, args: &[(&str, String)]) -> String {
     let borrowed: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -20,7 +27,13 @@ fn tr_args(key: &str, args: &[(&str, String)]) -> String {
 }
 
 pub fn reason_text(reason: &Reason) -> String {
-    tr_args(reason.key(), &reason.args())
+    match reason {
+        Reason::WirelessUnavailable { cause } => tr(
+            reason.key(),
+            &[("cause", &wireless::wireless_cause_text(*cause))],
+        ),
+        _ => tr_args(reason.key(), &reason.args()),
+    }
 }
 
 pub fn state_line(snapshot: &Snapshot) -> String {
@@ -36,7 +49,9 @@ pub fn state_line(snapshot: &Snapshot) -> String {
         ),
         ConnState::Idle => tr("state.idle", &[]),
         ConnState::Connecting => tr("state.connecting", &[]),
-        ConnState::Connected { phone_version, dns } => {
+        ConnState::Connected {
+            phone_version, dns, ..
+        } => {
             let key = match dns {
                 DnsMode::Phone => "state.connected",
                 DnsMode::Public => "state.connected_public_dns",
@@ -1058,6 +1073,7 @@ mod tests {
             ..snap(ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             })
         };
         let off = StrictDns::Off {
@@ -1118,6 +1134,7 @@ mod tests {
             state: ConnState::Connected {
                 phone_version: "2.4.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             strict_dns: StrictDns::Unknown,
             ..Snapshot::default()
@@ -1133,14 +1150,16 @@ mod tests {
         assert_eq!(
             state_line(&snap(ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Phone
+                dns: DnsMode::Phone,
+                wireless: false,
             })),
             "已连接，电脑正在使用手机网络（手机 CellGlide 2.2.0）"
         );
         assert!(
             state_line(&snap(ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Unmanaged
+                dns: DnsMode::Unmanaged,
+                wireless: false,
             }))
             .ends_with("但系统没有让 CellGlide 设置 DNS，域名查询仍走原来的网络，没有其他网络时网址会打不开。运行 cellglide doctor 查看原因和修复命令")
         );
@@ -1209,7 +1228,8 @@ mod tests {
         assert!(
             state_line(&snap(ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Unmanaged
+                dns: DnsMode::Unmanaged,
+                wireless: false,
             }))
             .ends_with("but the system didn't let CellGlide set DNS, so lookups still use the original network and websites won't open without another network. Run cellglide doctor to see why and how to fix it")
         );
@@ -1898,6 +1918,7 @@ mod tests {
             snapshot.state = ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             };
             snapshot.health = HealthStatus::default();
             assert_eq!(
@@ -2087,14 +2108,17 @@ mod tests {
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Public,
+                wireless: false,
             },
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Unmanaged,
+                wireless: false,
             },
             ConnState::Retrying {
                 reason: Reason::NoExit,

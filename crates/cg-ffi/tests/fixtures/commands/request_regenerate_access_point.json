@@ -1,0 +1,6 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "regenerate_access_point"
+  }
+}

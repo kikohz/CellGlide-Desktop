@@ -50,6 +50,7 @@ pub fn connected_snapshot() -> Snapshot {
     snapshot.state = ConnState::Connected {
         phone_version: "2.4.0".into(),
         dns: DnsMode::Phone,
+        wireless: false,
     };
     snapshot.wants_connection = true;
     snapshot.phone = Some(PhoneCard {

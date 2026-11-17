@@ -94,12 +94,11 @@ pub async fn run(
     config.health_dir = Some(data.join("health"));
     config.computer_name = system::computer_name();
     config.wireless = open_wireless_store(&data);
-    // The access point, discovery and the TLS dialer, only beside a store that opened: without
-    // pairings there is nothing to connect to. The switch is the stored setting
-    // (`wireless_enabled` in settings.json).
-    if config.wireless.is_some() {
-        config.wireless_ports = Some(cg_platform::windows::wireless_ports::ports());
-    }
+    // The access point, discovery and the TLS dialer. Nothing wireless starts without a store
+    // that opened (there is nothing to connect to); with the ports but no store, clients are
+    // told the store is the trouble (`WirelessInfo.available` false) rather than shown nothing.
+    // The switch is the stored setting (`wireless_enabled` in settings.json).
+    config.wireless_ports = Some(cg_platform::windows::wireless_ports::ports());
     let sources = Sources {
         log: LogSource::Files(data.join("logs")),
         root: PathBuf::new(),

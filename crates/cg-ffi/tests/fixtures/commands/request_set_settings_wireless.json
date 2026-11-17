@@ -1,0 +1,10 @@
+{
+  "type": "request",
+  "request": {
+    "cmd": "set_settings",
+    "auto_connect": null,
+    "phone": null,
+    "strict_dns": null,
+    "wireless": true
+  }
+}

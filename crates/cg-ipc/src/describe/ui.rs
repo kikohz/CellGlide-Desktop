@@ -963,6 +963,7 @@ mod tests {
         snapshot.state = ConnState::Connected {
             phone_version: "2.4.0".into(),
             dns: DnsMode::Phone,
+            wireless: false,
         };
         snapshot.wants_connection = true;
         snapshot.phone = Some(PhoneCard {
@@ -1062,6 +1063,7 @@ mod tests {
         ConnState::Connected {
             phone_version: "2.4.0".into(),
             dns,
+            wireless: false,
         }
     }
 
@@ -1168,6 +1170,7 @@ mod tests {
             state: ConnState::Connected {
                 phone_version: "2.4.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             wants_connection: true,
             health: HealthStatus {
@@ -1251,6 +1254,7 @@ mod tests {
             state: ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             ..Snapshot::default()
         };
@@ -1482,6 +1486,7 @@ mod tests {
         snapshot.state = ConnState::Connected {
             phone_version: "2.4.0".into(),
             dns: DnsMode::Phone,
+            wireless: false,
         };
         assert_eq!(
             connected_health_line(&snapshot, now, &utc),

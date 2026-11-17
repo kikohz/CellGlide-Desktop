@@ -328,13 +328,18 @@ fn state_text(state: &ConnState) -> String {
         ConnState::ChoosePhone => "choose phone".into(),
         ConnState::Idle => "idle".into(),
         ConnState::Connecting => "connecting".into(),
-        ConnState::Connected { phone_version, dns } => {
+        ConnState::Connected {
+            phone_version,
+            dns,
+            wireless,
+        } => {
             let dns = match dns {
                 DnsMode::Phone => "phone",
                 DnsMode::Public => "public",
                 DnsMode::Unmanaged => "unmanaged",
             };
-            format!("connected (phone {phone_version}, dns {dns})")
+            let link = if *wireless { ", wireless" } else { "" };
+            format!("connected (phone {phone_version}, dns {dns}{link})")
         }
         ConnState::Retrying { reason } => {
             let key = reason.key();
@@ -705,6 +710,7 @@ mod tests {
             state: ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             ..Snapshot::default()
         }
@@ -1300,6 +1306,7 @@ mod windows_tests {
             state: ConnState::Connected {
                 phone_version: "2.2.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             ..Snapshot::default()
         };

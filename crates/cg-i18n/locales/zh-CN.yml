@@ -60,6 +60,8 @@ reason:
   shutting_down: "CellGlide 服务正在退出"
   version_mismatch: "CellGlide 服务版本（协议 %{service}）与本程序（协议 %{client}）不一致，请重新启动 CellGlide"
   bad_day: "只能查看最近 7 天的记录（日期格式 YYYY-MM-DD）"
+  wireless_unavailable: "这台电脑不能开无线网络给 iPhone 连接：%{cause}"
+  wireless_store_unavailable: "无法读取或保存无线配对"
 check:
   fix: "修复：%{fix}"
   service:
@@ -424,3 +426,88 @@ settings:
   autostart_failed: "无法更改登录启动：%{error}"
 doctor:
   running: "正在检查…"
+wireless:
+  closer: "把手机放近一点，或插上数据线"
+  cause:
+    no_adapter: "没有无线网卡"
+    radio_off: "WLAN 已关闭"
+    mobile_hotspot_on: "请先关闭 Windows 的移动热点"
+    in_use: "无线网卡正被其他程序占用"
+    unsupported: "无线网卡不支持"
+  failure:
+    access_point: "无法打开无线网络：%{cause}"
+    no_phone: "没有等到 iPhone"
+    several_phones: "有多台 iPhone 等待配对，请只留一台连在这个网络上，然后再试"
+    pairing_stale: "这台 iPhone 已不再允许这台电脑无线连接，请重新配对"
+    pairing_refused: "iPhone 没有接受这台电脑的配对。如果在 iPhone 上移除过这台电脑，请重新配对"
+    name_clash: "网络上另有设备使用这台 iPhone 的名字，所以没有连接"
+    lost: "无线连接中断，没能恢复"
+    turned_off: "无线连接已关闭"
+    store_unavailable: "无法读取保存的无线连接设置"
+    phone_refused: "无法使用这台 iPhone：%{reason}"
+    pairing_denied: "iPhone 上拒绝了配对"
+    pairing_failed: "配对没有完成，没有保存任何内容"
+    pairing_busy: "iPhone 暂时不接受配对，请过一分钟再试"
+    not_sharing: "没有等到 iPhone。请在 iPhone 上打开 CellGlide 并开始共享；如果开着 VPN 模式，请先关闭"
+  hint:
+    several_phones: "有多台 iPhone 等待配对，请只留一台连在这个网络上"
+    pairing_busy: "iPhone 暂时不接受配对，一分钟后再试"
+    not_sharing: "请在 iPhone 上打开 CellGlide 并开始共享；如果开着 VPN 模式，请先关闭"
+    name_clash: "网络上另有设备使用这台 iPhone 的名字，等到只剩一台时再连接"
+  step:
+    join: "在 iPhone 的“设置 → 无线局域网”里连接 %{ssid}，密码 %{passphrase}。"
+    share: "回到 iPhone 上的 CellGlide，点“开始共享”，保持在前台。"
+    wait: "这台电脑会自动连上。"
+    note: "iPhone 可能提示这个网络无法连接互联网，这是正常的，上网走的是蜂窝。"
+  line:
+    starting: "无线：正在打开网络…"
+    waiting: "无线：等待 iPhone 连接 %{ssid}"
+    pairing: "无线：在 iPhone 上确认验证码 %{code}"
+    pairing_confirmed: "无线：等待 iPhone 确认验证码"
+    connecting: "无线：正在连接…"
+    connected: "已通过无线连接 · 建议插线更稳"
+    connected_weak: "已通过无线连接 · 信号弱：把手机放近一点，或插上数据线"
+    reconnecting: "正在重新连接…把手机放近一点，或插上数据线"
+    failed: "无线连接失败：%{reason}"
+  starting:
+    title: "正在打开无线网络…"
+    detail: "需要几秒钟。"
+  waiting:
+    title: "正在等待 iPhone"
+    detail: "在 iPhone 上连接 %{ssid}，然后在 CellGlide 里开始共享。"
+  pairing:
+    title: "在 iPhone 上确认验证码 %{code}"
+    detail: "请与 iPhone 屏幕上的数字核对。"
+    detail_named: "请与 %{name} 屏幕上的数字核对。"
+    confirmed: "等待 iPhone 上也确认…"
+  connecting:
+    title: "正在无线连接…"
+    detail: "已找到 iPhone，正在建立连接。"
+  connected:
+    title: "已通过无线连接"
+    detail: "建议插线更稳"
+  reconnecting:
+    title: "正在重新连接…"
+  failed:
+    title: "无线连接失败"
+  paired:
+    code: "验证码配对"
+    cable: "插线配对"
+    stale: "需要重新配对"
+  action:
+    connect: "无线连接"
+    cancel: "取消"
+    retry: "重试"
+    match: "一致"
+    copy: "复制"
+    forget: "移除"
+    repair: "重新配对"
+    regenerate: "重新生成网络名和密码"
+    regenerate_confirm: "已连过当前网络的 iPhone 需要重新连接新网络。继续吗？"
+  settings:
+    switch: "无线连接"
+    note: "没带线时，让 iPhone 经这台电脑开的临时 Wi‑Fi 连过来。"
+    paired: "已配对的 iPhone"
+  cli:
+    confirm_prompt: "iPhone 上显示的验证码一致吗？(y/N)"
+    not_terminal: "这里无法询问（不是终端），按「不一致」处理。请在 CellGlide 应用里确认验证码。"

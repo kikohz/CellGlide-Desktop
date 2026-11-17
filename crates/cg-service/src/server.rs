@@ -204,15 +204,27 @@ async fn client<C: AsyncRead + AsyncWrite + Unpin>(
                 auto_connect,
                 phone,
                 strict_dns,
-            }) => outcome(
-                controller
-                    .send(Command::SetSettings {
-                        auto_connect,
-                        phone,
-                        strict_dns,
-                    })
-                    .await,
-            ),
+                wireless,
+            }) => set_settings(&controller, auto_connect, phone, strict_dns, wireless).await,
+            Ok(Request::ConnectWireless) => {
+                outcome(controller.send(Command::ConnectWireless).await)
+            }
+            Ok(Request::CancelWireless) => outcome(controller.send(Command::CancelWireless).await),
+            Ok(Request::ConfirmCode { matches }) => {
+                outcome(controller.send(Command::ConfirmCode { matches }).await)
+            }
+            Ok(Request::WirelessInfo) => Response::Wireless {
+                info: controller.wireless_info().await,
+            },
+            Ok(Request::ForgetPhone { peer_id }) => {
+                outcome(controller.send(Command::ForgetPhone { peer_id }).await)
+            }
+            Ok(Request::RegenerateAccessPoint) => {
+                outcome(controller.send(Command::RegenerateAccessPoint).await)
+            }
+            Ok(Request::RepairPhone { peer_id }) => {
+                outcome(controller.send(Command::RepairPhone { peer_id }).await)
+            }
             Ok(Request::Subscribe) => {
                 let mut updates = controller.subscribe();
                 let mut probe = [0u8; 1];
@@ -285,6 +297,35 @@ fn parse_day(text: &str) -> Option<jiff::civil::Date> {
     shaped.then(|| text.parse().ok()).flatten()
 }
 
+/// The settings first, then the wireless switch (its own command: turning it on checks the
+/// access point, and a failure leaves the other settings applied and the switch off). A request
+/// with only the switch leaves the other settings, and the retry they would cause, alone.
+async fn set_settings(
+    controller: &Controller,
+    auto_connect: Option<bool>,
+    phone: Option<cg_ipc::PhoneChoice>,
+    strict_dns: Option<bool>,
+    wireless: Option<bool>,
+) -> Response {
+    let others = auto_connect.is_some() || phone.is_some() || strict_dns.is_some();
+    if others || wireless.is_none() {
+        let applied = controller
+            .send(Command::SetSettings {
+                auto_connect,
+                phone,
+                strict_dns,
+            })
+            .await;
+        if applied.is_err() {
+            return outcome(applied);
+        }
+    }
+    match wireless {
+        Some(enabled) => outcome(controller.send(Command::SetWireless { enabled }).await),
+        None => Response::Ok,
+    }
+}
+
 fn outcome(result: cg_core::Result<()>) -> Response {
     match result {
         Ok(()) => Response::Ok,
@@ -343,6 +384,15 @@ pub(crate) mod test_support {
 
     /// Serves `listener` with a controller whose state lives under `dir`; keep the mux alive.
     pub async fn spawn_server<L: Listener>(dir: &Path, listener: L) -> FakeMux {
+        spawn_server_with(dir, listener, |_| {}).await
+    }
+
+    /// As [`spawn_server`], with `adjust` applied to the controller's configuration last.
+    pub async fn spawn_server_with<L: Listener>(
+        dir: &Path,
+        listener: L,
+        adjust: impl FnOnce(&mut ControllerConfig),
+    ) -> FakeMux {
         let mux = FakeMux::start().await;
         let mut config =
             ControllerConfig::new(mux.endpoint(), Arc::new(SharedFake(FakeBackend::new())));
@@ -357,6 +407,7 @@ pub(crate) mod test_support {
             early_spacing: Duration::from_millis(300),
             quick_fail_after: 2,
         };
+        adjust(&mut config);
         let controller = Controller::spawn(config);
         let sources = Arc::new(test_sources(dir));
         tokio::spawn(serve(listener, controller, Arc::new(NoDoctor), sources));
@@ -431,6 +482,7 @@ mod access_tests {
                 auto_connect: Some(false),
                 phone: None,
                 strict_dns: None,
+                wireless: None,
             },
             Request::Diagnostics {
                 range: DiagRange::Day,
@@ -466,6 +518,202 @@ mod access_tests {
         assert_eq!(
             ask(&mut full, &Request::Disconnect).await,
             Some(Response::Ok)
+        );
+    }
+
+    fn wireless_requests() -> Vec<Request> {
+        vec![
+            Request::ConnectWireless,
+            Request::CancelWireless,
+            Request::ConfirmCode { matches: true },
+            Request::WirelessInfo,
+            Request::ForgetPhone {
+                peer_id: "A1".into(),
+            },
+            Request::RegenerateAccessPoint,
+            Request::RepairPhone {
+                peer_id: "A1".into(),
+            },
+            Request::SetSettings {
+                auto_connect: None,
+                phone: None,
+                strict_dns: None,
+                wireless: Some(true),
+            },
+        ]
+    }
+
+    /// A read-only peer gets no wireless request through, and never the passphrase.
+    #[tokio::test]
+    async fn read_only_peers_get_no_wireless_request_nor_the_passphrase() {
+        let (_dir, _mux, tx) = start().await;
+        let mut conn = dial(&tx, Access::ReadOnly);
+        for request in wireless_requests() {
+            assert_eq!(
+                ask(&mut conn, &request).await,
+                Some(Response::Error {
+                    reason: Reason::NotAllowed
+                }),
+                "{request:?}"
+            );
+        }
+        let mut full = dial(&tx, Access::Full);
+        assert!(matches!(
+            ask(&mut full, &Request::WirelessInfo).await,
+            Some(Response::Wireless { .. })
+        ));
+    }
+
+    /// Without the platform's ports (Linux, or this rig): nothing is available, the switch
+    /// can't be turned on, and the other settings in the same request still are applied first.
+    #[tokio::test]
+    async fn without_the_platform_the_switch_stays_off() {
+        let (_dir, _mux, tx) = start().await;
+        let mut full = dial(&tx, Access::Full);
+        let Some(Response::Wireless { info }) = ask(&mut full, &Request::WirelessInfo).await else {
+            panic!("expected the wireless info");
+        };
+        assert_eq!(info.available, None);
+        assert!(info.paired.is_empty() && info.passphrase.is_empty());
+        let set = Request::SetSettings {
+            auto_connect: Some(false),
+            phone: None,
+            strict_dns: None,
+            wireless: Some(true),
+        };
+        assert_eq!(
+            ask(&mut full, &set).await,
+            Some(Response::Error {
+                reason: Reason::WirelessUnavailable {
+                    cause: cg_ipc::wireless::ApFailure::Unsupported
+                }
+            })
+        );
+        let Some(Response::Status { snapshot }) = ask(&mut full, &Request::Status).await else {
+            panic!("expected a status");
+        };
+        assert!(!snapshot.settings.auto_connect, "applied before the switch");
+        assert!(!snapshot.settings.wireless_enabled);
+        assert!(!snapshot.wireless_offered);
+        assert_eq!(
+            ask(&mut full, &Request::ConnectWireless).await,
+            Some(Response::Error {
+                reason: Reason::BadRequest
+            })
+        );
+    }
+
+    /// With the platform (fakes) and a store: each wireless request reaches the controller.
+    #[tokio::test]
+    async fn wireless_requests_reach_the_controller() {
+        use cg_core::testing::FakeWireless;
+        use cg_core::wireless::store::{PlainSecrets, WirelessStore};
+        use cg_ipc::wireless::ApFailure;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            WirelessStore::open(&dir.path().join("wireless"), Arc::new(PlainSecrets)).unwrap(),
+        );
+        let fake = FakeWireless::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shared, ports) = (store.clone(), fake.ports());
+        let _mux = super::test_support::spawn_server_with(dir.path(), MemListener(rx), |config| {
+            config.wireless = Some(shared);
+            config.wireless_ports = Some(ports);
+        })
+        .await;
+        let mut full = dial(&tx, Access::Full);
+        let switch_on = Request::SetSettings {
+            auto_connect: None,
+            phone: None,
+            strict_dns: None,
+            wireless: Some(true),
+        };
+        // The access point can't be opened: the switch stays off, with the cause.
+        fake.fail_starts(Some(ApFailure::MobileHotspotOn));
+        assert_eq!(
+            ask(&mut full, &switch_on).await,
+            Some(Response::Error {
+                reason: Reason::WirelessUnavailable {
+                    cause: ApFailure::MobileHotspotOn
+                }
+            })
+        );
+        assert!(!fake.is_up());
+        fake.fail_starts(None);
+        assert_eq!(ask(&mut full, &switch_on).await, Some(Response::Ok));
+        assert!(!fake.is_up(), "only a check");
+        let Some(Response::Status { snapshot }) = ask(&mut full, &Request::Status).await else {
+            panic!("expected a status");
+        };
+        assert!(snapshot.settings.wireless_enabled);
+        assert!(snapshot.settings.auto_connect, "left alone");
+
+        let Some(Response::Wireless { info }) = ask(&mut full, &Request::WirelessInfo).await else {
+            panic!("expected the wireless info");
+        };
+        assert_eq!(info.available, Some(true));
+        let (ssid, passphrase) = store.access_point().unwrap();
+        assert_eq!((info.ssid, info.passphrase), (ssid, passphrase.clone()));
+        assert_eq!(
+            ask(&mut full, &Request::RegenerateAccessPoint).await,
+            Some(Response::Ok)
+        );
+        assert_ne!(store.access_point().unwrap().1, passphrase);
+        let bad = Some(Response::Error {
+            reason: Reason::BadRequest,
+        });
+        assert_eq!(
+            ask(&mut full, &Request::ConfirmCode { matches: true }).await,
+            bad
+        );
+        assert_eq!(
+            ask(
+                &mut full,
+                &Request::ForgetPhone {
+                    peer_id: "A1".into()
+                }
+            )
+            .await,
+            bad
+        );
+        assert_eq!(
+            ask(
+                &mut full,
+                &Request::RepairPhone {
+                    peer_id: "A1".into()
+                }
+            )
+            .await,
+            bad
+        );
+        assert_eq!(
+            ask(&mut full, &Request::ConnectWireless).await,
+            Some(Response::Ok)
+        );
+        // The attempt opens its access point on its own task.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !fake.is_up() {
+            assert!(std::time::Instant::now() < deadline, "no access point");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let Some(Response::Status { snapshot }) = ask(&mut full, &Request::Status).await else {
+            panic!("expected a status");
+        };
+        assert!(snapshot.wireless.is_some() && !snapshot.wireless_offered);
+        assert_eq!(
+            ask(&mut full, &Request::CancelWireless).await,
+            Some(Response::Ok)
+        );
+        assert!(!fake.is_up());
+        // The snapshot never holds the passphrase.
+        let Some(Response::Status { snapshot }) = ask(&mut full, &Request::Status).await else {
+            panic!("expected a status");
+        };
+        let passphrase = store.access_point().unwrap().1;
+        assert!(
+            !String::from_utf8(to_line(&snapshot))
+                .unwrap()
+                .contains(&passphrase)
         );
     }
 
@@ -546,6 +794,7 @@ mod tests {
             auto_connect: Some(false),
             phone: None,
             strict_dns: Some(false),
+            wireless: None,
         };
         assert_eq!(
             client::request(&ep(&path), &set).await.unwrap(),

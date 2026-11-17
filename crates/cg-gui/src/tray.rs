@@ -313,6 +313,7 @@ mod tests {
             state: ConnState::Connected {
                 phone_version: "2.4.0".into(),
                 dns: DnsMode::Phone,
+                wireless: false,
             },
             wants_connection: true,
             health: HealthStatus {

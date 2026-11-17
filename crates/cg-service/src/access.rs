@@ -32,14 +32,22 @@ pub struct Peer {
     pub requester: Requester,
 }
 
-/// Requests that change the connection or settings, or reveal the diagnostics bundle.
-/// Every variant is listed so a new request has to be classified here.
+/// Requests that change the connection or settings, or reveal the diagnostics bundle or the
+/// access point's passphrase (`WirelessInfo`). Every variant is listed so a new request has to
+/// be classified here.
 pub fn needs_full(request: &Request) -> bool {
     match request {
         Request::Connect { .. }
         | Request::Disconnect
         | Request::SetSettings { .. }
-        | Request::Diagnostics { .. } => true,
+        | Request::Diagnostics { .. }
+        | Request::ConnectWireless
+        | Request::CancelWireless
+        | Request::ConfirmCode { .. }
+        | Request::WirelessInfo
+        | Request::ForgetPhone { .. }
+        | Request::RegenerateAccessPoint
+        | Request::RepairPhone { .. } => true,
         Request::Hello
         | Request::Status
         | Request::Doctor
@@ -60,7 +68,14 @@ mod tests {
         assert!(needs_full(&Request::SetSettings {
             auto_connect: None,
             phone: None,
-            strict_dns: None
+            strict_dns: None,
+            wireless: None,
+        }));
+        assert!(needs_full(&Request::SetSettings {
+            auto_connect: None,
+            phone: None,
+            strict_dns: None,
+            wireless: Some(true),
         }));
         assert!(needs_full(&Request::Diagnostics {
             range: DiagRange::Day,
@@ -71,5 +86,25 @@ mod tests {
         assert!(!needs_full(&Request::Doctor));
         assert!(!needs_full(&Request::Subscribe));
         assert!(!needs_full(&Request::History { day: None }));
+    }
+
+    /// Every wireless request needs full access, `WirelessInfo` too: it holds the passphrase.
+    #[test]
+    fn every_wireless_request_needs_full_access() {
+        for request in [
+            Request::ConnectWireless,
+            Request::CancelWireless,
+            Request::ConfirmCode { matches: true },
+            Request::WirelessInfo,
+            Request::ForgetPhone {
+                peer_id: "A1".into(),
+            },
+            Request::RegenerateAccessPoint,
+            Request::RepairPhone {
+                peer_id: "A1".into(),
+            },
+        ] {
+            assert!(needs_full(&request), "{request:?}");
+        }
     }
 }

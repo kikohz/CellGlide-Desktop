@@ -40,6 +40,12 @@ pub enum CoreError {
     /// A command that does not apply now (e.g. a wireless connection while a session runs).
     #[error("bad request")]
     BadRequest,
+    /// The wireless switch was not turned on: the access point could not be opened.
+    #[error("wireless unavailable: {0}")]
+    WirelessUnavailable(crate::wireless::ports::ApFailure),
+    /// The wireless pairing store is missing or could not be read or written.
+    #[error("the wireless pairing store is unavailable")]
+    WirelessStore,
 }
 
 impl CoreError {
@@ -75,6 +81,8 @@ impl CoreError {
                 detail: format!("wireless: {error}"),
             },
             CoreError::BadRequest => Reason::BadRequest,
+            CoreError::WirelessUnavailable(cause) => Reason::WirelessUnavailable { cause: *cause },
+            CoreError::WirelessStore => Reason::WirelessStoreUnavailable,
         }
     }
 }

@@ -1,9 +1,8 @@
-//! The wireless session as the snapshot shows it. Internal for now: the snapshot carries it only
-//! while a wireless attempt is going on or has just failed (`Snapshot::wireless`, left out of the
-//! JSON otherwise), so version 6 clients and snapshots are unaffected. The protocol bump that
-//! makes it public comes with the wireless requests.
+//! The wireless session as the snapshot shows it (`Snapshot::wireless`, while a wireless attempt
+//! is going on or has just failed), and the answer to `Request::WirelessInfo`.
 //!
-//! The access point's passphrase is never part of any of these.
+//! The access point's passphrase is only ever in [`WirelessInfo`], which full-access clients
+//! alone may ask for, and its `Debug` never prints it.
 
 use crate::Reason;
 use serde::{Deserialize, Serialize};
@@ -23,6 +22,27 @@ pub enum ApFailure {
     InUse,
     #[error("the wireless adapter can't host an access point")]
     Unsupported,
+}
+
+impl ApFailure {
+    /// The `cg-i18n` key of this cause's text.
+    pub fn key(self) -> &'static str {
+        match self {
+            ApFailure::NoAdapter => "wireless.cause.no_adapter",
+            ApFailure::RadioOff => "wireless.cause.radio_off",
+            ApFailure::MobileHotspotOn => "wireless.cause.mobile_hotspot_on",
+            ApFailure::InUse => "wireless.cause.in_use",
+            ApFailure::Unsupported => "wireless.cause.unsupported",
+        }
+    }
+
+    pub const ALL: [ApFailure; 5] = [
+        ApFailure::NoAdapter,
+        ApFailure::RadioOff,
+        ApFailure::MobileHotspotOn,
+        ApFailure::InUse,
+        ApFailure::Unsupported,
+    ];
 }
 
 /// How a wireless attempt ended when it did not end because the user (or USB) ended it.
@@ -62,6 +82,56 @@ pub enum WirelessFailure {
     /// The iPhone turned code pairing away (another pairing in progress, or its lockout after
     /// three failures) until the window ran out.
     PairingBusy,
+    /// Something joined the access point, yet no iPhone advertised CellGlide for a minute (its
+    /// app is not sharing, or its VPN mode is on), until the window ran out.
+    NotSharing,
+}
+
+impl WirelessFailure {
+    /// One of every failure (an access point failure per cause); a new variant fails to
+    /// compile until the match below, and so the list, names it.
+    pub fn all() -> Vec<WirelessFailure> {
+        let mut all: Vec<WirelessFailure> = ApFailure::ALL
+            .iter()
+            .map(|&cause| WirelessFailure::AccessPoint { cause })
+            .collect();
+        all.extend([
+            WirelessFailure::NoPhone,
+            WirelessFailure::SeveralPhones,
+            WirelessFailure::PairingStale,
+            WirelessFailure::PairingRefused,
+            WirelessFailure::NameClash,
+            WirelessFailure::Lost,
+            WirelessFailure::TurnedOff,
+            WirelessFailure::StoreUnavailable,
+            WirelessFailure::PhoneRefused {
+                reason: Reason::PhoneTooOld,
+            },
+            WirelessFailure::PairingDenied,
+            WirelessFailure::PairingFailed,
+            WirelessFailure::PairingBusy,
+            WirelessFailure::NotSharing,
+        ]);
+        for failure in &all {
+            match failure {
+                WirelessFailure::AccessPoint { .. }
+                | WirelessFailure::NoPhone
+                | WirelessFailure::SeveralPhones
+                | WirelessFailure::PairingStale
+                | WirelessFailure::PairingRefused
+                | WirelessFailure::NameClash
+                | WirelessFailure::Lost
+                | WirelessFailure::TurnedOff
+                | WirelessFailure::StoreUnavailable
+                | WirelessFailure::PhoneRefused { .. }
+                | WirelessFailure::PairingDenied
+                | WirelessFailure::PairingFailed
+                | WirelessFailure::PairingBusy
+                | WirelessFailure::NotSharing => {}
+            }
+        }
+        all
+    }
 }
 
 /// The phase of the wireless attempt (tagged `phase`). `Debug` never prints the pairing code.
@@ -141,6 +211,56 @@ pub struct WirelessStatus {
     /// window runs out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<WirelessFailure>,
+}
+
+/// How a pairing was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingMethod {
+    /// By confirming a code on both screens.
+    Code,
+    /// Over the cable, during a USB session.
+    Cable,
+}
+
+/// A paired iPhone, as the settings list it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedPhone {
+    /// The iPhone's random id; what `ForgetPhone` and `RepairPhone` take.
+    pub peer_id: String,
+    pub name: String,
+    pub method: PairingMethod,
+    /// The iPhone no longer accepts this pairing (or its key is lost): pair again.
+    pub stale: bool,
+    /// Unix seconds.
+    pub created_at: u64,
+}
+
+/// The answer to `Request::WirelessInfo`. `Debug` never prints the passphrase.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirelessInfo {
+    /// Whether wireless connections can work here: `None` where the platform has none (Linux),
+    /// `Some(false)` when it has, but something is missing (`unavailable` says what).
+    pub available: Option<bool>,
+    /// Why not, when `available` is `Some(false)`.
+    #[serde(default)]
+    pub unavailable: Option<Reason>,
+    /// The access point's network name and passphrase (empty when not available).
+    pub ssid: String,
+    pub passphrase: String,
+    pub paired: Vec<PairedPhone>,
+}
+
+impl std::fmt::Debug for WirelessInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WirelessInfo")
+            .field("available", &self.available)
+            .field("unavailable", &self.unavailable)
+            .field("ssid", &self.ssid)
+            .field("passphrase", &"<hidden>")
+            .field("paired", &self.paired)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +355,27 @@ mod tests {
             hint: None,
         };
         assert!(!serde_json::to_string(&plain).unwrap().contains("hint"));
+    }
+
+    #[test]
+    fn every_failure_in_the_list_round_trips() {
+        for failure in WirelessFailure::all() {
+            let json = serde_json::to_string(&failure).unwrap();
+            assert_eq!(
+                serde_json::from_str::<WirelessFailure>(&json).unwrap(),
+                failure
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&WirelessFailure::NotSharing).unwrap(),
+            r#"{"code":"not_sharing"}"#
+        );
+        // A WirelessInfo from a service that left `unavailable` out reads as none.
+        let info: WirelessInfo =
+            serde_json::from_str(r#"{"available":null,"ssid":"","passphrase":"","paired":[]}"#)
+                .unwrap();
+        assert_eq!(info.unavailable, None);
+        assert_eq!(info.available, None);
     }
 
     #[test]

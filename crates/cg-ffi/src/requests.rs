@@ -31,6 +31,9 @@ fn reply_to(response: Response, now: Timestamp, tz: &TimeZone) -> ReplyResult {
     let ok = |value| ReplyResult::Ok { value };
     match response {
         Response::Ok | Response::Hello { .. } | Response::Status { .. } => ReplyResult::done(),
+        // The wireless info (with the passphrase) gets a view of its own with the wireless
+        // commands; until then the app is told only that the request went through.
+        Response::Wireless { .. } => ReplyResult::done(),
         Response::Doctor { checks } => ok(ReplyValue::Checks {
             rows: views::checks(&checks),
         }),

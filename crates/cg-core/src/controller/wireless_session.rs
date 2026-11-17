@@ -21,8 +21,8 @@ use super::Event;
 use crate::wireless::code_pairing::{self, CodePairingError, Paired};
 use crate::wireless::pairing::{PAIRING_IDENTITY, link_key, pairing_channel_key};
 use crate::wireless::policy::{
-    self, DialContext, Next, PAIRING_BUSY_WAIT, Pick, RETRY_EVERY, RETRY_FOR, UnknownTracker,
-    WAIT_FOR_PHONE,
+    self, DialContext, NOT_SHARING_AFTER, Next, PAIRING_BUSY_WAIT, Pick, RETRY_EVERY, RETRY_FOR,
+    UnknownTracker, WAIT_FOR_PHONE,
 };
 use crate::wireless::ports::{DialError, FoundPhone, RunningAccessPoint, TlsLink, WirelessPorts};
 use crate::wireless::store::{Method, Record, WirelessStore};
@@ -238,9 +238,14 @@ pub(super) struct Task(Option<JoinHandle<()>>);
 
 impl Task {
     /// `computer_name` as configured (`ControllerConfig::computer_name`); the code pairing's
-    /// `M` line gets it through `wireless::computer_name`.
-    pub(super) fn spawn(context: Context, computer_name: Option<String>) -> Task {
-        Task(Some(tokio::spawn(run_as(context, computer_name))))
+    /// `M` line gets it through `wireless::computer_name`. With `repair`, the attempt is about
+    /// that paired phone only, which it pairs by code again (`RepairPhone`).
+    pub(super) fn spawn(
+        context: Context,
+        computer_name: Option<String>,
+        repair: Option<String>,
+    ) -> Task {
+        Task(Some(tokio::spawn(run_as(context, computer_name, repair))))
     }
 
     /// Aborts the task and waits until it is gone (and with it the access point).
@@ -291,17 +296,21 @@ impl Context {
 /// tests that drive the task directly.
 #[cfg(test)]
 pub(super) async fn run(context: Context) {
-    run_as(context, None).await;
+    run_as(context, None, None).await;
 }
 
-async fn run_as(context: Context, computer_name: Option<String>) {
-    let failure = drive(&context, computer_name).await;
+async fn run_as(context: Context, computer_name: Option<String>, repair: Option<String>) {
+    let failure = drive(&context, computer_name, repair).await;
     tracing::info!("wireless: attempt ended: {failure:?}");
     context.tell(WirelessEvent::Done(failure)).await;
 }
 
 /// The attempt from start to failure; the access point lives here and nowhere else.
-async fn drive(context: &Context, computer_name: Option<String>) -> WirelessFailure {
+async fn drive(
+    context: &Context,
+    computer_name: Option<String>,
+    repair: Option<String>,
+) -> WirelessFailure {
     let timing = context.timing;
     context
         .tell(WirelessEvent::Phase(WirelessPhase::Starting))
@@ -328,7 +337,7 @@ async fn drive(context: &Context, computer_name: Option<String>) -> WirelessFail
         }
     };
     tracing::info!("wireless: access point {ssid} started");
-    let mut attempt = Attempt::new(context, computer_name);
+    let mut attempt = Attempt::new(context, computer_name, repair);
     let mut window = Window {
         kind: WindowKind::Waiting { ssid },
         since: Instant::now(),
@@ -456,10 +465,17 @@ struct Attempt<'a> {
     fresh: Option<(String, Instant)>,
     /// The phone turned pairing away; not asked again before this.
     busy_until: Option<Instant>,
+    /// `RepairPhone`: the one phone this attempt is about. Its pairing counts as missing (so it
+    /// is paired by code) until a new one is made in this attempt, and no other phone is used.
+    repair: Option<String>,
 }
 
 impl<'a> Attempt<'a> {
-    fn new(context: &'a Context, computer_name: Option<String>) -> Attempt<'a> {
+    fn new(
+        context: &'a Context,
+        computer_name: Option<String>,
+        repair: Option<String>,
+    ) -> Attempt<'a> {
         Attempt {
             context,
             computer_name,
@@ -469,6 +485,7 @@ impl<'a> Attempt<'a> {
             picked: None,
             fresh: None,
             busy_until: None,
+            repair,
         }
     }
 
@@ -486,6 +503,8 @@ impl<'a> Attempt<'a> {
         let timing = self.context.timing;
         let mut clash_rounds = 0u32;
         let mut unknown_seen = false;
+        // Any phone advertising CellGlide in this window (for the not-sharing hint).
+        let mut found_any = false;
         // What holds the attempt up while it waits (several unpaired phones, a busy phone).
         let mut hint: Option<WirelessFailure> = None;
         // The (name clash, hint) last shown with the window's phase.
@@ -506,7 +525,22 @@ impl<'a> Attempt<'a> {
                 found = self.browse(local) => found,
                 () = access_point.lost() => return Err(lost()),
             };
-            let records = self.context.store.records();
+            if !found.is_empty() {
+                found_any = true;
+                if hint == Some(WirelessFailure::NotSharing) {
+                    hint = None;
+                }
+            } else if window.pairs()
+                && !found_any
+                && hint.is_none()
+                && round.duration_since(window.since) >= NOT_SHARING_AFTER
+                && !access_point.clients().is_empty()
+            {
+                // Something joined, yet nothing advertises CellGlide: its app is not sharing, or
+                // its VPN mode is on.
+                hint = Some(WirelessFailure::NotSharing);
+            }
+            let (found, records) = self.for_repair(found, self.context.store.records());
             let pick = policy::pick(&found, &records, &self.verified, &self.marked_stale);
             // A phone to dial with a pairing (one found paired, or one just paired by code).
             let mut to_dial: Option<(FoundPhone, Record)> = None;
@@ -581,6 +615,27 @@ impl<'a> Attempt<'a> {
                 () = access_point.lost() => return Err(lost()),
             }
         }
+    }
+
+    /// For `RepairPhone`: only the phone being paired again counts as found, and its pairing
+    /// counts as stale (so `pick` pairs it by code) until it was paired again in this attempt.
+    /// Otherwise both as they are.
+    fn for_repair(
+        &self,
+        mut found: Vec<FoundPhone>,
+        mut records: Vec<Record>,
+    ) -> (Vec<FoundPhone>, Vec<Record>) {
+        let Some(peer) = self.repair.as_deref() else {
+            return (found, records);
+        };
+        found.retain(|phone| phone.instance == peer);
+        let repaired = self.fresh.as_ref().is_some_and(|(fresh, _)| fresh == peer);
+        if !repaired {
+            for record in records.iter_mut().filter(|r| r.peer_id == peer) {
+                record.stale = true;
+            }
+        }
+        (found, records)
     }
 
     async fn browse(&self, local: Option<IpAddr>) -> Vec<FoundPhone> {

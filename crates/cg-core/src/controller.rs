@@ -22,10 +22,12 @@ use crate::tunnel::{
     TunnelPlan,
 };
 use crate::wireless::cable_pairing;
-use crate::wireless::ports::{DialError, WirelessPorts};
-use crate::wireless::store::WirelessStore;
+use crate::wireless::ports::{DialError, WirelessLink, WirelessPorts};
+use crate::wireless::store::{Method, WirelessStore};
 use crate::{CoreError, Result};
-use cg_ipc::wireless::{WirelessFailure, WirelessStatus};
+use cg_ipc::wireless::{
+    ApFailure, PairedPhone, PairingMethod, WirelessFailure, WirelessInfo, WirelessStatus,
+};
 use wireless_session::{NotEstablished, WirelessEvent};
 pub use wireless_session::{WirelessPhase, WirelessTiming};
 
@@ -252,9 +254,26 @@ pub enum Command {
     ConnectWireless,
     /// Ends the wireless attempt (and its session), closing the access point.
     CancelWireless,
-    /// The wireless switch. Turning it off ends a wireless attempt (`TurnedOff`).
+    /// The wireless switch. Turning it on first opens the access point and closes it again, to
+    /// see that this computer can (`CoreError::WirelessUnavailable` and the switch stays off if
+    /// not; `WirelessStore` without the pairing store). Turning it off ends a wireless attempt
+    /// (`TurnedOff`).
     SetWireless {
         enabled: bool,
+    },
+    /// Removes the pairing with `peer_id` (`BadRequest` for one that isn't there). A wireless
+    /// attempt with that phone (its session, or re-pairing it) is ended first.
+    ForgetPhone {
+        peer_id: String,
+    },
+    /// New network name and passphrase for the access point. Refused (`BadRequest`) while a
+    /// wireless attempt runs, whose access point uses the old ones.
+    RegenerateAccessPoint,
+    /// `ConnectWireless` for the paired phone `peer_id` only, which is paired by code again
+    /// even though its pairing looks good (the new pairing replaces it once saved). Refused
+    /// (`BadRequest`) for a phone that isn't paired, or while a wireless attempt runs.
+    RepairPhone {
+        peer_id: String,
     },
     /// The user's answer to the code shown in the wireless phase `Pairing`: whether the iPhone
     /// shows the same code. Refused (`BadRequest`, nothing changes) when no code is shown.
@@ -296,6 +315,10 @@ pub struct Controller {
     /// The timeline, read here so `history` never waits for the actor.
     history: Option<Arc<HealthLog>>,
     time_zone: TimeZone,
+    /// The pairing store, read here so `wireless_info` never waits for the actor.
+    wireless_store: Option<Arc<WirelessStore>>,
+    /// The platform has wireless ports (the access point and the rest).
+    wireless_platform: bool,
 }
 
 impl Controller {
@@ -307,13 +330,70 @@ impl Controller {
             .health_dir
             .clone()
             .map(|dir| Arc::new(HealthLog::new(dir, time_zone.clone())));
+        let wireless_store = config.wireless.clone();
+        let wireless_platform = config.wireless_ports.is_some();
         tokio::spawn(Actor::new(config, snapshot_tx).run(rx));
         Controller {
             messages: tx,
             snapshot,
             history,
             time_zone,
+            wireless_store,
+            wireless_platform,
         }
+    }
+
+    /// What `Request::WirelessInfo` answers: whether wireless works here, the access point's
+    /// name and passphrase (made on first use) and the paired phones. Read from the store on a
+    /// blocking thread, never by the actor. The passphrase is for full-access clients only.
+    pub async fn wireless_info(&self) -> WirelessInfo {
+        let mut info = WirelessInfo {
+            available: None,
+            unavailable: None,
+            ssid: String::new(),
+            passphrase: String::new(),
+            paired: Vec::new(),
+        };
+        if !self.wireless_platform {
+            return info;
+        }
+        let Some(store) = self.wireless_store.clone() else {
+            info.available = Some(false);
+            info.unavailable = Some(Reason::WirelessStoreUnavailable);
+            return info;
+        };
+        info.paired = store
+            .records()
+            .into_iter()
+            .map(|record| PairedPhone {
+                peer_id: record.peer_id,
+                name: record.name,
+                method: match record.method {
+                    Method::Code => PairingMethod::Code,
+                    Method::Cable => PairingMethod::Cable,
+                },
+                stale: record.stale,
+                created_at: record.created_at,
+            })
+            .collect();
+        match tokio::task::spawn_blocking(move || store.access_point()).await {
+            Ok(Ok((ssid, passphrase))) => {
+                info.available = Some(true);
+                info.ssid = ssid;
+                info.passphrase = passphrase;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("wireless: no access point name: {error}");
+                info.available = Some(false);
+                info.unavailable = Some(Reason::WirelessStoreUnavailable);
+            }
+            Err(error) => {
+                tracing::warn!("wireless: no access point name: {error}");
+                info.available = Some(false);
+                info.unavailable = Some(Reason::WirelessStoreUnavailable);
+            }
+        }
+        info
     }
 
     /// One day of the timeline (`None`: today), read straight from the files. Empty when
@@ -473,6 +553,9 @@ struct Wireless {
     /// While the phase is `Pairing`: where the user's answer goes. Dropped (the question
     /// withdrawn) whenever the attempt ends.
     confirm: Option<tokio::sync::oneshot::Sender<bool>>,
+    /// The phone this attempt is about, by id: the one being paired again (`RepairPhone`), or
+    /// the one a session was built with. Forgetting it ends the attempt.
+    peer: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -587,6 +670,7 @@ impl Actor {
                 probes: HashMap::new(),
                 probing: None,
                 confirm: None,
+                peer: None,
             },
         }
     }
@@ -719,10 +803,24 @@ impl Actor {
                 self.end_wireless(WirelessPhase::Off).await;
                 self.teardown().await;
             }
-            Command::ConnectWireless => return self.connect_wireless(events).await,
+            Command::ConnectWireless => return self.connect_wireless(events, None).await,
+            Command::RepairPhone { peer_id } => {
+                if self.wireless.phase.owns() || !self.is_paired(&peer_id) {
+                    tracing::info!("wireless: not pairing again: no such pairing, or busy");
+                    return Err(CoreError::BadRequest);
+                }
+                return self.connect_wireless(events, Some(peer_id)).await;
+            }
             Command::CancelWireless => self.end_wireless(WirelessPhase::Off).await,
             Command::ConfirmCode { matches } => return self.confirm_code(matches).await,
+            Command::ForgetPhone { peer_id } => return self.forget_phone(peer_id).await,
+            Command::RegenerateAccessPoint => return self.regenerate_access_point().await,
             Command::SetWireless { enabled } => {
+                // Turning it on: see first that this computer can open the access point. An
+                // attempt can only run with the switch on, so none runs while this checks.
+                if enabled && !self.wireless_enabled() {
+                    self.check_access_point().await?;
+                }
                 self.settings.update(|s| s.wireless_enabled = enabled);
                 if !self.wireless_enabled() && self.wireless.phase.owns() {
                     tracing::info!("wireless: switched off; ending");
@@ -777,7 +875,111 @@ impl Actor {
         Ok(())
     }
 
-    async fn connect_wireless(&mut self, events: &mpsc::Sender<Event>) -> Result<()> {
+    /// Whether the store holds a pairing with `peer_id` (stale or not); read from memory.
+    fn is_paired(&self, peer_id: &str) -> bool {
+        self.config
+            .wireless
+            .as_ref()
+            .is_some_and(|store| store.records().iter().any(|r| r.peer_id == peer_id))
+    }
+
+    /// Opens the access point and drops it at once, the way an attempt starts it (the platform
+    /// stops one access point before it starts the next). Without the platform the cause is
+    /// `Unsupported`; without the store, `WirelessStore`.
+    async fn check_access_point(&mut self) -> Result<()> {
+        let Some(ports) = self.config.wireless_ports.clone() else {
+            return Err(CoreError::WirelessUnavailable(ApFailure::Unsupported));
+        };
+        let Some(store) = self.config.wireless.clone() else {
+            return Err(CoreError::WirelessStore);
+        };
+        let (ssid, passphrase) =
+            match tokio::task::spawn_blocking(move || store.access_point()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(error)) => {
+                    tracing::warn!("wireless: no access point name: {error}");
+                    return Err(CoreError::WirelessStore);
+                }
+                Err(error) => {
+                    tracing::warn!("wireless: no access point name: {error}");
+                    return Err(CoreError::WirelessStore);
+                }
+            };
+        let started = ports.access_point.start(&ssid, &passphrase).await;
+        drop(passphrase);
+        match started {
+            Ok(access_point) => {
+                drop(access_point);
+                tracing::info!("wireless: the access point can be opened; switched on");
+                Ok(())
+            }
+            Err(cause) => {
+                tracing::warn!("wireless: the access point can't be opened ({cause}); stays off");
+                Err(CoreError::WirelessUnavailable(cause))
+            }
+        }
+    }
+
+    /// Removes a pairing. An attempt about that phone is ended first (its session torn down,
+    /// the access point closed), so nothing goes on using a pairing that is gone.
+    async fn forget_phone(&mut self, peer_id: String) -> Result<()> {
+        let Some(store) = self.config.wireless.clone() else {
+            return Err(CoreError::WirelessStore);
+        };
+        if !self.is_paired(&peer_id) {
+            return Err(CoreError::BadRequest);
+        }
+        if self.wireless.phase.owns() && self.wireless.peer.as_deref() == Some(peer_id.as_str()) {
+            tracing::info!("wireless: forgetting the phone in use; ending the attempt");
+            self.end_wireless(WirelessPhase::Off).await;
+        }
+        match tokio::task::spawn_blocking(move || store.remove(&peer_id)).await {
+            Ok(Ok(())) => {
+                tracing::info!("wireless: a pairing was removed");
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("wireless: removing a pairing: {error}");
+                Err(CoreError::WirelessStore)
+            }
+            Err(error) => {
+                tracing::warn!("wireless: removing a pairing: {error}");
+                Err(CoreError::WirelessStore)
+            }
+        }
+    }
+
+    /// A new network name and passphrase, unless an access point with the old ones is up.
+    async fn regenerate_access_point(&mut self) -> Result<()> {
+        let Some(store) = self.config.wireless.clone() else {
+            return Err(CoreError::WirelessStore);
+        };
+        if self.wireless.phase.owns() {
+            return Err(CoreError::BadRequest);
+        }
+        match tokio::task::spawn_blocking(move || store.regenerate_access_point()).await {
+            Ok(Ok(())) => {
+                tracing::info!("wireless: new access point name and passphrase");
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("wireless: new access point name: {error}");
+                Err(CoreError::WirelessStore)
+            }
+            Err(error) => {
+                tracing::warn!("wireless: new access point name: {error}");
+                Err(CoreError::WirelessStore)
+            }
+        }
+    }
+
+    /// Starts a wireless attempt; with `repair`, for that paired phone only, paired by code
+    /// again.
+    async fn connect_wireless(
+        &mut self,
+        events: &mpsc::Sender<Event>,
+        repair: Option<String>,
+    ) -> Result<()> {
         if self.wireless.phase.owns() {
             return Ok(());
         }
@@ -813,8 +1015,17 @@ impl Actor {
             events: events.clone(),
         };
         let computer_name = self.config.computer_name.clone();
-        self.wireless.task = Some(wireless_session::Task::spawn(context, computer_name));
-        tracing::info!("wireless: starting");
+        self.wireless.peer = repair.clone();
+        if repair.is_some() {
+            tracing::info!("wireless: starting, to pair a phone again");
+        } else {
+            tracing::info!("wireless: starting");
+        }
+        self.wireless.task = Some(wireless_session::Task::spawn(
+            context,
+            computer_name,
+            repair,
+        ));
         Ok(())
     }
 
@@ -863,6 +1074,7 @@ impl Actor {
         // A question still on screen is withdrawn with the task (which held the other end).
         self.wireless.confirm = None;
         self.wireless.last_error = None;
+        self.wireless.peer = None;
         if self.active_is_wireless() {
             self.teardown().await;
         }
@@ -887,6 +1099,7 @@ impl Actor {
                 if !self.wireless.phase.owns() || self.active.is_some() {
                     return;
                 }
+                let peer = link.phone_id().to_string();
                 match self.establish(Phone::wireless(link), events).await {
                     Ok(mut active) => {
                         let (ended, end) = tokio::sync::oneshot::channel();
@@ -894,6 +1107,7 @@ impl Actor {
                         self.begin_session(active);
                         if reply.send(Ok(end)).is_ok() {
                             self.wireless.phase = WirelessPhase::Connected;
+                            self.wireless.peer = Some(peer);
                             self.wireless.last_error = None;
                             tracing::info!("wireless: connected");
                         } else {
@@ -1830,6 +2044,7 @@ impl Actor {
                 Some(active) => ConnState::Connected {
                     phone_version: active.hello.version.clone(),
                     dns: active.dns,
+                    wireless: active.is_wireless(),
                 },
                 None => ConnState::Connecting,
             };
@@ -1841,6 +2056,7 @@ impl Actor {
             return ConnState::Connected {
                 phone_version: active.hello.version.clone(),
                 dns: active.dns,
+                wireless: active.is_wireless(),
             };
         }
         if self.connecting {
@@ -1868,6 +2084,18 @@ impl Actor {
             };
         }
         ConnState::Idle
+    }
+
+    /// Whether to offer "Connect wirelessly": the switch is on, the platform and the store are
+    /// there, no session or attempt runs and nothing is on USB (an iPhone plugged in is used
+    /// over the cable).
+    fn wireless_offered(&self) -> bool {
+        self.wireless_enabled()
+            && self.config.wireless_ports.is_some()
+            && self.config.wireless.is_some()
+            && self.active.is_none()
+            && !self.wireless.phase.owns()
+            && self.devices.is_empty()
     }
 
     /// The wireless attempt for the snapshot; never the passphrase.
@@ -1914,8 +2142,10 @@ impl Actor {
                 auto_connect: stored.auto_connect,
                 chosen_serial: stored.chosen_serial.clone(),
                 strict_dns: stored.strict_dns,
+                wireless_enabled: stored.wireless_enabled,
             },
             wireless: self.wireless_status(),
+            wireless_offered: self.wireless_offered(),
         };
         self.snapshot.send_if_modified(|current| {
             let changed = *current != next;
@@ -1953,6 +2183,8 @@ fn release_detail(reason: &Reason) -> String {
         Reason::BadRequest => "badRequest",
         Reason::ShuttingDown => "shuttingDown",
         Reason::BadDay => "badDay",
+        Reason::WirelessUnavailable { .. } => "wirelessUnavailable",
+        Reason::WirelessStoreUnavailable => "wirelessStoreUnavailable",
     };
     format!("released {name}")
 }
@@ -2365,7 +2597,8 @@ mod tests {
             snap.state,
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Phone
+                dns: DnsMode::Phone,
+                wireless: false,
             }
         );
         assert_eq!(snap.devices, ["aaaa"]);
@@ -2533,7 +2766,8 @@ mod tests {
             snap.state,
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Unmanaged
+                dns: DnsMode::Unmanaged,
+                wireless: false,
             }
         );
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -2564,7 +2798,8 @@ mod tests {
             snap.state,
             ConnState::Connected {
                 phone_version: "2.2.0".into(),
-                dns: DnsMode::Public
+                dns: DnsMode::Public,
+                wireless: false,
             }
         );
         assert_eq!(
