@@ -2,9 +2,11 @@
 
 mod out;
 mod speedtest;
+mod wireless;
 
 mod cli {
     use crate::out::{out, outln};
+    use crate::wireless;
     use anyhow::{Result, bail};
     use cg_i18n::tr;
     use cg_ipc::client::{self, ClientError};
@@ -42,8 +44,17 @@ mod cli {
         /// Start using the phone's network
         Connect {
             /// The serial of the iPhone to use when several are plugged in
-            #[arg(long)]
+            #[arg(long, conflicts_with = "wireless")]
             serial: Option<String>,
+            /// Windows: connect over Wi-Fi, without a cable
+            #[arg(long, hide = cfg!(not(windows)))]
+            wireless: bool,
+        },
+        /// Windows: the iPhones paired for wireless connection
+        #[command(hide = cfg!(not(windows)))]
+        Wireless {
+            #[command(subcommand)]
+            command: WirelessCmd,
         },
         /// Stop using the phone's network
         Disconnect,
@@ -107,6 +118,34 @@ mod cli {
             /// Windows: on or off. Blocks DNS queries to other networks while connected
             #[arg(long, value_parser = ["on", "off"], hide = cfg!(not(windows)))]
             strict_dns: Option<String>,
+            /// Windows: on or off. Lets the iPhone connect over Wi-Fi when there is no cable
+            #[arg(long, value_parser = ["on", "off"], hide = cfg!(not(windows)))]
+            wireless: Option<String>,
+        },
+    }
+
+    #[derive(Subcommand)]
+    enum WirelessCmd {
+        /// List the paired iPhones
+        List,
+        /// Remove a pairing (by its number in the list, or its name)
+        Forget {
+            /// The number from `wireless list`, or the iPhone's name
+            target: String,
+            /// Don't ask (required when not running in a terminal)
+            #[arg(long)]
+            yes: bool,
+        },
+        /// Pair an iPhone again with a code, then connect to it
+        Repair {
+            /// The number from `wireless list`, or the iPhone's name
+            target: String,
+        },
+        /// Choose a new network name and password
+        Regenerate {
+            /// Don't ask (required when not running in a terminal)
+            #[arg(long)]
+            yes: bool,
         },
     }
 
@@ -130,6 +169,14 @@ mod cli {
                 &[("value", &on_off(settings.strict_dns))]
             )
         );
+        #[cfg(windows)]
+        outln!(
+            "{}",
+            tr(
+                "cli.settings_wireless",
+                &[("value", &on_off(settings.wireless_enabled))]
+            )
+        );
         let phone = settings
             .chosen_serial
             .clone()
@@ -146,6 +193,9 @@ mod cli {
 
     fn print_snapshot(snapshot: &cg_ipc::Snapshot) {
         outln!("{}", describe::state_line(snapshot));
+        for line in wireless::status_lines(snapshot) {
+            outln!("{line}");
+        }
         if let Some(line) = describe::strict_dns_line(snapshot) {
             outln!("{line}");
         }
@@ -210,6 +260,174 @@ mod cli {
             Ok(response) => Ok(response),
             Err(error) => Err(unreachable(&error)),
         }
+    }
+
+    /// The service the wireless attempt talks to.
+    struct Live<'a>(&'a Cli);
+
+    impl wireless::Service for Live<'_> {
+        async fn send(&self, request: Request) -> std::result::Result<Response, String> {
+            match client::request(&self.0.endpoint(), &request).await {
+                Ok(Response::Error { reason }) => Err(describe::reason_text(&reason)),
+                Ok(response) => Ok(response),
+                Err(error) => Err(describe::unreachable(&error)),
+            }
+        }
+    }
+
+    /// The access point's name and password and the paired iPhones; refuses where wireless
+    /// can't work, with the reason.
+    async fn wireless_info(cli: &Cli) -> Result<cg_ipc::wireless::WirelessInfo> {
+        let Response::Wireless { info } = call(cli, Request::WirelessInfo).await? else {
+            bail!("{}", tr("cli.unexpected_reply", &[]));
+        };
+        match info.available {
+            Some(true) => Ok(info),
+            Some(false) => bail!(
+                "{}",
+                describe::wireless_unavailable_text(&info)
+                    .unwrap_or_else(|| tr("cli.wireless_unsupported", &[]))
+            ),
+            None => bail!("{}", tr("cli.wireless_unsupported", &[])),
+        }
+    }
+
+    /// Starts a wireless attempt with `start` (`ConnectWireless` or `RepairPhone`), shows the
+    /// steps, and follows it to the end. Ctrl-C cancels it.
+    async fn wireless_attempt(cli: &Cli, start: Request) -> Result<()> {
+        use wireless::Service;
+        // Listen before asking, so a Ctrl-C in between is not lost.
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = stop.send(());
+            }
+        });
+        let service = Live(cli);
+        call(cli, start).await?;
+        // Whatever fails from here on must not leave the access point open.
+        let giving_up = async |error: anyhow::Error| {
+            let _ = service.send(Request::CancelWireless).await;
+            error
+        };
+        let info = match call(cli, Request::WirelessInfo).await {
+            Ok(Response::Wireless { info }) => info,
+            Ok(_) => {
+                return Err(
+                    giving_up(anyhow::anyhow!("{}", tr("cli.unexpected_reply", &[]))).await,
+                );
+            }
+            Err(error) => return Err(giving_up(error).await),
+        };
+        for line in wireless::intro_lines(&info) {
+            outln!("{line}");
+        }
+        let mut updates = match client::subscribe(&cli.endpoint()).await {
+            Ok(updates) => updates,
+            Err(error) => return Err(giving_up(unreachable(&error)).await),
+        };
+        let outcome = wireless::drive(
+            &service,
+            &wireless::Terminal,
+            &mut updates,
+            async {
+                // Ends only by Ctrl-C; a listener that could not start never fires.
+                if stopped.await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            },
+            wireless::LIMIT,
+            &mut |line| outln!("{line}"),
+        )
+        .await;
+        match outcome.exit_code() {
+            0 => Ok(()),
+            code => std::process::exit(code),
+        }
+    }
+
+    /// `cellglide wireless ...`.
+    async fn wireless_command(cli: &Cli, command: &WirelessCmd) -> Result<()> {
+        use std::io::IsTerminal;
+        let zone = jiff::tz::TimeZone::system();
+        // A script without --yes must not hang on a prompt, nor change anything.
+        if let WirelessCmd::Forget { yes: false, .. } | WirelessCmd::Regenerate { yes: false } =
+            command
+            && !std::io::stdin().is_terminal()
+        {
+            bail!("{}", tr("cli.wireless_needs_yes", &[]));
+        }
+        match command {
+            WirelessCmd::List => {
+                let info = wireless_info(cli).await?;
+                for line in wireless::list_lines(&info.paired, &zone) {
+                    outln!("{line}");
+                }
+            }
+            WirelessCmd::Forget { target, yes } => {
+                let info = wireless_info(cli).await?;
+                let pick = wireless::resolve(&info.paired, target);
+                if let Some(problem) = wireless::pick_problem(&info.paired, target, &pick, &zone) {
+                    bail!("{problem}");
+                }
+                let wireless::Pick::One(index) = pick else {
+                    bail!("{}", tr("cli.unexpected_reply", &[]));
+                };
+                let phone = &info.paired[index];
+                if !*yes
+                    && !wireless::ask_yes_no(&tr(
+                        "cli.wireless_forget_confirm",
+                        &[("name", &phone.name)],
+                    ))
+                {
+                    outln!("{}", tr("cli.wireless_cancelled", &[]));
+                    return Ok(());
+                }
+                call(
+                    cli,
+                    Request::ForgetPhone {
+                        peer_id: phone.peer_id.clone(),
+                    },
+                )
+                .await?;
+                outln!("{}", tr("cli.wireless_forgotten", &[("name", &phone.name)]));
+            }
+            WirelessCmd::Repair { target } => {
+                let info = wireless_info(cli).await?;
+                let pick = wireless::resolve(&info.paired, target);
+                if let Some(problem) = wireless::pick_problem(&info.paired, target, &pick, &zone) {
+                    bail!("{problem}");
+                }
+                let wireless::Pick::One(index) = pick else {
+                    bail!("{}", tr("cli.unexpected_reply", &[]));
+                };
+                let peer_id = info.paired[index].peer_id.clone();
+                return wireless_attempt(cli, Request::RepairPhone { peer_id }).await;
+            }
+            WirelessCmd::Regenerate { yes } => {
+                if !*yes
+                    && !wireless::ask_yes_no(&format!(
+                        "{} {}",
+                        tr("wireless.action.regenerate_confirm", &[]),
+                        tr("cli.yn", &[])
+                    ))
+                {
+                    outln!("{}", tr("cli.wireless_cancelled", &[]));
+                    return Ok(());
+                }
+                call(cli, Request::RegenerateAccessPoint).await?;
+                let info = wireless_info(cli).await?;
+                outln!("{}", tr("cli.wireless_new_ssid", &[("ssid", &info.ssid)]));
+                outln!(
+                    "{}",
+                    tr(
+                        "cli.wireless_new_passphrase",
+                        &[("passphrase", &info.passphrase)]
+                    )
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Writes `text` to `path`, readable only by the owner.
@@ -400,7 +618,11 @@ mod cli {
                     print_snapshot(&snapshot);
                 }
             }
-            Cmd::Connect { serial } => {
+            Cmd::Wireless { command } => return wireless_command(&cli, command).await,
+            Cmd::Connect { wireless: true, .. } => {
+                return wireless_attempt(&cli, Request::ConnectWireless).await;
+            }
+            Cmd::Connect { serial, .. } => {
                 call(
                     &cli,
                     Request::Connect {
@@ -469,8 +691,17 @@ mod cli {
                 auto_connect,
                 phone,
                 strict_dns,
+                wireless,
             } => {
-                if auto_connect.is_some() || phone.is_some() || strict_dns.is_some() {
+                if auto_connect.is_some()
+                    || phone.is_some()
+                    || strict_dns.is_some()
+                    || wireless.is_some()
+                {
+                    // Turning it on tries the access point, which can take over 10 seconds.
+                    if wireless.as_deref() == Some("on") {
+                        outln!("{}", tr("cli.wireless_checking", &[]));
+                    }
                     call(
                         &cli,
                         Request::SetSettings {
@@ -482,7 +713,7 @@ mod cli {
                                 },
                             }),
                             strict_dns: strict_dns.as_deref().map(|v| v == "on"),
-                            wireless: None,
+                            wireless: wireless.as_deref().map(|v| v == "on"),
                         },
                     )
                     .await?;
@@ -659,6 +890,82 @@ mod cli {
             let cli =
                 Cli::try_parse_from(["cellglide", "--socket", "/tmp/c.sock", "status"]).unwrap();
             assert_eq!(cli.endpoint(), Endpoint::parse("/tmp/c.sock"));
+        }
+
+        #[test]
+        fn the_wireless_arguments_parse() {
+            let parse = |args: &[&str]| {
+                Cli::try_parse_from(std::iter::once("cellglide").chain(args.iter().copied()))
+            };
+            let cli = parse(&["connect", "--wireless"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Cmd::Connect {
+                    wireless: true,
+                    serial: None
+                }
+            ));
+            assert!(matches!(
+                parse(&["connect"]).unwrap().command,
+                Cmd::Connect {
+                    wireless: false,
+                    ..
+                }
+            ));
+            // A cable's serial and the wireless way exclude each other.
+            assert!(parse(&["connect", "--wireless", "--serial", "X"]).is_err());
+
+            assert!(matches!(
+                parse(&["wireless", "list"]).unwrap().command,
+                Cmd::Wireless {
+                    command: WirelessCmd::List
+                }
+            ));
+            let Cmd::Wireless {
+                command: WirelessCmd::Forget { target, yes },
+            } = parse(&["wireless", "forget", "Anna's iPhone", "--yes"])
+                .unwrap()
+                .command
+            else {
+                panic!("forget");
+            };
+            assert_eq!((target.as_str(), yes), ("Anna's iPhone", true));
+            assert!(matches!(
+                parse(&["wireless", "forget", "2"]).unwrap().command,
+                Cmd::Wireless {
+                    command: WirelessCmd::Forget { yes: false, .. }
+                }
+            ));
+            assert!(parse(&["wireless", "forget"]).is_err());
+            assert!(matches!(
+                parse(&["wireless", "repair", "1"]).unwrap().command,
+                Cmd::Wireless {
+                    command: WirelessCmd::Repair { .. }
+                }
+            ));
+            assert!(matches!(
+                parse(&["wireless", "regenerate", "--yes"]).unwrap().command,
+                Cmd::Wireless {
+                    command: WirelessCmd::Regenerate { yes: true }
+                }
+            ));
+            // Only the long --yes, as for diagnostics, so it is never typed by accident.
+            assert!(parse(&["wireless", "regenerate", "-y"]).is_err());
+            assert!(parse(&["wireless"]).is_err());
+
+            for (value, on) in [("on", true), ("off", false)] {
+                let Cmd::Settings { wireless, .. } =
+                    parse(&["settings", "--wireless", value]).unwrap().command
+                else {
+                    panic!("settings");
+                };
+                assert_eq!(wireless.as_deref().map(|v| v == "on"), Some(on));
+            }
+            assert!(parse(&["settings", "--wireless", "maybe"]).is_err());
+            assert!(matches!(
+                parse(&["settings"]).unwrap().command,
+                Cmd::Settings { wireless: None, .. }
+            ));
         }
 
         #[test]
