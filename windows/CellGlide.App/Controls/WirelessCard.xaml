@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The wireless connection under the connect button (overview and panel): "Connect Wirelessly" (or "Try Again"),
+     the steps card while the iPhone is awaited (network name, password with Copy, three steps, the note), the
+     code's button while pairing, the hint while reconnecting, a failure's reason, and Cancel. Every text is
+     the DLL's; filled in code from the WirelessViewModel. -->
+<UserControl
+    x:Class="CellGlide.App.Controls.WirelessCard"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel x:Name="Root" Spacing="8">
+        <!-- A failure: its title and reason. -->
+        <StackPanel x:Name="FailureBox" Spacing="2" Visibility="Collapsed">
+            <TextBlock x:Name="FailureTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <TextBlock x:Name="FailureDetail" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
+
+        <!-- The steps card: the network, its password with Copy, the three steps and the note. -->
+        <StackPanel x:Name="StepsBox" Spacing="6" Visibility="Collapsed">
+            <Grid x:Name="NetworkGrid" ColumnSpacing="8" RowSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="SsidLabel" VerticalAlignment="Center" />
+                <TextBlock x:Name="SsidText" Grid.Column="1" FontFamily="Consolas" VerticalAlignment="Center" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                <TextBlock x:Name="PassphraseLabel" Grid.Row="1" VerticalAlignment="Center" />
+                <TextBlock x:Name="PassphraseText" Grid.Row="1" Grid.Column="1" FontFamily="Consolas" VerticalAlignment="Center" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                <!-- Named by its own text ("Copy" / "Copied"); the help text says what it copies. -->
+                <Button x:Name="CopyButton" Grid.Row="1" Grid.Column="2" FontSize="12" Padding="8,2,8,3" VerticalAlignment="Center"
+                        AutomationProperties.LiveSetting="Polite" Click="OnCopyClick" />
+            </Grid>
+            <StackPanel x:Name="StepsList" Spacing="4" />
+            <TextBlock x:Name="NoteText" TextWrapping="Wrap" />
+            <TextBlock x:Name="UnavailableText" TextWrapping="Wrap" Visibility="Collapsed" />
+        </StackPanel>
+
+        <!-- While reconnecting: the iPhone may have joined another Wi-Fi it knows. -->
+        <TextBlock x:Name="HintText" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+
+        <!-- A refused wireless command. -->
+        <TextBlock x:Name="ErrorLine" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+
+        <!-- "Connect Wirelessly" / "Try Again"; "Check the Code" while pairing; Cancel while an attempt runs. -->
+        <StackPanel x:Name="Buttons" Orientation="Horizontal" Spacing="8">
+            <Button x:Name="StartButton" Padding="12,5,12,6" Visibility="Collapsed" Click="OnStartClick" />
+            <Button x:Name="ShowCodeButton" Padding="12,5,12,6" Visibility="Collapsed" Style="{ThemeResource AccentButtonStyle}" Click="OnShowCodeClick" />
+            <Button x:Name="CancelButton" Padding="12,5,12,6" Visibility="Collapsed" Click="OnCancelClick" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

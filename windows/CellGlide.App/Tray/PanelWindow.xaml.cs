@@ -31,6 +31,7 @@ public sealed partial class PanelWindow : Window
 
     readonly Guid _trayId;
     readonly Action<Section?> _openWindow;
+    readonly Action _showCode;
     readonly Func<Task> _quit;
     readonly ReopenGuard _reopenGuard = new();
     bool _isOpen;
@@ -38,14 +39,23 @@ public sealed partial class PanelWindow : Window
 
     /// <param name="trayId">The tray icon's GUID, to ask the shell where it is.</param>
     /// <param name="openWindow">Opens the main window (at a section, or where it was).</param>
+    /// <param name="showCode">Opens the main window with the code dialog.</param>
     /// <param name="quit">Quits the app.</param>
-    public PanelWindow(ShellViewModel shell, Guid trayId, Action<Section?> openWindow, Func<Task> quit)
+    public PanelWindow(ShellViewModel shell, WirelessViewModel wireless, Guid trayId, Action<Section?> openWindow, Action showCode, Func<Task> quit)
     {
         Shell = shell;
         _trayId = trayId;
         _openWindow = openWindow;
+        _showCode = showCode;
         _quit = quit;
         InitializeComponent();
+        // The code is confirmed in the main window's dialog, never in this panel that hides on the first click away.
+        WirelessPart.ShowCode = () =>
+        {
+            Dismiss();
+            _showCode();
+        };
+        WirelessPart.Wireless = wireless;
         Title = L.T("gui.title");
 
         var presenter = OverlappedPresenter.Create();

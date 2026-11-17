@@ -81,6 +81,44 @@
                     </Grid>
                 </Border>
 
+                <!-- Wireless connection (the service's switch; turning it on is checked first and can take half a
+                     minute), why it can't work here, the paired iPhones, and a new network name and password. -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource RowLabel}" Text="{x:Bind h:L.T('wireless.settings.switch')}" />
+                                <TextBlock Style="{StaticResource Note}" Text="{x:Bind h:L.T('wireless.settings.note')}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="WirelessSwitch" Grid.Column="1" Style="{StaticResource Switch}" Toggled="OnWirelessToggled"
+                                          AutomationProperties.Name="{x:Bind h:L.T('wireless.settings.switch')}"
+                                          AutomationProperties.HelpText="{x:Bind h:L.T('wireless.settings.note')}" />
+                        </Grid>
+                        <!-- Turning it on is being checked. -->
+                        <StackPanel x:Name="WirelessCheckingRow" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+                            <ProgressRing x:Name="WirelessCheckingRing" Width="14" Height="14" IsActive="False" AutomationProperties.AccessibilityView="Raw" />
+                            <TextBlock x:Name="WirelessCheckingText" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center"
+                                       AutomationProperties.LiveSetting="Polite" Text="{x:Bind h:L.T('wireless.settings.checking')}" />
+                        </StackPanel>
+                        <TextBlock x:Name="WirelessUnavailableLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+                        <!-- A refused switch or wireless command (the DLL's sentence). -->
+                        <TextBlock x:Name="WirelessErrorLine" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+                        <!-- Paired iPhones: only with the switch on and some paired. Rows are made in code. -->
+                        <StackPanel x:Name="PairedSection" Spacing="8" Visibility="Collapsed">
+                            <Rectangle Style="{StaticResource Rule}" />
+                            <TextBlock FontSize="13" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level3"
+                                       Text="{x:Bind h:L.T('wireless.settings.paired')}" />
+                            <StackPanel x:Name="PairedList" Spacing="8" />
+                        </StackPanel>
+                        <Button x:Name="RegenerateButton" FontSize="12" Padding="10,4,10,5" Visibility="Collapsed"
+                                Content="{x:Bind h:L.T('wireless.action.regenerate')}" Click="OnRegenerateClick" />
+                    </StackPanel>
+                </Border>
+
                 <!-- Start at login (our Run value), and open on plug (a preference). -->
                 <Border Style="{StaticResource Card}">
                     <StackPanel Spacing="10">

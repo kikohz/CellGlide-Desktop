@@ -62,6 +62,8 @@
                                     Content="{x:Bind s:Show.ToggleLabel(Shell.Now), Mode=OneWay}"
                                     Style="{x:Bind s:Show.ToggleStyle(Shell.Now), Mode=OneWay}"
                                     Click="OnToggleClick" />
+                            <!-- "Connect Wirelessly", and the wireless attempt (its steps, "Check the Code", Cancel). -->
+                            <c:WirelessCard x:Name="WirelessPart" />
                             <!-- Apple's device service isn't running but Apple Devices is installed: its hint and button. -->
                             <StackPanel Spacing="8" Visibility="{x:Bind s:Show.AppleDevicesVisible(Shell.Now), Mode=OneWay}">
                                 <TextBlock x:Name="AppleDevicesHint" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"

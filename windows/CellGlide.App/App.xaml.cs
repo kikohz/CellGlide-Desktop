@@ -66,6 +66,9 @@ public partial class App : Application
 
     public AboutViewModel About { get; private set; } = null!;
 
+    /// <summary>The wireless connection: the overview, the panel, the settings page and the code dialog.</summary>
+    public WirelessViewModel Wireless { get; private set; } = null!;
+
     /// <summary>Start at login: our own value in HKCU\...\Run for this executable (StartupApproved is only read).</summary>
     public Autostart Autostart { get; private set; } = null!;
 
@@ -101,6 +104,7 @@ public partial class App : Application
         History = new HistoryViewModel(Hub);
         Diagnostics = new DiagnosticsViewModel(Hub);
         About = new AboutViewModel(Hub);
+        Wireless = new WirelessViewModel(Hub);
         Autostart = new Autostart(new RegistryRunKey(), new RegistryStartupApproved(), Environment.ProcessPath!);
         _lifetime = new AppLifetime(Hub, core, Speed, Leak);
 
@@ -171,6 +175,14 @@ public partial class App : Application
             _window.ShowAt(section);
         });
 
+    /// <summary>"Check the Code" in the panel: the main window, at the overview, with the code dialog; not while quitting.</summary>
+    void ShowCode() =>
+        _ = _gate.Open(() =>
+        {
+            _window ??= new MainWindow(Shell);
+            _window.ShowCode();
+        });
+
     /// <summary>
     /// The tray click or key: opens or closes the panel (created the first time); not while quitting. Opened
     /// from the keyboard, the panel shows where its focus is.
@@ -181,7 +193,7 @@ public partial class App : Application
         {
             return;
         }
-        _panel ??= new PanelWindow(Shell, _trayId, ShowWindow, QuitAsync);
+        _panel ??= new PanelWindow(Shell, Wireless, _trayId, ShowWindow, ShowCode, QuitAsync);
         _panel.Toggle(fromKeyboard);
     }
 

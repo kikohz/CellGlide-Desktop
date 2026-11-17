@@ -522,10 +522,16 @@ wireless:
     repair: "重新配对"
     regenerate: "重新生成网络名和密码"
     regenerate_confirm: "已连过当前网络的 iPhone 需要重新连接新网络。继续吗？"
+    show_code: "核对验证码"
+    forget_confirm: "移除 %{name} 吗？移除后需要重新配对才能无线连接。"
   settings:
     switch: "无线连接"
     note: "没带线时，让 iPhone 经这台电脑开的临时 Wi‑Fi 连过来。"
     paired: "已配对的 iPhone"
+    checking: "正在检查这台电脑能否打开无线网络…"
+  info:
+    ssid: "网络名"
+    passphrase: "密码"
   cli:
     confirm_prompt: "iPhone 上显示的验证码一致吗？(y/N)"
     not_terminal: "这里无法询问（不是终端）。验证码只能在终端或 CellGlide 应用里确认，所以这次无线连接已取消。"

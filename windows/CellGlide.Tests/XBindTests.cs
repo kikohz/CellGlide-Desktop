@@ -22,6 +22,27 @@ public class XBindTests
     }
 
     /// <summary>
+    /// Task 10: the wireless switch is sent like the strict DNS one (only a user's change to something else, never
+    /// while its change is on its way or checked); the code dialog lives in the main window only, has no default
+    /// button (a code is compared, not confirmed with a reflexive Enter), and "They Match" keeps it open.
+    /// </summary>
+    [Fact]
+    public void The_wireless_switch_and_the_code_dialog_follow_the_rules()
+    {
+        var settings = File.ReadAllText(Path.Combine(AppSources.AppDir, "Pages", "SettingsPage.xaml.cs"));
+        Assert.Contains("ServiceToggle.ShouldSend(on, Service?.Wireless.Enabled, _wireless.SwitchBusy)", settings);
+        var host = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "CodeDialogHost.cs"));
+        Assert.Contains("DefaultButton = ContentDialogButton.None", host);
+        Assert.Contains("args.Cancel = true", host);
+        foreach (var file in new[] { Path.Combine("Tray", "PanelWindow.xaml.cs"), Path.Combine("Controls", "WirelessCard.xaml.cs") })
+        {
+            Assert.DoesNotContain("ContentDialog", File.ReadAllText(Path.Combine(AppSources.AppDir, file)));
+        }
+        var window = File.ReadAllText(Path.Combine(AppSources.AppDir, "Shell", "MainWindow.xaml.cs"));
+        Assert.Contains("new CodeDialogHost(", window);
+    }
+
+    /// <summary>
     /// A control that goes off while it has keyboard focus leaves the user nowhere unless focus is moved: pages
     /// turn controls on and off only through Show.SetEnabled (Show.cs itself, and the tray menu's items, which
     /// are not focusable XAML controls, are the exceptions).

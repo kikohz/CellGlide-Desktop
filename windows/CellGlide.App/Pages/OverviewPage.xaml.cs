@@ -12,18 +12,22 @@ namespace CellGlide.App.Pages;
 /// The overview (cg-gui pages/overview.rs) bound to <see cref="ShellViewModel"/>: with a state, its
 /// dot, title, sentence and strict DNS line, the phone card and the health row; without one, only
 /// why (or that the service is being reached). The button is the state's, off while its command
-/// runs (through Show.SetEnabled).
+/// runs (through Show.SetEnabled). Under it, the wireless connection (<see cref="Controls.WirelessCard"/>):
+/// "Connect Wirelessly", the steps card, "Check the Code" (the dialog is the main window's) and Cancel.
 /// </summary>
 public sealed partial class OverviewPage : Page
 {
     readonly Action<Section> _navigate;
 
     /// <param name="navigate">Opens another page of the main window.</param>
-    public OverviewPage(ShellViewModel shell, Action<Section> navigate)
+    /// <param name="showCode">Opens the code dialog ("Check the Code").</param>
+    public OverviewPage(ShellViewModel shell, WirelessViewModel wireless, Action<Section> navigate, Action showCode)
     {
         Shell = shell;
         _navigate = navigate;
         InitializeComponent();
+        WirelessPart.ShowCode = showCode;
+        WirelessPart.Wireless = wireless;
         // The dots' brushes follow a switch to or from high contrast while the page is shown, and
         // are made again when it comes back (the switch may have happened while it was away).
         Loaded += (_, _) =>

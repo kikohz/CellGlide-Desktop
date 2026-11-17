@@ -32,6 +32,7 @@ public sealed partial class MainWindow : Window
     const int MinHeightDips = 520;
 
     readonly ShellViewModel _shell;
+    readonly CodeDialogHost _codes;
     readonly Dictionary<Section, Page> _pages = [];
     readonly Dictionary<Section, NavigationViewItem> _items = [];
     readonly Dictionary<Section, Badge> _badges = [];
@@ -63,6 +64,13 @@ public sealed partial class MainWindow : Window
                 ScreenChanged?.Invoke();
             }
         };
+        // The code dialog lives here: it opens when a code comes while the window is shown, or when the window comes.
+        _codes = new CodeDialogHost(App.Current.Wireless, () => Content?.XamlRoot, () => AppWindow.IsVisible);
+        ScreenChanged += _codes.Follow;
+        if (Content is FrameworkElement content)
+        {
+            content.Loaded += (_, _) => _codes.Follow();
+        }
         shell.PropertyChanged += OnShellChanged;
         // The dots' brushes follow a switch to or from high contrast.
         Show.Changed += () => ApplyBadges(repaint: true);
@@ -99,6 +107,13 @@ public sealed partial class MainWindow : Window
         _ = SetForegroundWindow(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
     }
 
+    /// <summary>"Check the Code": shows the window at the overview and the code dialog in it.</summary>
+    public void ShowCode()
+    {
+        ShowAt(Section.Overview);
+        _codes.Ask();
+    }
+
     /// <summary>Shows a section's page (made the first time) and selects its sidebar item.</summary>
     void Open(Section section)
     {
@@ -119,12 +134,12 @@ public sealed partial class MainWindow : Window
 
     Page Create(Section section) => section switch
     {
-        Section.Overview => new OverviewPage(_shell, Open),
+        Section.Overview => new OverviewPage(_shell, App.Current.Wireless, Open, _codes.Ask),
         Section.SpeedTest => new SpeedPage(App.Current.Speed, App.Current.Settings),
         Section.DnsLeak => new LeakPage(App.Current.Leak),
         Section.History => new HistoryPage(App.Current.History, this),
         Section.Diagnostics => new DiagnosticsPage(App.Current.Diagnostics),
-        Section.Settings => new SettingsPage(App.Current.Settings, _shell, App.Current.Autostart, this),
+        Section.Settings => new SettingsPage(App.Current.Settings, App.Current.Wireless, _shell, App.Current.Autostart, this, Open),
         _ => new AboutPage(App.Current.About),
     };
 

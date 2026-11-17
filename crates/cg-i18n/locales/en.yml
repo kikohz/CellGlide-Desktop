@@ -522,10 +522,16 @@ wireless:
     repair: "Pair Again"
     regenerate: "New Network Name and Password"
     regenerate_confirm: "iPhones that joined the current network will need to join the new one. Continue?"
+    show_code: "Check the Code"
+    forget_confirm: "Remove %{name}? It must be paired again before it can connect wirelessly."
   settings:
     switch: "Wireless connection"
     note: "When you don't have a cable, let the iPhone connect through a temporary Wi‑Fi network this computer opens."
     paired: "Paired iPhones"
+    checking: "Checking that this computer can open the wireless network…"
+  info:
+    ssid: "Network name"
+    passphrase: "Password"
   cli:
     confirm_prompt: "Does the iPhone show the same code? (y/N)"
     not_terminal: "Can't ask here (not a terminal). The code can only be confirmed in a terminal or in the CellGlide app, so this wireless attempt is cancelled."

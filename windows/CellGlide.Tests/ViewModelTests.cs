@@ -582,6 +582,251 @@ public class ViewModelTests
         Assert.Equal("reason.internal", shell.Error);
     }
 
+    // ---- The wireless connection (Task 10) ----
+
+    static OverviewView StateOf(string fixture) => Assert.IsType<StateEvent>(Samples.Event(fixture)).View;
+
+    static WirelessInfoView InfoReply() =>
+        ((WirelessValue)((ReplyOk)Assert.IsType<ReplyEvent>(Samples.Event("reply_wireless.json")).Result).Value).View;
+
+    [Fact]
+    public async Task Wireless_commands_are_sent_as_they_are()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var wireless = new WirelessViewModel(hub);
+        await wireless.StartCommand.ExecuteAsync(null);
+        await wireless.ConfirmCommand.ExecuteAsync(null);
+        await wireless.CancelCommand.ExecuteAsync(null);
+        await wireless.ForgetCommand.ExecuteAsync("A1");
+        await wireless.RepairCommand.ExecuteAsync("B2");
+        await wireless.RegenerateCommand.ExecuteAsync(null);
+        await wireless.SetEnabledCommand.ExecuteAsync(true);
+        Assert.Equal(
+            [
+                new WirelessStartCommand(),
+                new WirelessConfirmCommand(true),
+                new WirelessCancelCommand(),
+                new WirelessForgetCommand("A1"),
+                new WirelessRepairCommand("B2"),
+                new WirelessRegenerateCommand(),
+                new RequestCommand(new SetSettingsRequest(null, null, null, true)),
+            ],
+            core.Sent);
+        Assert.Null(wireless.Error);
+    }
+
+    [Fact]
+    public async Task Start_then_cancel_from_the_steps_card()
+    {
+        var core = new ScriptedCore();
+        var hub = new EventHub(core, new InlineDispatcher());
+        var wireless = new WirelessViewModel(hub);
+        // Offered: the button only, nothing asked.
+        core.Raise(new StateEvent(StateOf("state_wireless_offered.json")));
+        Assert.True(wireless.View is { Offered: true, Phase: null, ShowSteps: false });
+        Assert.NotNull(wireless.View!.ButtonLabel);
+        Assert.Empty(core.Sent);
+        await wireless.StartCommand.ExecuteAsync(null);
+        Assert.IsType<WirelessStartCommand>(Assert.Single(core.Sent));
+
+        // Waiting: the steps card asks for the network name and password, once.
+        core.Next = Assert.IsType<ReplyEvent>(Samples.Event("reply_wireless.json")).Result;
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        await wireless.InfoAsked;
+        Assert.IsType<WirelessInfoCommand>(core.Sent[1]);
+        Assert.Equal(InfoReply().Passphrase, wireless.Info!.Passphrase);
+        Assert.Equal(3, wireless.Info.Steps.Count);
+        Assert.True(wireless.View!.CanCancel);
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        Assert.Equal(2, core.Sent.Count);
+
+        // Cancel; the attempt is gone with the next state, and so is the password.
+        core.Next = new ReplyOk(new DoneValue());
+        await wireless.CancelCommand.ExecuteAsync(null);
+        Assert.IsType<WirelessCancelCommand>(core.Sent[2]);
+        core.Raise(new StateEvent(StateOf("state_wireless_offered.json")));
+        Assert.Null(wireless.Info);
+        Assert.Null(wireless.Code);
+    }
+
+    [Fact]
+    public async Task A_late_info_reply_is_not_kept_once_the_steps_are_gone()
+    {
+        var (core, hub) = Fake();
+        var wireless = new WirelessViewModel(hub);
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        Assert.IsType<WirelessInfoCommand>(Assert.Single(core.Sent));
+        // The iPhone came before the reply: pairing, no steps card.
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        core.Raise(new ReplyEvent(core.SentIds[0], new ReplyOk(new WirelessValue(InfoReply()))));
+        await wireless.InfoAsked;
+        Assert.Null(wireless.Info);
+    }
+
+    [Fact]
+    public void The_code_follows_the_pairing_phase()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var wireless = new WirelessViewModel(hub);
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        var ask = wireless.Code!;
+        Assert.Equal("384 271", ask.Code);
+        Assert.False(ask.Confirmed);
+        Assert.Contains("384 271", ask.Title);
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing_confirmed.json")));
+        Assert.True(wireless.Code!.Confirmed);
+        Assert.Equal("384 271", wireless.Code.Code);
+        core.Raise(new StateEvent(StateOf("state_wireless_connected.json")));
+        Assert.Null(wireless.Code);
+        core.Raise(new StateEvent(StateOf("state_wireless_pairing.json")));
+        core.Raise(new ServiceGoneEvent("gone", false, Samples.Chrome()));
+        Assert.Null(wireless.Code);
+        Assert.Null(wireless.View);
+        Assert.Null(wireless.Settings);
+    }
+
+    [Fact]
+    public async Task Code_answers_confirm_or_cancel_and_the_rest_send_nothing()
+    {
+        var (core, hub) = Fake(autoReply: new ReplyOk(new DoneValue()));
+        var wireless = new WirelessViewModel(hub);
+        await wireless.AnswerCodeAsync(CodeAnswer.Match);
+        await wireless.AnswerCodeAsync(CodeAnswer.Dismissed);
+        await wireless.AnswerCodeAsync(CodeAnswer.Withdrawn);
+        await wireless.AnswerCodeAsync(CodeAnswer.Cancel);
+        Assert.Equal([new WirelessConfirmCommand(true), new WirelessCancelCommand()], core.Sent);
+    }
+
+    static CodePrompt Prompt(bool confirmed = false, string code = "384 271") =>
+        new(code, "Confirm the code " + code + " on the iPhone", "Compare it", confirmed);
+
+    [Fact]
+    public void The_code_dialog_opens_on_a_code_and_closes_when_the_phase_moves_on()
+    {
+        var tracker = new CodeDialogTracker();
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(null, canShow: true));
+        // The window is hidden: nothing until it is shown.
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(), canShow: false));
+        Assert.Equal(CodeDialogStep.Open, tracker.Follow(Prompt(), canShow: true));
+        Assert.Equal(Prompt(), tracker.Shown);
+        // Only one: the same prompt again is nothing.
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(), canShow: true));
+        // Confirmed (by the state): the open dialog shows it.
+        Assert.Equal(CodeDialogStep.Update, tracker.Follow(Prompt(confirmed: true), canShow: true));
+        // The phase left pairing: it closes, and its end sends nothing.
+        Assert.Equal(CodeDialogStep.Close, tracker.Follow(null, canShow: true));
+        Assert.Null(tracker.Shown);
+        // Until the closing dialog has ended, nothing opens.
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(code: "111 222"), canShow: true));
+        Assert.Equal(CodeAnswer.Withdrawn, tracker.Ended(shown: true, cancelled: false));
+        Assert.Equal(CodeDialogStep.Open, tracker.Follow(Prompt(code: "111 222"), canShow: true));
+    }
+
+    [Fact]
+    public void They_match_keeps_the_dialog_open_and_cancel_while_waiting_ends_the_attempt()
+    {
+        var tracker = new CodeDialogTracker();
+        tracker.Follow(Prompt(), canShow: true);
+        var shown = tracker.Matched();
+        Assert.True(shown!.Confirmed);
+        // The state catches up: the same code, confirmed, with the DLL's own sentence: shown as it says.
+        var fromDll = Prompt(confirmed: true) with { Detail = "Waiting for the iPhone to confirm too…" };
+        Assert.Equal(CodeDialogStep.Update, tracker.Follow(fromDll, canShow: true));
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(fromDll, canShow: true));
+        // Cancel while waiting for the iPhone: the attempt ends.
+        Assert.Equal(CodeAnswer.Cancel, tracker.Ended(shown: true, cancelled: true));
+        Assert.Null(tracker.Shown);
+    }
+
+    [Fact]
+    public void A_confirm_the_service_did_not_take_shows_the_question_again()
+    {
+        var tracker = new CodeDialogTracker();
+        tracker.Follow(Prompt(), canShow: true);
+        tracker.Matched();
+        // The next state still asks (the confirm failed): the dialog asks again.
+        Assert.Equal(CodeDialogStep.Update, tracker.Follow(Prompt(), canShow: true));
+        Assert.False(tracker.Shown!.Confirmed);
+    }
+
+    [Fact]
+    public void Esc_puts_the_code_away_until_asked_for()
+    {
+        var tracker = new CodeDialogTracker();
+        tracker.Follow(Prompt(), canShow: true);
+        Assert.Equal(CodeAnswer.Dismissed, tracker.Ended(shown: true, cancelled: false));
+        // Not again by itself for the same code (each state would reopen it otherwise).
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(), canShow: true));
+        Assert.Equal(CodeDialogStep.None, tracker.Follow(Prompt(confirmed: true), canShow: true));
+        // "Check the Code" brings it back.
+        tracker.Ask();
+        Assert.Equal(CodeDialogStep.Open, tracker.Follow(Prompt(), canShow: true));
+        // Put away again; once the phase moved on, a new code opens by itself.
+        tracker.Ended(shown: true, cancelled: false);
+        tracker.Follow(null, canShow: true);
+        Assert.Equal(CodeDialogStep.Open, tracker.Follow(Prompt(), canShow: true));
+    }
+
+    [Fact]
+    public void A_code_dialog_that_could_not_be_shown_is_tried_again()
+    {
+        var tracker = new CodeDialogTracker();
+        tracker.Follow(Prompt(), canShow: true);
+        // Another dialog was up.
+        Assert.Equal(CodeAnswer.Withdrawn, tracker.Ended(shown: false, cancelled: false));
+        Assert.Equal(CodeDialogStep.Open, tracker.Follow(Prompt(), canShow: true));
+    }
+
+    [Fact]
+    public async Task The_switch_is_busy_while_it_is_checked_and_a_refusal_says_why()
+    {
+        var (core, hub) = Fake();
+        var wireless = new WirelessViewModel(hub);
+        core.Raise(new StateEvent(StateOf("state_wireless_offered.json")));
+        Assert.False(wireless.SwitchBusy);
+        var busy = new List<bool>();
+        wireless.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(WirelessViewModel.SwitchBusy))
+            {
+                busy.Add(wireless.SwitchBusy);
+            }
+        };
+        // Turning it on: its reply takes a while.
+        var on = wireless.SetEnabledCommand.ExecuteAsync(true);
+        Assert.True(wireless.SwitchBusy);
+        // Meanwhile the service says it is checking.
+        core.Raise(new StateEvent(StateOf("state_wireless_failed.json")));
+        Assert.True(wireless.Settings!.Checking);
+        Assert.True(wireless.SwitchBusy);
+        // Refused: the reason; the switch stays busy while the service still says it checks.
+        const string refused = "This computer can't open a wireless network for the iPhone: Wi-Fi is turned off";
+        core.Raise(new ReplyEvent(core.SentIds[0], new ReplyErr(refused)));
+        await on;
+        Assert.Equal(refused, wireless.Error);
+        Assert.True(wireless.SwitchBusy);
+        core.Raise(new StateEvent(StateOf("state_wireless_offered.json")));
+        Assert.False(wireless.SwitchBusy);
+        Assert.Contains(true, busy);
+        Assert.False(busy[^1]);
+    }
+
+    [Fact]
+    public void Settings_carry_the_paired_iphones_and_whether_an_attempt_runs()
+    {
+        var (core, hub) = Fake();
+        var wireless = new WirelessViewModel(hub);
+        core.Raise(new StateEvent(StateOf("state_wireless_waiting.json")));
+        var settings = wireless.Settings!;
+        Assert.True(settings.Enabled);
+        Assert.True(settings.Busy);
+        Assert.Equal(2, settings.Paired.Count);
+        Assert.Contains(settings.Paired, p => p.Stale);
+        // The password is in no state, and never printed.
+        Assert.DoesNotContain(InfoReply().Passphrase, File.ReadAllText(Fixtures.Path("events", "state_wireless_waiting.json")));
+        Assert.DoesNotContain(InfoReply().Passphrase, InfoReply().ToString());
+    }
+
     sealed class ThrowingDispatcher : IUiDispatcher
     {
         public void Post(Action action) => throw new InvalidOperationException("ui thread gone");
@@ -605,6 +850,8 @@ public class ViewModelTests
             EventReceived?.Invoke(new ReplyEvent(id, Next));
             return id;
         }
+
+        public void Raise(CoreEvent ev) => EventReceived?.Invoke(ev);
 
         public string Tr(string key, IReadOnlyDictionary<string, string>? args = null) => key;
 
