@@ -1181,8 +1181,9 @@ impl Actor {
         if let Some(task) = self.wireless.task.take() {
             task.stop().await;
         }
-        if let Some((_, _, probe)) = self.wireless.probing.take() {
+        if let Some((serial, _, probe)) = self.wireless.probing.take() {
             probe.abort();
+            self.usb_probe_dropped(&serial);
         }
         // A question still on screen is withdrawn with the task (which held the other end).
         self.wireless.confirm = None;
@@ -1285,16 +1286,26 @@ impl Actor {
         let Some(device) = self.selected_usb() else {
             return false;
         };
+        // The probe task never waits on the actor (it reports with `try_send`), so waiting for it
+        // here cannot deadlock; the bound is the hello's own limit and a second.
         if self
             .wireless
             .probing
             .as_ref()
             .is_some_and(|(s, m, _)| *s == device.serial && *m == device.mux_id)
-            && let Some((_, _, task)) = self.wireless.probing.take()
-            && let Ok(answers) = task.await
+            && let Some((_, _, mut task)) = self.wireless.probing.take()
         {
-            self.note_usb_answer(&device.serial, answers);
-            return answers;
+            let limit = phone::HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+            match tokio::time::timeout(limit, &mut task).await {
+                Ok(Ok(answers)) => {
+                    self.note_usb_answer(&device.serial, answers);
+                    return answers;
+                }
+                _ => {
+                    task.abort();
+                    self.usb_probe_dropped(&device.serial);
+                }
+            }
         }
         self.wireless.probes.insert(
             device.serial.clone(),
@@ -1384,11 +1395,67 @@ impl Actor {
             let serial = serial.clone();
             async move {
                 let answers = phone::read_hello(&phone).await.is_ok();
-                let _ = tx.send(Event::UsbProbe(serial, mux_id, answers)).await;
+                // Never waits on the actor (which may be waiting for this task): if the
+                // channel is full, `tick` takes the answer from the finished task instead.
+                let _ = tx.try_send(Event::UsbProbe(serial, mux_id, answers));
                 answers
             }
         });
         self.wireless.probing = Some((serial, mux_id, task));
+    }
+
+    /// A background probe answered. The answer is kept only if that very device (serial and mux
+    /// id) is still attached: one unplugged and plugged in again meanwhile is a new appearance,
+    /// asked again. While a wireless attempt runs, one that answers takes over.
+    async fn usb_probed(&mut self, serial: &str, mux_id: u32, answers: bool) {
+        if !self
+            .devices
+            .iter()
+            .any(|d| d.serial == serial && d.mux_id == mux_id)
+        {
+            return;
+        }
+        self.note_usb_answer(serial, answers);
+        // Still the device a connection would use, and the attempt still runs.
+        if answers
+            && self
+                .selected_usb()
+                .is_some_and(|d| d.serial == serial && d.mux_id == mux_id)
+        {
+            self.switch_to_usb().await;
+        } else if !answers && self.wireless.phase.owns() {
+            tracing::info!("wireless: the device on USB does not share; staying wireless");
+        }
+    }
+
+    /// A probe in flight that finished without its event (the event channel was full): its
+    /// answer is taken from the task. One that did not answer (aborted, panicked) is due again.
+    async fn collect_usb_probe(&mut self) {
+        if !self
+            .wireless
+            .probing
+            .as_ref()
+            .is_some_and(|(_, _, task)| task.is_finished())
+        {
+            return;
+        }
+        let Some((serial, mux_id, task)) = self.wireless.probing.take() else {
+            return;
+        };
+        match task.await {
+            Ok(answers) => self.usb_probed(&serial, mux_id, answers).await,
+            Err(_) => self.usb_probe_dropped(&serial),
+        }
+    }
+
+    /// A probe was dropped before it answered: the device is asked again at the next chance
+    /// (otherwise, never asked, it would stay "in play" until it is plugged in again).
+    fn usb_probe_dropped(&mut self, serial: &str) {
+        if let Some(probe) = self.wireless.probes.get_mut(serial)
+            && probe.answers.is_none()
+        {
+            probe.due = true;
+        }
     }
 
     /// A device appeared on USB (attached, or listed when usbmuxd was joined again): it may be
@@ -1609,26 +1676,16 @@ impl Actor {
                 self.wireless_event(event, events).await;
             }
             Event::SwitchCheck(generation, outcome) => self.switch_checked(generation, outcome),
-            Event::UsbProbe(serial, mux_id, answers) => {
-                self.note_usb_answer(&serial, answers);
+            // Only the probe still in flight counts (`tick` may have taken its answer already).
+            Event::UsbProbe(serial, mux_id, answers)
                 if self
                     .wireless
                     .probing
                     .as_ref()
-                    .is_some_and(|(s, m, _)| *s == serial && *m == mux_id)
-                {
-                    self.wireless.probing = None;
-                }
-                // Still the device a connection would use, and the attempt still runs.
-                if answers
-                    && self
-                        .selected_usb()
-                        .is_some_and(|d| d.serial == serial && d.mux_id == mux_id)
-                {
-                    self.switch_to_usb().await;
-                } else if !answers && self.wireless.phase.owns() {
-                    tracing::info!("wireless: the device on USB does not share; staying wireless");
-                }
+                    .is_some_and(|(s, m, _)| *s == serial && *m == mux_id) =>
+            {
+                self.wireless.probing = None;
+                self.usb_probed(&serial, mux_id, answers).await;
             }
             // Anything else belongs to a session (or a wireless attempt) that has already
             // been torn down.
@@ -1664,6 +1721,7 @@ impl Actor {
             self.end_wireless(WirelessPhase::Failed(WirelessFailure::Lost))
                 .await;
         }
+        self.collect_usb_probe().await;
         self.probe_usb(events);
         // While a wireless attempt runs, USB connects only through `switch_to_usb`.
         if self.wants()

@@ -2503,3 +2503,77 @@ async fn the_not_sharing_minute_counts_from_the_first_device_joined() {
     assert!(after >= Duration::from_secs(60), "after {after:?}");
     assert!(after <= Duration::from_secs(66), "after {after:?}");
 }
+
+// --- Task 7 fix round 2: probe answers that are stale, and probes that never answered.
+
+/// Like `not_sharing`, but each connection is held `hold` before it is closed: a hello that
+/// takes a while to fail.
+async fn slow_silence(hold: Duration) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                tokio::time::sleep(hold).await;
+                drop(stream);
+            });
+        }
+    });
+    (addr, count)
+}
+
+/// The answer of a probe to a device that was unplugged and plugged in again meanwhile is not
+/// kept for the new appearance: that one is asked again, and only its own answer counts.
+#[tokio::test]
+async fn a_probe_answer_from_before_a_replug_is_not_kept() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.wireless_timing.usb_probe_every = Duration::from_secs(1);
+    })
+    .await;
+    let (addr, count) = slow_silence(Duration::from_millis(500)).await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.r.mux.attach(device("aaaa", 1));
+    eventually("the first probe", Duration::from_secs(5), || {
+        probes(&count) == 1
+    })
+    .await;
+    w.r.mux.detach(1);
+    w.r.mux.attach(device("aaaa", 2));
+    let snap = wait_for(&w.r.controller, "offered", |s| {
+        s.devices.len() == 1 && offered(s)
+    })
+    .await;
+    assert_eq!(
+        probes(&count),
+        2,
+        "offered only on the new device's own answer: {snap:?}"
+    );
+}
+
+/// A probe dropped before it answered (the attempt it ran for was cancelled) leaves the device
+/// due: it is asked again, and then offered beside.
+#[tokio::test]
+async fn a_probe_dropped_before_its_answer_is_asked_again() {
+    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.wireless_timing.usb_probe_every = Duration::from_secs(1);
+    })
+    .await;
+    let (addr, count) = slow_silence(Duration::from_secs(2)).await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    w.r.mux.attach(device("aaaa", 1));
+    eventually("the probe", Duration::from_secs(5), || probes(&count) == 1).await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    wait_for(&w.r.controller, "offered after asking again", |s| {
+        s.devices.len() == 1 && offered(s)
+    })
+    .await;
+    assert_eq!(probes(&count), 2);
+}
