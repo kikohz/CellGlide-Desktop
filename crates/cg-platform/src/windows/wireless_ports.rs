@@ -19,7 +19,7 @@ use cg_core::wireless::ports::{
     AccessPoint as AccessPointPort, ApFailure, BoxFuture, Browser, DialError, Dialer, FoundPhone,
     RunningAccessPoint, WirelessPorts,
 };
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, oneshot, watch};
 use zeroize::Zeroizing;
 
 use super::access_point::{AccessPoint, ApError};
@@ -40,6 +40,15 @@ pub fn ports() -> WirelessPorts {
 
 // ---- Access point ---------------------------------------------------------------------------
 
+/// Held from the start of an access point until its stop has completed, so a new start never
+/// overlaps the previous stop (the controller can start the next attempt while the last access
+/// point is still being stopped on its blocking thread).
+static ACCESS_POINT_TURN: AsyncMutex<()> = AsyncMutex::const_new(());
+
+/// How long a start waits for the previous access point's stop (a start takes up to 10 s; a
+/// stop normally well under one).
+const TURN_WAIT: Duration = Duration::from_secs(20);
+
 /// The Wi-Fi Direct autonomous group owner with a legacy access point.
 #[derive(Debug, Default)]
 pub struct WiFiDirect;
@@ -53,9 +62,12 @@ impl AccessPointPort for WiFiDirect {
         let ssid = ssid.to_string();
         let passphrase = Zeroizing::new(passphrase.to_string());
         Box::pin(async move {
-            let started = start_off_thread(move || AccessPoint::start(&ssid, &passphrase)).await;
+            let started = start_off_thread(&ACCESS_POINT_TURN, move || {
+                AccessPoint::start(&ssid, &passphrase)
+            })
+            .await;
             match started {
-                Ok(access_point) => Ok(Box::new(Running::new(access_point)) as _),
+                Ok(held) => Ok(Box::new(Running::new(held)) as _),
                 Err(error) => {
                     tracing::warn!("access point: not started: {error}");
                     Err(ap_failure(&error))
@@ -65,28 +77,65 @@ impl AccessPointPort for WiFiDirect {
     }
 }
 
-/// Runs `start` on a blocking thread. If the caller drops this future before the result
-/// arrives (cancelled, the service stopping), the result is dropped on that thread as soon as
-/// `start` returns, so a started access point is stopped at once; and if the caller is already
-/// gone when the thread gets to run, `start` is not called at all.
-async fn start_off_thread<T, F>(start: F) -> Result<T, ApError>
+/// A started value (the access point) with its turn: dropping it stops the value on a blocking
+/// thread and only then gives the turn back.
+struct Held<T: Send + 'static> {
+    value: Option<T>,
+    turn: Option<MutexGuard<'static, ()>>,
+}
+
+impl<T: Send + 'static> Held<T> {
+    fn get(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+
+    /// Stops it on this thread (already a blocking one).
+    fn stop_here(mut self) {
+        drop(self.value.take());
+        drop(self.turn.take());
+    }
+}
+
+impl<T: Send + 'static> Drop for Held<T> {
+    fn drop(&mut self) {
+        let value = self.value.take();
+        let turn = self.turn.take();
+        if value.is_some() || turn.is_some() {
+            off_thread(move || {
+                drop(value);
+                drop(turn);
+            });
+        }
+    }
+}
+
+/// Takes the turn, then runs `start` on a blocking thread; the turn stays with the result
+/// until it has been stopped. If the caller drops this future before the result arrives
+/// (cancelled, the service stopping), the result is stopped on that thread as soon as `start`
+/// returns; if the caller is already gone when the thread gets to run, `start` is not called.
+async fn start_off_thread<T, F>(turn: &'static AsyncMutex<()>, start: F) -> Result<Held<T>, ApError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, ApError> + Send + 'static,
 {
+    let Ok(turn) = tokio::time::timeout(TURN_WAIT, turn.lock()).await else {
+        return Err(ApError::Unsupported(
+            "the previous access point is still being stopped".into(),
+        ));
+    };
     let (sender, result) = oneshot::channel();
     // Detached: the thread finishes on its own whether or not anyone waits.
     drop(tokio::task::spawn_blocking(move || {
         if sender.is_closed() {
             return;
         }
-        let started = start();
-        // On failure the value comes back and is dropped here, on this thread.
-        if let Err(unwanted) = sender.send(started) {
-            if unwanted.is_ok() {
-                tracing::info!("access point: started after the caller gave up; stopping it");
-            }
-            drop(unwanted);
+        let started = start().map(|value| Held {
+            value: Some(value),
+            turn: Some(turn),
+        });
+        if let Err(Ok(held)) = sender.send(started) {
+            tracing::info!("access point: started after the caller gave up; stopping it");
+            held.stop_here();
         }
     }));
     result
@@ -111,15 +160,16 @@ pub fn ap_failure(error: &ApError) -> ApFailure {
 
 /// A started access point; dropping it stops it on a blocking thread.
 struct Running {
-    inner: Option<AccessPoint>,
+    held: Held<AccessPoint>,
     lost: watch::Receiver<bool>,
 }
 
 impl Running {
-    fn new(access_point: AccessPoint) -> Running {
+    fn new(held: Held<AccessPoint>) -> Running {
+        let (_, unset) = watch::channel(false);
         Running {
-            lost: access_point.lost_signal(),
-            inner: Some(access_point),
+            lost: held.get().map_or(unset, AccessPoint::lost_signal),
+            held,
         }
     }
 }
@@ -127,16 +177,16 @@ impl Running {
 impl RunningAccessPoint for Running {
     fn local_address(&self) -> Option<IpAddr> {
         let clients = self
-            .inner
-            .as_ref()
+            .held
+            .get()
             .map(AccessPoint::clients)
             .unwrap_or_default();
-        local_address(&clients, mdns::is_local_address)
+        local_address(&clients, on_wifi_direct_adapter)
     }
 
     fn clients(&self) -> Vec<IpAddr> {
-        self.inner
-            .as_ref()
+        self.held
+            .get()
             .map(AccessPoint::clients)
             .unwrap_or_default()
             .into_iter()
@@ -149,20 +199,12 @@ impl RunningAccessPoint for Running {
     }
 }
 
-impl Drop for Running {
-    fn drop(&mut self) {
-        if let Some(access_point) = self.inner.take() {
-            drop_off_thread(access_point);
-        }
-    }
-}
-
-/// Drops `value` on a blocking thread when called inside a runtime (the runtime waits for it
-/// when it shuts down), else right here.
-fn drop_off_thread<T: Send + 'static>(value: T) {
+/// Runs `f` on a blocking thread when called inside a runtime (the runtime waits for it when
+/// it shuts down), else right here.
+fn off_thread(f: impl FnOnce() + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => drop(runtime.spawn_blocking(move || drop(value))),
-        Err(_) => drop(value),
+        Ok(runtime) => drop(runtime.spawn_blocking(f)),
+        Err(_) => f(),
     }
 }
 
@@ -175,16 +217,28 @@ async fn wait_lost(mut lost: watch::Receiver<bool>) {
 }
 
 /// This computer's address on the access point: the one a joined device reached, else the
-/// group owner's usual address once some adapter has it (discovery works before a device was
-/// accepted, docs/validation/windows-1.1-gate.md), else not known yet.
+/// group owner's usual address once the Wi-Fi Direct adapter has it (discovery works before a
+/// device was accepted, docs/validation/windows-1.1-gate.md), else not known yet.
 fn local_address(
     clients: &[(IpAddr, IpAddr)],
-    assigned: impl FnOnce(Ipv4Addr) -> bool,
+    on_access_point: impl FnOnce(Ipv4Addr) -> bool,
 ) -> Option<IpAddr> {
     if let Some(&(local, _)) = clients.first() {
         return Some(local);
     }
-    assigned(ACCESS_POINT_ADDRESS).then_some(IpAddr::V4(ACCESS_POINT_ADDRESS))
+    on_access_point(ACCESS_POINT_ADDRESS).then_some(IpAddr::V4(ACCESS_POINT_ADDRESS))
+}
+
+/// Whether `address` is on the Wi-Fi Direct virtual adapter (the access point's), not on some
+/// other adapter that happens to use the same private address.
+fn on_wifi_direct_adapter(address: Ipv4Addr) -> bool {
+    mdns::adapter_description(address).is_some_and(|description| is_wifi_direct(&description))
+}
+
+/// The description Windows gives the access point's adapter ("Microsoft Wi-Fi Direct Virtual
+/// Adapter", with " #2" and so on for further instances).
+fn is_wifi_direct(description: &str) -> bool {
+    description.starts_with("Microsoft Wi-Fi Direct Virtual Adapter")
 }
 
 // ---- Discovery ------------------------------------------------------------------------------
@@ -332,19 +386,29 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_start_delivers_what_it_started() {
-        let (made, (drops, _)) = token();
-        let started = start_off_thread(move || Ok(made)).await;
-        assert!(started.is_ok());
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(started);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    /// A turn of its own for each test (they run in parallel).
+    fn turn() -> &'static AsyncMutex<()> {
+        Box::leak(Box::new(AsyncMutex::new(())))
     }
 
     #[tokio::test]
-    async fn a_failed_start_comes_back_as_its_error() {
-        let started = start_off_thread::<Token, _>(|| {
+    async fn a_start_delivers_what_it_started_and_the_drop_stops_it() {
+        let (made, (drops, dropped_on)) = token();
+        let started = start_off_thread(turn(), move || Ok(made)).await;
+        assert!(started.is_ok());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(started);
+        until("the stop", || drops.load(Ordering::SeqCst) == 1).await;
+        assert_ne!(
+            *dropped_on.lock().unwrap(),
+            Some(std::thread::current().id())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_comes_back_as_its_error_and_gives_the_turn_back() {
+        let turn = turn();
+        let started = start_off_thread::<Token, _>(turn, || {
             Err(ApError::InUse {
                 mobile_hotspot: true,
             })
@@ -356,6 +420,45 @@ mod tests {
                 mobile_hotspot: true
             })
         );
+        let (made, _) = token();
+        let again = tokio::time::timeout(
+            Duration::from_secs(2),
+            start_off_thread(turn, move || Ok(made)),
+        )
+        .await;
+        assert!(matches!(again, Ok(Ok(_))));
+    }
+
+    /// M1: the controller may start the next access point while the last one is still being
+    /// stopped; the start waits for that stop to finish.
+    #[tokio::test]
+    async fn a_start_waits_until_the_previous_stop_has_finished() {
+        struct SlowStop(Arc<Mutex<Option<std::time::Instant>>>);
+        impl Drop for SlowStop {
+            fn drop(&mut self) {
+                std::thread::sleep(Duration::from_millis(300));
+                *self.0.lock().unwrap() = Some(std::time::Instant::now());
+            }
+        }
+        let turn = turn();
+        let stopped_at = Arc::new(Mutex::new(None));
+        let first = SlowStop(stopped_at.clone());
+        let first = start_off_thread(turn, move || Ok(first)).await.unwrap();
+        drop(first);
+        let started_at = Arc::new(Mutex::new(None));
+        let mark = started_at.clone();
+        let second = start_off_thread(turn, move || {
+            *mark.lock().unwrap() = Some(std::time::Instant::now());
+            Ok(())
+        })
+        .await;
+        assert!(second.is_ok());
+        let stopped = stopped_at.lock().unwrap().expect("the first was stopped");
+        let started = started_at.lock().unwrap().expect("the second was started");
+        assert!(
+            started >= stopped,
+            "the second start overlapped the first stop"
+        );
     }
 
     /// The trait's rule: a start that completes after the caller gave up is stopped at once,
@@ -365,7 +468,7 @@ mod tests {
         let (made, (drops, dropped_on)) = token();
         let (began, began_rx) = std::sync::mpsc::channel();
         let (thread_id, thread_rx) = std::sync::mpsc::channel();
-        let start = start_off_thread(move || {
+        let start = start_off_thread(turn(), move || {
             began.send(()).unwrap();
             thread_id.send(std::thread::current().id()).unwrap();
             std::thread::sleep(Duration::from_millis(300));
@@ -384,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn a_drop_inside_the_runtime_happens_on_another_thread() {
         let (made, (drops, dropped_on)) = token();
-        drop_off_thread(made);
+        off_thread(move || drop(made));
         until("the drop", || drops.load(Ordering::SeqCst) == 1).await;
         assert_ne!(
             *dropped_on.lock().unwrap(),
@@ -395,7 +498,7 @@ mod tests {
     #[test]
     fn a_drop_outside_a_runtime_happens_here() {
         let (made, (drops, dropped_on)) = token();
-        drop_off_thread(made);
+        off_thread(move || drop(made));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(
             *dropped_on.lock().unwrap(),
@@ -440,6 +543,21 @@ mod tests {
             Some(local)
         );
         assert_eq!(local_address(&[], |_| false), None);
+    }
+
+    #[test]
+    fn only_the_wifi_direct_adapter_counts_as_the_access_points() {
+        assert!(is_wifi_direct("Microsoft Wi-Fi Direct Virtual Adapter"));
+        assert!(is_wifi_direct("Microsoft Wi-Fi Direct Virtual Adapter #2"));
+        assert!(!is_wifi_direct("Intel(R) Wi-Fi 6 AX201 160MHz"));
+        assert!(!is_wifi_direct("Hyper-V Virtual Ethernet Adapter"));
+        assert!(!is_wifi_direct(""));
+    }
+
+    /// Whatever adapters this machine has, the loopback address is not on the access point's.
+    #[test]
+    fn loopback_is_not_on_the_wifi_direct_adapter() {
+        assert!(!on_wifi_direct_adapter(Ipv4Addr::LOCALHOST));
     }
 
     #[tokio::test]

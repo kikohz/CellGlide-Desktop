@@ -27,7 +27,7 @@ use windows::Win32::NetworkManagement::Dns::{
     DnsServiceBrowseCancel, DnsServiceFreeInstance, DnsServiceResolve, DnsServiceResolveCancel,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_TABLE,
+    FreeMibTable, GetIfEntry2, GetUnicastIpAddressTable, MIB_IF_ROW2, MIB_UNICASTIPADDRESS_TABLE,
 };
 use windows::Win32::Networking::WinSock::AF_INET;
 use windows::core::{PCWSTR, PWSTR};
@@ -54,9 +54,24 @@ pub fn browse(interface_local_ip: IpAddr, timeout: Duration) -> io::Result<Vec<F
     browse_with(Method::Raw, interface_local_ip, timeout)
 }
 
-/// Whether `address` is one of this computer's IPv4 addresses right now.
-pub fn is_local_address(address: Ipv4Addr) -> bool {
-    interface_index(address).is_ok()
+/// The description of the adapter that has `address` right now (as `Get-NetAdapter` shows it
+/// in InterfaceDescription), if any adapter has it.
+pub fn adapter_description(address: Ipv4Addr) -> Option<String> {
+    let index = interface_index(address).ok()?;
+    let mut row = MIB_IF_ROW2 {
+        InterfaceIndex: index,
+        ..Default::default()
+    };
+    // SAFETY: a row with InterfaceIndex set, as GetIfEntry2 asks; it fills the rest.
+    if unsafe { GetIfEntry2(&mut row) } != NO_ERROR {
+        return None;
+    }
+    let length = row
+        .Description
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(row.Description.len());
+    Some(String::from_utf16_lossy(&row.Description[..length]))
 }
 
 pub fn browse_with(

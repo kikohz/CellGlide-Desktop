@@ -845,8 +845,10 @@ impl Actor {
         Ok(())
     }
 
-    /// Ends the wireless attempt, if one runs or failed, and leaves `then`: the task (and with
-    /// it the access point) is gone before its session's tunnel is stopped and this returns.
+    /// Ends the wireless attempt, if one runs or failed, and leaves `then`: the task is gone
+    /// before its session's tunnel is stopped and this returns. The access point it held has
+    /// been dropped by then, which hands its stop to the platform; the stop may still be under
+    /// way, and the platform does not start another access point until it has finished.
     async fn end_wireless(&mut self, then: WirelessPhase) {
         if self.wireless.phase == WirelessPhase::Off && self.wireless.task.is_none() {
             return;

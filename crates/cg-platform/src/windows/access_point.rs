@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,8 +80,8 @@ struct Client {
 }
 
 /// A started access point. When the system stops it on its own after the start (the publisher
-/// reports `Aborted`: the radio switched off, the adapter taken by something else),
-/// [`AccessPoint::lost_signal`] turns true.
+/// reports `Aborted`, the radio switched off or the adapter taken by something else, or a
+/// `Stopped` nobody asked for), [`AccessPoint::lost_signal`] turns true.
 pub struct AccessPoint {
     publisher: WiFiDirectAdvertisementPublisher,
     status_token: i64,
@@ -117,8 +118,10 @@ impl AccessPoint {
         let (status_sender, statuses) = mpsc::channel();
         // `Aborted` before `Started` is a failed start (reported by `start`); after it, the
         // access point is gone. The handler sets the flag either way; only a started access
-        // point's owner reads it.
+        // point's owner reads it. `Stopped` after `Started` counts too: our own stop removes
+        // this handler first, so any `Stopped` it sees was not asked for.
         let (lost_sender, lost) = watch::channel(false);
+        let started = AtomicBool::new(false);
         let status_token = publisher
             .StatusChanged(&TypedEventHandler::new(
                 move |_: Ref<WiFiDirectAdvertisementPublisher>,
@@ -131,7 +134,10 @@ impl AccessPoint {
                             status.0,
                             error.0
                         );
-                        if status == WiFiDirectAdvertisementPublisherStatus::Aborted {
+                        let mut seen = started.load(Ordering::SeqCst);
+                        let ended = ends_it(status, &mut seen);
+                        started.store(seen, Ordering::SeqCst);
+                        if ended {
                             lost_sender.send_replace(true);
                         }
                         let _ = status_sender.send((status, error));
@@ -241,6 +247,20 @@ impl Drop for AccessPoint {
             }
         }
         tracing::info!("access point: stopped");
+    }
+}
+
+/// Whether this publisher status means the access point is gone; `started` remembers that
+/// `Started` was seen.
+fn ends_it(status: WiFiDirectAdvertisementPublisherStatus, started: &mut bool) -> bool {
+    match status {
+        WiFiDirectAdvertisementPublisherStatus::Started => {
+            *started = true;
+            false
+        }
+        WiFiDirectAdvertisementPublisherStatus::Aborted => true,
+        WiFiDirectAdvertisementPublisherStatus::Stopped => *started,
+        _ => false,
     }
 }
 
@@ -404,6 +424,19 @@ mod tests {
         );
         assert_eq!(host_address(name("phone.local")), None);
         assert_eq!(host_address(None), None);
+    }
+
+    #[test]
+    fn aborted_or_an_unasked_stop_after_the_start_end_it() {
+        use WiFiDirectAdvertisementPublisherStatus as Status;
+        let mut started = false;
+        assert!(!ends_it(Status::Created, &mut started));
+        assert!(!ends_it(Status::Stopped, &mut started), "before the start");
+        assert!(!ends_it(Status::Started, &mut started));
+        assert!(started);
+        assert!(ends_it(Status::Stopped, &mut started));
+        assert!(ends_it(Status::Aborted, &mut started));
+        assert!(ends_it(Status::Aborted, &mut false), "a failed start");
     }
 
     #[test]
