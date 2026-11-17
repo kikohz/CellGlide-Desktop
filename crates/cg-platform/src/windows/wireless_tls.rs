@@ -716,4 +716,93 @@ pub(crate) mod tests {
         assert_eq!(paired.identity, IDENTITY);
         assert_eq!(paired.long_term_key, phone_key);
     }
+
+    /// The device run of 2026-11-17: the iPhone did not keep a pairing whose F the computer had
+    /// sent, because the computer dropped the stream (a reset, `HalfCloseSafe`) right after F
+    /// and the reset discarded F before the phone's app read it. Here the phone reads F only
+    /// 500 ms after its OK, as a busy app might; through the service's own dialer F must still
+    /// arrive, and the computer must have waited for the phone to hang up.
+    #[tokio::test]
+    async fn f_survives_a_phone_that_reads_it_late() {
+        use crate::windows::wireless_ports::TlsDialer;
+        use cg_core::wireless::code_message::{self as message, Side, Transcript};
+        use cg_core::wireless::code_pairing;
+        use cg_core::wireless::pairing::{PAIRING_IDENTITY, Role, Session, pairing_channel_key};
+        use cg_core::wireless::ports::Dialer;
+
+        const PHONE_ID: &str = "4961212D-61DD-4BD0-9FE9-8989FB6B8952";
+        const IDENTITY: &str = "9B2E0F5A-7C3D-4E1B-A6D4-5F8C2B1E7A90";
+        const READS_F_AFTER: Duration = Duration::from_millis(500);
+        let channel_key = *pairing_channel_key().as_bytes();
+        let context = server_context_for(CIPHER, PAIRING_IDENTITY, channel_key);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let phone = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = SslStream::new(Ssl::new(&context).unwrap(), tcp).unwrap();
+            Pin::new(&mut stream).accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "CG1 PAIR\n");
+            let session = Session::fixed(Role::Phone, [0x11; 32], [0x22; 16]);
+            let mut transcript = Transcript::new();
+            let c = message::commitment(&session.commitment(), PHONE_ID);
+            transcript.add(&c);
+            reader.get_mut().write_all(c.as_bytes()).await.unwrap();
+            let mut m = String::new();
+            reader.read_line(&mut m).await.unwrap();
+            transcript.add(&m);
+            let computer = message::parse_computer(m.trim_end_matches('\n')).unwrap();
+            let p = message::phone(&session.public_key(), &session.nonce());
+            transcript.add(&p);
+            reader.get_mut().write_all(p.as_bytes()).await.unwrap();
+            let agreed = session
+                .agree(&computer.public_key, &computer.nonce)
+                .unwrap();
+            let signed = message::allowed_signed(IDENTITY, "Eve iPhone");
+            transcript.add(&signed);
+            let proof = message::proof(Side::Phone, &agreed.long_term_key, &transcript);
+            let ok = message::allowed(IDENTITY, "Eve iPhone", &proof);
+            reader.get_mut().write_all(ok.as_bytes()).await.unwrap();
+            // The app gets to F late; whatever arrived meanwhile must still be there.
+            tokio::time::sleep(READS_F_AFTER).await;
+            let mut f = String::new();
+            let read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut f)).await;
+            let f_valid = matches!(read, Ok(Ok(n)) if n > 0)
+                && message::parse_finished(f.trim_end_matches('\n')).is_some_and(|proof| {
+                    message::verify(&proof, Side::Computer, &agreed.long_term_key, &transcript)
+                });
+            // Then hangs up, as the phone does once F checked out and the pairing is saved.
+            drop(reader);
+            (f_valid, read.map(|r| r.map_err(|e| e.kind())))
+        });
+
+        let key = pairing_channel_key();
+        let stream = TlsDialer
+            .dial(address, PAIRING_IDENTITY, &key)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let paired = code_pairing::run(
+            stream,
+            PHONE_ID,
+            "7C1E5B52-2D6A-4A0F-8F3B-0A9D5E4C1B22",
+            "Desk PC",
+            |_code| async { true },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        // `run` gave the stream back to nobody: it is dropped (reset) now, as in the service.
+        let took = started.elapsed();
+        assert_eq!(paired.identity, IDENTITY);
+        let (f_valid, read) = phone.await.unwrap();
+        assert!(f_valid, "the phone did not get a valid F: {read:?}");
+        assert!(
+            took >= READS_F_AFTER,
+            "returned before the phone hung up: {took:?}"
+        );
+        assert!(took < code_pairing::FINISH_LINGER, "{took:?}");
+    }
 }

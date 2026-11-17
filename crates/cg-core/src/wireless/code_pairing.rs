@@ -29,6 +29,11 @@ use super::request::Request;
 pub const STEP_TIMEOUT: Duration = message::STEP_TIMEOUT;
 /// Both users' answers and the phone's OK, counted from when the code is shown.
 pub const CONFIRM_WINDOW: Duration = message::CONFIRM_WINDOW;
+/// After `F`, how long the computer keeps the connection open for the phone to close it. The
+/// phone (`WirelessPairingResponder`) closes right after it has checked `F` and saved the
+/// pairing (a keychain write, normally well under a second); until then `F` may still be
+/// unread in its socket, and the wireless stream resets on drop, which would throw it away.
+pub const FINISH_LINGER: Duration = Duration::from_secs(3);
 
 /// What a finished pairing leaves behind; the caller keeps it (the key store) via `save`.
 #[derive(Debug)]
@@ -288,9 +293,18 @@ where
         &transcript,
     ));
     let _ = write_text(&mut writer, &f).await;
-    // Close gracefully, as the Swift side does; the pairing is already saved either way.
+    // Our write side is done (a no-op on the wireless stream, which resets on drop instead).
     let _ = writer.shutdown().await;
+    // Wait for the phone to hang up before dropping the stream: a reset reaching the phone
+    // before its app has read F discards F, and the phone then keeps nothing.
+    let _ = tokio::time::timeout(FINISH_LINGER, until_closed(&mut reader)).await;
     Ok(paired)
+}
+
+/// Reads and discards until the other side closes or the connection fails.
+async fn until_closed<R: AsyncRead + Unpin>(reader: &mut R) {
+    let mut buffer = [0u8; 256];
+    while matches!(reader.read(&mut buffer).await, Ok(n) if n > 0) {}
 }
 
 #[cfg(test)]
@@ -332,6 +346,8 @@ mod tests {
         c_delay: Duration,
         /// Stop after reading M and never send P.
         silent_after_m: bool,
+        /// After reading F, keep the connection this long before hanging up.
+        hold_after_f: Duration,
     }
 
     impl Phone {
@@ -346,6 +362,7 @@ mod tests {
                 reveal_key: None,
                 c_delay: Duration::ZERO,
                 silent_after_m: false,
+                hold_after_f: Duration::ZERO,
             }
         }
     }
@@ -462,6 +479,7 @@ mod tests {
                     message::verify(&proof, Side::Computer, &agreed.long_term_key, &transcript)
                 }),
             );
+            tokio::time::sleep(p.hold_after_f).await;
         }
         report
     }
@@ -673,6 +691,34 @@ mod tests {
         assert_eq!(o.phone.saved_when_f_arrived, Some(true));
         assert_eq!(o.phone.f_valid, Some(true));
         assert_eq!(confirm_calls(&o), 1);
+    }
+
+    /// F must not be followed at once by the drop (on the wireless stream a reset that can
+    /// overtake F): the computer waits for the phone to hang up.
+    #[tokio::test(start_paused = true)]
+    async fn after_f_the_computer_waits_for_the_phone_to_hang_up() {
+        let mut phone = Phone::new(Reply::Allow);
+        phone.hold_after_f = Duration::from_millis(1500);
+        let o = pair(phone, Confirm::Yes).await;
+        assert!(o.result.is_ok());
+        assert_eq!(o.phone.f_valid, Some(true));
+        assert!(o.elapsed >= Duration::from_millis(1500), "{:?}", o.elapsed);
+        assert!(o.elapsed < FINISH_LINGER, "{:?}", o.elapsed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_phone_that_never_hangs_up_after_f_is_left_after_the_linger() {
+        let mut phone = Phone::new(Reply::Allow);
+        phone.hold_after_f = Duration::from_secs(10);
+        let o = pair(phone, Confirm::Yes).await;
+        assert!(o.result.is_ok());
+        assert_eq!(o.phone.f_valid, Some(true));
+        assert!(o.elapsed >= FINISH_LINGER, "{:?}", o.elapsed);
+        assert!(
+            o.elapsed < FINISH_LINGER + Duration::from_millis(100),
+            "{:?}",
+            o.elapsed
+        );
     }
 
     #[tokio::test(start_paused = true)]
