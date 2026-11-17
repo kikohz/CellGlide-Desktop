@@ -3,7 +3,18 @@
 # (Moved from scripts\tests\test-install-dev-datadir.ps1, same cases and assertions.)
 Describe 'Set-DataDirAcl' -Tag 'Elevated' {
     BeforeAll {
+    # Sandbox first, before anything is loaded: every destructive helper refuses a path outside
+    # CELLGLIDE_TEST_SANDBOX (Assert-TestSandbox), so nothing here can touch the real machine.
+    $script:SavedEnv = @{}
+    foreach ($n in 'CELLGLIDE_TEST_SANDBOX', 'ProgramData', 'LOCALAPPDATA') { $script:SavedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $env:CELLGLIDE_TEST_SANDBOX = "$TestDrive"
+    $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+    $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+    $null = New-Item -ItemType Directory -Force $env:ProgramData, $env:LOCALAPPDATA
         . "$PSScriptRoot\..\..\..\scripts\tests\Import-ScriptFunctions.ps1"; . Import-ScriptFunctions "$PSScriptRoot\..\install.ps1"
+        $UninstallKey = 'HKCU:\Software\CellGlideTest-uninstall-entry'
+        $Shortcut = Join-Path $TestDrive 'ProgramData\Start Menu\CellGlide.lnk'
+        $InstallDir = Join-Path $TestDrive 'Program Files\CellGlide'
         $SidSystem = '*S-1-5-18'
         $SidAdmins = '*S-1-5-32-544'
         $SidUsers = '*S-1-5-32-545'
@@ -29,6 +40,7 @@ Describe 'Set-DataDirAcl' -Tag 'Elevated' {
         # Junctions first, so removing the tree can't reach through them.
         Get-ChildItem -LiteralPath $TestDrive -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue |
             ForEach-Object { [System.IO.Directory]::Delete($_.FullName) }
+        foreach ($n in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $script:SavedEnv[$n]) }
     }
     It 'a junction inside a pre-existing data directory stops the step' {
         $DataDir = Join-Path $TestDrive 'data1'

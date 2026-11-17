@@ -2,8 +2,21 @@
 # Only the script's functions and constants are loaded (Import-ScriptFunctions); the steps that
 # change the system are mocked.
 BeforeAll {
+    # Sandbox first, before anything is loaded: every destructive helper refuses a path outside
+    # CELLGLIDE_TEST_SANDBOX (Assert-TestSandbox), so nothing here can touch the real machine.
+    $script:SavedEnv = @{}
+    foreach ($n in 'CELLGLIDE_TEST_SANDBOX', 'ProgramData', 'LOCALAPPDATA') { $script:SavedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $env:CELLGLIDE_TEST_SANDBOX = "$TestDrive"
+    $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+    $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+    $null = New-Item -ItemType Directory -Force $env:ProgramData, $env:LOCALAPPDATA
     . "$PSScriptRoot\..\..\..\scripts\tests\Import-ScriptFunctions.ps1"
     $script:File = "$PSScriptRoot\..\install.ps1"; . Import-ScriptFunctions $script:File     # functions and constants ($DefaultBase ...)
+    $InstallDir = Join-Path $TestDrive 'Program Files\CellGlide'
+    $ServiceName = 'CellGlideTest'
+    $UninstallKey = 'HKCU:\Software\CellGlideTest-uninstall-entry'
+    $Shortcut = Join-Path $TestDrive 'ProgramData\Microsoft\Windows\Start Menu\Programs\CellGlide.lnk'
+    if ("$DataDir" -ne (Join-Path $TestDrive 'ProgramData\CellGlide')) { throw "test sandbox: DataDir is $DataDir" }
     $script:Ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script:File), [ref]$null, [ref]$null)
 }
 Describe 'install.ps1' {
@@ -401,14 +414,14 @@ public static class P { public static void Main() {
             Mock Start-Process {}
             Start-AppAsUser
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq "$env:SystemRoot\explorer.exe" -and "$ArgumentList" -eq '"C:\Program Files\CellGlide\app\CellGlide.exe"' }
+                $FilePath -eq "$env:SystemRoot\explorer.exe" -and "$ArgumentList" -eq "`"$InstallDir\app\CellGlide.exe`"" }
         }
         It 'an ordinary process starts the app directly' {
             Mock Test-Elevated { $false }
             Mock Test-TokenElevated { $false }
             Mock Start-Process {}
             Start-AppAsUser
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\Program Files\CellGlide\app\CellGlide.exe' -and -not $ArgumentList }
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq "$InstallDir\app\CellGlide.exe" -and -not $ArgumentList }
         }
         It 'an elevated token that is no administrator''s, or one that cannot be read, also goes through explorer.exe' {
             Mock Test-Elevated { $false }
@@ -714,4 +727,8 @@ $code = 7
         (Get-Content $script:File -Raw).Contains($first) | Should -BeTrue
         $EndUserNotice | Should -BeExactly $first
     }
+}
+
+AfterAll {
+    foreach ($n in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $script:SavedEnv[$n]) }
 }

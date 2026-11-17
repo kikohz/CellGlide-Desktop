@@ -2,14 +2,68 @@
 # Only the script's functions and constants are loaded (Import-ScriptFunctions); the steps that
 # change the system are mocked, or pointed at temporary folders and randomly named HKCU keys.
 BeforeAll {
+    # Sandbox first, before anything is loaded: the script computes $DataDir, $Shortcut and the
+    # per-user folder from these variables, and every destructive helper refuses a path outside
+    # CELLGLIDE_TEST_SANDBOX (Assert-TestSandbox), so nothing here can touch the real machine.
+    $script:SavedEnv = @{}
+    foreach ($n in 'CELLGLIDE_TEST_SANDBOX', 'ProgramData', 'LOCALAPPDATA', 'TEMP', 'TMP') { $script:SavedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    # TEMP gets its own folder (outside TestDrive: a compiler server can keep a handle on it, which would
+    # make Pester's TestDrive cleanup fail); the guard allows both roots.
+    $script:TempSandbox = Join-Path ([IO.Path]::GetTempPath()) ('cg-uninstall-test-' + [guid]::NewGuid().ToString('N'))
+    $env:CELLGLIDE_TEST_SANDBOX = "$TestDrive;$script:TempSandbox"
+    $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+    $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+    $env:TEMP = $script:TempSandbox; $env:TMP = $env:TEMP
+    $null = New-Item -ItemType Directory -Force $env:ProgramData, $env:LOCALAPPDATA, $env:TEMP
     . "$PSScriptRoot\..\..\..\scripts\tests\Import-ScriptFunctions.ps1"
     $script:File = "$PSScriptRoot\..\uninstall.ps1"; . Import-ScriptFunctions $script:File
+    $InstallDir = Join-Path $TestDrive 'Program Files\CellGlide'
+    $ServiceName = 'CellGlideTest'
+    $UninstallKey = 'HKCU:\Software\CellGlideTest-uninstall-entry'
+    $ServicesKey = 'HKCU:\Software\CellGlideTest-services'
+    if ("$DataDir" -ne (Join-Path $TestDrive 'ProgramData\CellGlide')) { throw "test sandbox: DataDir is $DataDir" }
     $script:Ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script:File), [ref]$null, [ref]$null)
     $script:Exe = 'C:\Program Files\CellGlide\app\CellGlide.exe'
     $script:NewTempKey = { $k = 'HKCU:\Software\CellGlideTest-' + [guid]::NewGuid().ToString('N'); $null = New-Item -Path $k; $k }
     $script:FakeProcess = { param($code) [pscustomobject]@{ ExitCode = $code } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { } -PassThru }
 }
 Describe 'uninstall.ps1' {
+    It 'the test sandbox points every destructive path into TestDrive' {
+        foreach ($p in $DataDir, $InstallDir, $Shortcut, $env:LOCALAPPDATA) { "$p".StartsWith("$TestDrive\", [StringComparison]::OrdinalIgnoreCase) | Should -BeTrue -Because $p }
+        $ServiceName | Should -Be 'CellGlideTest'
+        $UninstallKey | Should -BeLike 'HKCU:*CellGlideTest-*'
+        $ServicesKey | Should -BeLike 'HKCU:*CellGlideTest-*'
+    }
+    It 'under test the guard refuses the real data folder, Program Files, the registry and system changes' {
+        $realData = Join-Path $script:SavedEnv['ProgramData'] 'CellGlide'
+        $realData | Should -BeLike '*\CellGlide'
+        $realData | Should -Not -BeLike "$TestDrive*"
+        { Assert-TestSandbox -Path $realData } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Path 'C:\Program Files\CellGlide' } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Path "$TestDrive\..\elsewhere" } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Path "${TestDrive}X\file" } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CellGlide' } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Action 'anything' } | Should -Throw '*refused under test*'
+        { Assert-TestSandbox -Path "$TestDrive\ok\file" } | Should -Not -Throw
+        { Assert-TestSandbox -Path 'HKCU:\Software\CellGlideTest-x' } | Should -Not -Throw
+        # The helpers refuse before they look at the path at all.
+        { Remove-WirelessData $realData } | Should -Throw '*refused under test*'
+        { Remove-DataDir $realData } | Should -Throw '*refused under test*'
+        { Remove-TreeNoFollow $realData } | Should -Throw '*refused under test*'
+        { Remove-PathWithRetry $realData } | Should -Throw '*refused under test*'
+        { Invoke-Native 'sc.exe' @('delete', 'CellGlide') } | Should -Throw '*refused under test*'
+        { Stop-OurService } | Should -Throw '*refused under test*'
+        { Remove-ServiceEntry } | Should -Throw '*refused under test*'
+        { Remove-PhantomDevice } | Should -Throw '*refused under test*'
+        { Stop-CellGlideProcesses } | Should -Throw '*refused under test*'
+    }
+    It 'outside a test the guard does nothing' {
+        $saved = $env:CELLGLIDE_TEST_SANDBOX
+        try {
+            $env:CELLGLIDE_TEST_SANDBOX = ''
+            { Assert-TestSandbox -Path 'C:\Program Files\CellGlide' } | Should -Not -Throw
+        } finally { $env:CELLGLIDE_TEST_SANDBOX = $saved }
+    }
     It 'Only our own Run value is ours' {
         $exe = 'C:\Program Files\CellGlide\app\CellGlide.exe'
         Test-OurRunValue '"C:\Program Files\CellGlide\app\CellGlide.exe" --tray' $exe | Should -BeTrue
@@ -300,9 +354,9 @@ Describe 'uninstall.ps1' {
             Mock Remove-OwnUserData { $script:calls.Add('Remove-OwnUserData') }   # never called from the elevated part
         }
         It 'the elevated part purges ProgramData only, after the interface keys and the device, and never the user data' {
-            Invoke-UninstallPart -Purge -Keep 'C:\Program Files\CellGlide.work-x' | Should -Be 0
+            Invoke-UninstallPart -Purge -Keep "$InstallDir.work-x" | Should -Be 0
             $script:calls | Should -Be @('Stop-CellGlideProcesses', 'Stop-OurService', 'Remove-ServiceEntry',
-                "Remove-RunValues $script:Exe", 'Remove-Shortcut', 'Remove-UninstallEntry', 'Remove-ProgramDirs C:\Program Files\CellGlide.work-x',
+                "Remove-RunValues $InstallDir\app\CellGlide.exe", 'Remove-Shortcut', 'Remove-UninstallEntry', "Remove-ProgramDirs $InstallDir.work-x",
                 'Remove-InterfaceKeys', 'Remove-PhantomDevice', "Remove-DataDir $env:ProgramData\CellGlide")
             $script:calls | Should -Not -Contain 'Remove-OwnUserData'
             Should -Invoke Write-Host -ParameterFilter { "$Object" -eq 'CellGlide uninstalled.' }
@@ -438,7 +492,7 @@ Describe 'uninstall.ps1' {
         It 'the copy in the install folder relocates even in an administrator window' {
             Mock Test-Elevated { $true }
             Mock Invoke-UninstallChild { $script:child = @{ Args = @($Arguments) }; 0 }
-            Invoke-CellGlideUninstall -ScriptPath 'C:\Program Files\CellGlide\uninstall.ps1' | Should -Be 0
+            Invoke-CellGlideUninstall -ScriptPath "$InstallDir\uninstall.ps1" | Should -Be 0
             $script:child.Args.Count | Should -Be 0
             $script:part | Should -BeNullOrEmpty
         }
@@ -592,4 +646,9 @@ Describe 'uninstall.ps1' {
         }
     }
     It 'is ASCII only' { [IO.File]::ReadAllBytes((Resolve-Path $script:File)) | Where-Object { $_ -gt 0x7F } | Should -BeNullOrEmpty }
+}
+
+AfterAll {
+    foreach ($n in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $script:SavedEnv[$n]) }
+    try { Remove-Item -LiteralPath $script:TempSandbox -Recurse -Force -ErrorAction Stop } catch { }
 }

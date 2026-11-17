@@ -135,9 +135,38 @@ public static extern bool GetTokenInformation(System.IntPtr token, int infoClass
     }
 }
 
+function Assert-TestSandbox {
+    # Test safety net. The test harness sets CELLGLIDE_TEST_SANDBOX to its own temporary folder (or several, separated by ;);
+    # while it is set, anything that is not inside that folder (or, for the registry, a key whose
+    # name has CellGlideTest-) is refused with a throw, so a test that forgets a mock or a path
+    # can never delete or change the real machine. Not set (every real run): does nothing.
+    # -Path checks a file or registry path; -Action names a system change (service, device,
+    # process, native command) that has no sandbox form and is always refused under test.
+    param([string]$Path = '', [string]$Action = '')
+    $ErrorActionPreference = 'Stop'
+    $root = $env:CELLGLIDE_TEST_SANDBOX
+    if (-not $root) { return }
+    if ($Action) { throw "refused under test (sandbox $root): $Action" }
+    if ($Path -match '^(HKLM|HKCU|HKU|HKCR|Registry):') {
+        if ($Path -notmatch 'CellGlideTest-') { throw "refused under test (sandbox $root): registry path $Path" }
+        return
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($r in ($root -split ';' | Where-Object { $_ })) {
+        $rootFull = [IO.Path]::GetFullPath($r).TrimEnd('\')
+        if ($full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) { return }
+    }
+    throw "refused under test (sandbox $root): $Path is outside the sandbox"
+}
+
 function Invoke-Native {
     # Runs a native command; throws with its output when the exit code is not 0.
     param([string]$Exe, [string[]]$ArgList)
+    # Under test only icacls on a sandbox path is allowed (the ACL tests); anything else is refused.
+    if ($env:CELLGLIDE_TEST_SANDBOX) {
+        if ($Exe -eq 'icacls.exe') { Assert-TestSandbox -Path $ArgList[0] }
+        else { Assert-TestSandbox -Action "native command $Exe $($ArgList -join ' ')" }
+    }
     # stderr lines must not become terminating errors under 'Stop'.
     $ErrorActionPreference = 'Continue'
     $out = & $Exe @ArgList 2>&1 | Out-String
@@ -168,6 +197,7 @@ function Wait-AdapterGone {
 function Stop-OurService {
     # Stops CellGlide if it exists and waits for cellglide0 to go. Returns true if it did.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action "stop service $ServiceName"
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -ne 'Stopped') {
         Write-Host "Stopping service $ServiceName"
@@ -181,6 +211,7 @@ function Remove-PathWithRetry {
     # The service's image can stay locked for a moment after it stops.
     param([string]$Path)
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Path
     for ($i = 0; $i -lt 20; $i++) {
         if (-not (Test-Path -LiteralPath $Path)) { return }
         try { Remove-Item -LiteralPath $Path -Recurse -Force; return }
@@ -194,6 +225,7 @@ function Remove-PhantomDevice {
     # Only the node whose instance id is our fixed wintun GUID is removed, and only when
     # it is not present (a live adapter is never removed here).
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action 'remove the phantom device'
     $dev = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
         Where-Object { $_.InstanceId -eq $AdapterInstanceId }
     if (-not $dev) { return }
@@ -377,6 +409,7 @@ function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
     # extracted files or the log between the hash check and the install.
     $ErrorActionPreference = 'Stop'
     $dir = Join-Path $Root ('CellGlide.work-' + [guid]::NewGuid().ToString('N'))
+    Assert-TestSandbox -Path $dir
     if (Test-Path -LiteralPath $dir) { throw "$dir already exists" }
     $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
     $security = New-Object Security.AccessControl.DirectorySecurity
@@ -424,6 +457,7 @@ function Remove-StaleWorkDirs([string]$Keep, [string]$Root = (Split-Path -Parent
 
 function Stop-CellGlideProcesses {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action 'stop CellGlide processes'
     $ids = Select-ProcessesToStop @(Get-CimInstance -ClassName Win32_Process) $InstallDir
     foreach ($id in $ids) {
         Write-Host "Stopping process $id"
@@ -509,6 +543,7 @@ function Remove-OwnTempFile([string]$Path) {
     # plain file with exactly one link. The delete is bound to the object that was checked, so a
     # swap in between cannot redirect it. Anything else is left in place (it is harmless).
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Path
     if (-not ('CellGlideUninstall.TempFile' -as [type])) {
         Add-Type -Namespace CellGlideUninstall -Name TempFile -MemberDefinition @'
 [StructLayout(LayoutKind.Sequential)]
@@ -619,6 +654,7 @@ function Remove-RunValues([string]$ExePath, [string[]]$Hives) {
     $failed = @()
     foreach ($hive in $Hives) {
         $key = "$hive\$RunKeyPath"
+        Assert-TestSandbox -Path $key
         try {
             if (-not (Test-Path -LiteralPath $key)) { continue }
             $data = (Get-Item -LiteralPath $key).GetValue($RunValueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -638,6 +674,7 @@ function Remove-TreeNoFollow([string]$Dir) {
     # listed and each entry right before it is deleted; a junction or symbolic link found on the
     # way stops it, and is neither followed nor deleted. Locked files get a few retries.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Dir
     $retry = { param([scriptblock]$Action)
         for ($i = 0; ; $i++) {
             try { & $Action; return }
@@ -657,6 +694,7 @@ function Remove-TreeNoFollow([string]$Dir) {
 function Remove-DataDir([string]$Dir) {
     # A data folder, only when neither it nor anything in it is a junction or symbolic link.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Dir
     if (-not (Test-Path -LiteralPath $Dir)) { return }
     if (Test-ReparsePoint (Get-Item -LiteralPath $Dir -Force)) { Refuse-ReparsePoint $Dir }
     foreach ($link in @(Get-ReparsePoints $Dir)) { Refuse-ReparsePoint $link }
@@ -674,10 +712,12 @@ function Remove-WirelessData([string]$Dir = $DataDir) {
     # names, only plain files: a link is refused and never followed, and a folder of that name
     # is not touched.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Dir
     if (-not (Test-Path -LiteralPath $Dir)) { return }
     if (Test-ReparsePoint (Get-Item -LiteralPath $Dir -Force)) { Refuse-ReparsePoint $Dir }
     foreach ($name in $WirelessFiles) {
         $path = Join-Path $Dir $name
+        Assert-TestSandbox -Path $path
         $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         if (-not $item -or $item.PSIsContainer) { continue }
         if (Test-ReparsePoint $item) { Refuse-ReparsePoint $path }
@@ -734,6 +774,7 @@ function Remove-UserDataAsUser([int]$Code, [bool]$Elevated) {
 function Remove-ServiceEntry {
     # Deletes the stopped service and waits a moment for the SCM to let it go.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action "delete service $ServiceName"
     if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { return }
     Write-Host "Deleting service $ServiceName"
     Invoke-Native 'sc.exe' @('delete', $ServiceName) | Out-Null
@@ -745,6 +786,7 @@ function Remove-ServiceEntry {
 
 function Remove-Shortcut {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Shortcut
     if (Test-Path -LiteralPath $Shortcut) {
         Remove-Item -LiteralPath $Shortcut -Force
         Write-Host "Removed $Shortcut"
@@ -753,6 +795,7 @@ function Remove-Shortcut {
 
 function Remove-UninstallEntry {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $UninstallKey
     if (Test-Path -LiteralPath $UninstallKey) {
         Remove-Item -LiteralPath $UninstallKey -Recurse -Force
         Write-Host 'Removed CellGlide from Settings > Apps > Installed apps'
@@ -785,6 +828,7 @@ function Remove-InterfaceKeys([string]$Base = $ServicesKey) {
     if (Get-OurAdapter) { throw "$AdapterName is still present; its interface keys were kept" }
     foreach ($stack in @('Tcpip', 'Tcpip6')) {
         $key = "$Base\$stack\Parameters\Interfaces\$AdapterGuid"
+        Assert-TestSandbox -Path $key
         if (Test-Path -LiteralPath $key) {
             Remove-Item -LiteralPath $key -Recurse -Force
             Write-Host "Removed $key"

@@ -1,6 +1,19 @@
 # Pester 5 tests for Install-Files in packaging\windows\install.ps1 (decision 6), on TestDrive only.
 BeforeAll {
+    # Sandbox first, before anything is loaded: every destructive helper refuses a path outside
+    # CELLGLIDE_TEST_SANDBOX (Assert-TestSandbox), so nothing here can touch the real machine.
+    $script:SavedEnv = @{}
+    foreach ($n in 'CELLGLIDE_TEST_SANDBOX', 'ProgramData', 'LOCALAPPDATA') { $script:SavedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $env:CELLGLIDE_TEST_SANDBOX = "$TestDrive"
+    $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+    $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+    $null = New-Item -ItemType Directory -Force $env:ProgramData, $env:LOCALAPPDATA
     . "$PSScriptRoot\..\..\..\scripts\tests\Import-ScriptFunctions.ps1"; . Import-ScriptFunctions "$PSScriptRoot\..\install.ps1"
+    $InstallDir = Join-Path $TestDrive 'Program Files\CellGlide'
+    $ServiceName = 'CellGlideTest'
+    $UninstallKey = 'HKCU:\Software\CellGlideTest-uninstall-entry'
+    $Shortcut = Join-Path $TestDrive 'ProgramData\Microsoft\Windows\Start Menu\Programs\CellGlide.lnk'
+    if ("$DataDir" -ne (Join-Path $TestDrive 'ProgramData\CellGlide')) { throw "test sandbox: DataDir is $DataDir" }
     function New-Tree([string]$Dir, [string[]]$Files) { $null = New-Item -ItemType Directory -Force $Dir; foreach ($f in $Files) { Set-Content (Join-Path $Dir $f) $f } }
     function Names([string]$Dir) { @(Get-ChildItem -LiteralPath $Dir -Recurse -File | ForEach-Object Name | Sort-Object) }
 }
@@ -118,4 +131,8 @@ Describe 'New-PrivateWorkDir' -Tag 'Elevated' {
         try { Split-Path -Parent $dir | Should -Be (Split-Path -Parent $InstallDir) }
         finally { Remove-Item -LiteralPath $dir -Recurse -Force }
     }
+}
+
+AfterAll {
+    foreach ($n in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $script:SavedEnv[$n]) }
 }

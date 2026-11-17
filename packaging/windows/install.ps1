@@ -127,9 +127,38 @@ public static extern bool GetTokenInformation(System.IntPtr token, int infoClass
     }
 }
 
+function Assert-TestSandbox {
+    # Test safety net. The test harness sets CELLGLIDE_TEST_SANDBOX to its own temporary folder (or several, separated by ;);
+    # while it is set, anything that is not inside that folder (or, for the registry, a key whose
+    # name has CellGlideTest-) is refused with a throw, so a test that forgets a mock or a path
+    # can never delete or change the real machine. Not set (every real run): does nothing.
+    # -Path checks a file or registry path; -Action names a system change (service, device,
+    # process, native command) that has no sandbox form and is always refused under test.
+    param([string]$Path = '', [string]$Action = '')
+    $ErrorActionPreference = 'Stop'
+    $root = $env:CELLGLIDE_TEST_SANDBOX
+    if (-not $root) { return }
+    if ($Action) { throw "refused under test (sandbox $root): $Action" }
+    if ($Path -match '^(HKLM|HKCU|HKU|HKCR|Registry):') {
+        if ($Path -notmatch 'CellGlideTest-') { throw "refused under test (sandbox $root): registry path $Path" }
+        return
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($r in ($root -split ';' | Where-Object { $_ })) {
+        $rootFull = [IO.Path]::GetFullPath($r).TrimEnd('\')
+        if ($full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) { return }
+    }
+    throw "refused under test (sandbox $root): $Path is outside the sandbox"
+}
+
 function Invoke-Native {
     # Runs a native command; throws with its output when the exit code is not 0.
     param([string]$Exe, [string[]]$ArgList)
+    # Under test only icacls on a sandbox path is allowed (the ACL tests); anything else is refused.
+    if ($env:CELLGLIDE_TEST_SANDBOX) {
+        if ($Exe -eq 'icacls.exe') { Assert-TestSandbox -Path $ArgList[0] }
+        else { Assert-TestSandbox -Action "native command $Exe $($ArgList -join ' ')" }
+    }
     # stderr lines must not become terminating errors under 'Stop'.
     $ErrorActionPreference = 'Continue'
     $out = & $Exe @ArgList 2>&1 | Out-String
@@ -160,6 +189,7 @@ function Wait-AdapterGone {
 function Stop-OurService {
     # Stops CellGlide if it exists and waits for cellglide0 to go. Returns true if it did.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action "stop service $ServiceName"
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -ne 'Stopped') {
         Write-Host "Stopping service $ServiceName"
@@ -173,6 +203,7 @@ function Remove-PathWithRetry {
     # The service's image can stay locked for a moment after it stops.
     param([string]$Path)
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Path
     for ($i = 0; $i -lt 20; $i++) {
         if (-not (Test-Path -LiteralPath $Path)) { return }
         try { Remove-Item -LiteralPath $Path -Recurse -Force; return }
@@ -186,6 +217,7 @@ function Remove-PhantomDevice {
     # Only the node whose instance id is our fixed wintun GUID is removed, and only when
     # it is not present (a live adapter is never removed here).
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action 'remove the phantom device'
     $dev = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
         Where-Object { $_.InstanceId -eq $AdapterInstanceId }
     if (-not $dev) { return }
@@ -346,6 +378,7 @@ function Install-Files([string]$Source, [string]$Target) {
     # Decision 6: copy to <Target>.new, move <Target> to <Target>.old, move .new in, delete
     # .old. A failure removes .new and puts .old back, so the old version stays usable.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Target
     $new = "$Target.new"
     $old = "$Target.old"
     $targetLeaf = Split-Path -Leaf $Target
@@ -681,6 +714,7 @@ function New-PrivateWorkDir([string]$Root = (Split-Path -Parent $InstallDir)) {
     # extracted files or the log between the hash check and the install.
     $ErrorActionPreference = 'Stop'
     $dir = Join-Path $Root ('CellGlide.work-' + [guid]::NewGuid().ToString('N'))
+    Assert-TestSandbox -Path $dir
     if (Test-Path -LiteralPath $dir) { throw "$dir already exists" }
     $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
     $security = New-Object Security.AccessControl.DirectorySecurity
@@ -729,6 +763,7 @@ function Remove-StaleWorkDirs([string]$Keep, [string]$Root = (Split-Path -Parent
 function Expand-Package([string]$Zip, [string]$Dest) {
     # Unpacks the zip into a new folder and checks it holds a CellGlide package and no links.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Dest
     $null = New-Item -ItemType Directory -Path $Dest
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Dest)
@@ -740,6 +775,7 @@ function Expand-Package([string]$Zip, [string]$Dest) {
 
 function Stop-CellGlideProcesses {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action 'stop CellGlide processes'
     $ids = Select-ProcessesToStop @(Get-CimInstance -ClassName Win32_Process) $InstallDir
     foreach ($id in $ids) {
         Write-Host "Stopping process $id"
@@ -749,6 +785,7 @@ function Stop-CellGlideProcesses {
 
 function Set-OurService {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Action "create or change service $ServiceName"
     $binPath = '"' + (Join-Path $InstallDir 'cellglide-service.exe') + '"'
     if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
         # Not sc.exe config: Windows PowerShell 5.1 drops the embedded quotes when passing
@@ -844,6 +881,7 @@ function Set-DataDirAcl {
     # anything, links included: the root is locked first, then each entry in turn, and a
     # junction or symbolic link anywhere stops the install before any ACL goes through it.
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $DataDir
     $health = Join-Path $DataDir 'health'
     $logs = Join-Path $DataDir 'logs'
     # A pre-existing folder must be owned, with everything in it, by SYSTEM, Administrators or a
@@ -878,6 +916,7 @@ function Set-DataDirAcl {
 
 function New-StartMenuShortcut {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $Shortcut
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($Shortcut)
     $link.TargetPath = Join-Path $InstallDir 'app\CellGlide.exe'
@@ -891,6 +930,7 @@ function New-StartMenuShortcut {
 
 function Set-UninstallEntry([string]$Version) {
     $ErrorActionPreference = 'Stop'
+    Assert-TestSandbox -Path $UninstallKey
     $bytes = (Get-ChildItem -LiteralPath $InstallDir -Recurse -Force -File | Measure-Object -Property Length -Sum).Sum
     $entry = Get-UninstallEntry $InstallDir $Version ([long][math]::Ceiling($bytes / 1KB))
     if (-not (Test-Path -LiteralPath $UninstallKey)) { $null = New-Item -Path $UninstallKey }
