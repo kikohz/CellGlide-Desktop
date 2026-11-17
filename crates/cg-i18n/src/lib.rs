@@ -539,6 +539,7 @@ pub const KEYS: &[&str] = &[
     "wireless.hint.pairing_busy",
     "wireless.hint.not_sharing",
     "wireless.hint.name_clash",
+    "wireless.hint.other_wifi",
     "wireless.step.join",
     "wireless.step.share",
     "wireless.step.wait",

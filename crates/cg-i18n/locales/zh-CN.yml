@@ -471,6 +471,7 @@ wireless:
     pairing_busy: "iPhone 暂时不接受配对，一分钟后再试"
     not_sharing: "请在 iPhone 上打开 CellGlide 并开始共享；如果开着 VPN 模式，请先关闭"
     name_clash: "网络上另有设备使用这台 iPhone 的名字，等到只剩一台时再连接"
+    other_wifi: "如果 iPhone 换到了它记住的其他 Wi‑Fi，请在 iPhone 的“设置 → 无线局域网”里重新连接 %{ssid}"
   step:
     join: "在 iPhone 的“设置 → 无线局域网”里连接 %{ssid}，密码 %{passphrase}。"
     share: "回到 iPhone 上的 CellGlide，点“开始共享”，保持在前台。"

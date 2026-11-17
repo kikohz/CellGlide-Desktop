@@ -123,12 +123,20 @@
         "text": "Not connected; using this computer's own DNS",
         "tone": "gray"
       },
-      "proxy": null
+      "proxy": null,
+      "wireless": {
+        "enabled": false,
+        "checking": false,
+        "busy": false,
+        "available_text": null,
+        "paired": []
+      }
     },
     "apple_devices": {
       "button_label": "Open Apple Devices",
       "hint": "After you sign in to Windows, Apple Devices can take a few minutes to start. CellGlide also tries to start it in the background; if the iPhone still isn't found, open Apple Devices."
     },
-    "start_apple_devices": true
+    "start_apple_devices": true,
+    "wireless": null
   }
 }

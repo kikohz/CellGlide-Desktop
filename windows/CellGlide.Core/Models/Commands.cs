@@ -20,6 +20,13 @@ namespace CellGlide.Core.Models;
 [JsonDerivedType(typeof(GetPrefsCommand), "get_prefs")]
 [JsonDerivedType(typeof(SetPrefsCommand), "set_prefs")]
 [JsonDerivedType(typeof(GetAboutCommand), "get_about")]
+[JsonDerivedType(typeof(WirelessStartCommand), "wireless_start")]
+[JsonDerivedType(typeof(WirelessCancelCommand), "wireless_cancel")]
+[JsonDerivedType(typeof(WirelessConfirmCommand), "wireless_confirm")]
+[JsonDerivedType(typeof(WirelessForgetCommand), "wireless_forget")]
+[JsonDerivedType(typeof(WirelessRepairCommand), "wireless_repair")]
+[JsonDerivedType(typeof(WirelessRegenerateCommand), "wireless_regenerate")]
+[JsonDerivedType(typeof(WirelessInfoCommand), "wireless_info")]
 public abstract record Command;
 
 /// <summary>Keep sending state (and ServiceGone while the service is away).</summary>
@@ -59,6 +66,27 @@ public sealed record SetPrefsCommand(Prefs Prefs) : Command;
 
 /// <summary>The version, the Telegram channel and the third-party licenses, for the About page.</summary>
 public sealed record GetAboutCommand : Command;
+
+/// <summary>"Connect Wirelessly": opens the access point and waits for the iPhone.</summary>
+public sealed record WirelessStartCommand : Command;
+
+/// <summary>Ends the wireless attempt or session and closes the access point.</summary>
+public sealed record WirelessCancelCommand : Command;
+
+/// <summary>The user's answer to the code; the app sends only true (a cancel is <see cref="WirelessCancelCommand"/>).</summary>
+public sealed record WirelessConfirmCommand(bool Matches) : Command;
+
+/// <summary>Removes a paired iPhone; a wireless session with it ends first.</summary>
+public sealed record WirelessForgetCommand(string PeerId) : Command;
+
+/// <summary>Pairs a paired iPhone by code again, replacing its pairing once saved.</summary>
+public sealed record WirelessRepairCommand(string PeerId) : Command;
+
+/// <summary>A new network name and password; refused while an attempt runs.</summary>
+public sealed record WirelessRegenerateCommand : Command;
+
+/// <summary>The network name, password and steps for the steps card, and the paired iPhones (<see cref="WirelessValue"/>).</summary>
+public sealed record WirelessInfoCommand : Command;
 
 /// <summary>Limits for a small speed test.</summary>
 public sealed record SpeedCaps(ulong DownloadBytes, ulong UploadBytes, uint Seconds);

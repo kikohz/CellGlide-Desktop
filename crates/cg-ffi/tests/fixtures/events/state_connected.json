@@ -182,9 +182,17 @@
         "text": "Resolved by CellGlide DNS on the phone",
         "tone": "green"
       },
-      "proxy": "socks5h://127.0.0.1:1080"
+      "proxy": "socks5h://127.0.0.1:1080",
+      "wireless": {
+        "enabled": false,
+        "checking": false,
+        "busy": false,
+        "available_text": null,
+        "paired": []
+      }
     },
     "apple_devices": null,
-    "start_apple_devices": false
+    "start_apple_devices": false,
+    "wireless": null
   }
 }

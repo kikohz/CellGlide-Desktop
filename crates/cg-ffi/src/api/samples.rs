@@ -13,7 +13,12 @@ use cg_i18n::tr;
 use cg_ipc::describe::ui::{DownReason, ServiceDown};
 use cg_ipc::health::{EventKind, HealthEvent, HistoryDay, IssueCause};
 use cg_ipc::phone::{BatteryReading, SpeedPoint, UsbPhone};
-use cg_ipc::{Check, CheckId, Contact, DiagRange, DnsMode, PhoneChoice, Request, StrictDns};
+use cg_ipc::wireless::{
+    PairedPhone, PairingMethod, WirelessFailure, WirelessInfo, WirelessPhaseView, WirelessStatus,
+};
+use cg_ipc::{
+    Check, CheckId, Contact, DiagRange, DnsMode, PhoneChoice, Reason, Request, StrictDns,
+};
 use cg_tools::ToolError;
 use cg_tools::dns_leak::{Report, judge};
 use cg_tools::prefs::Prefs;
@@ -210,6 +215,26 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
         ("get_prefs", Command::GetPrefs),
         ("get_about", Command::GetAbout),
         ("set_prefs", Command::SetPrefs { prefs: prefs() }),
+        ("wireless_start", Command::WirelessStart),
+        ("wireless_cancel", Command::WirelessCancel),
+        (
+            "wireless_confirm",
+            Command::WirelessConfirm { matches: true },
+        ),
+        (
+            "wireless_forget",
+            Command::WirelessForget {
+                peer_id: WIRELESS_PEER.into(),
+            },
+        ),
+        (
+            "wireless_repair",
+            Command::WirelessRepair {
+                peer_id: WIRELESS_PEER.into(),
+            },
+        ),
+        ("wireless_regenerate", Command::WirelessRegenerate),
+        ("wireless_info", Command::WirelessInfo),
     ];
     for (_, command) in &samples {
         match command {
@@ -245,7 +270,14 @@ pub fn command_samples() -> Vec<(&'static str, Command)> {
             | Command::SetLang { .. }
             | Command::GetPrefs
             | Command::GetAbout
-            | Command::SetPrefs { .. } => {}
+            | Command::SetPrefs { .. }
+            | Command::WirelessStart
+            | Command::WirelessCancel
+            | Command::WirelessConfirm { .. }
+            | Command::WirelessForget { .. }
+            | Command::WirelessRepair { .. }
+            | Command::WirelessRegenerate
+            | Command::WirelessInfo => {}
         }
     }
     samples
@@ -362,6 +394,51 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
             state(with_strict_dns(StrictDns::Off {
                 reason: "SetInterfaceDnsSettings failed".into(),
             })),
+        ),
+        (
+            "reply_wireless",
+            reply(
+                11,
+                ReplyValue::Wireless {
+                    view: views::wireless_info(&wireless_info()),
+                },
+            ),
+        ),
+        (
+            "reply_wireless_unavailable",
+            reply(
+                12,
+                ReplyValue::Wireless {
+                    view: views::wireless_info(&wireless_unavailable()),
+                },
+            ),
+        ),
+        ("state_wireless_offered", state(wireless_offered())),
+        (
+            "state_wireless_waiting",
+            wireless_state(WirelessPhaseView::Waiting, Some(&wireless_info())),
+        ),
+        (
+            "state_wireless_pairing",
+            wireless_state(pairing(false), Some(&wireless_info())),
+        ),
+        (
+            "state_wireless_pairing_confirmed",
+            wireless_state(pairing(true), Some(&wireless_info())),
+        ),
+        (
+            "state_wireless_reconnecting",
+            wireless_state(WirelessPhaseView::Reconnecting, Some(&wireless_info())),
+        ),
+        ("state_wireless_connected", wireless_connected()),
+        (
+            "state_wireless_failed",
+            wireless_state(
+                WirelessPhaseView::Failed {
+                    reason: WirelessFailure::NoPhone,
+                },
+                Some(&wireless_unavailable()),
+            ),
         ),
         ("service_gone_stopped", gone(DownReason::Gone)),
         ("service_gone_not_in_group", gone(DownReason::NotInGroup)),
@@ -489,7 +566,8 @@ pub fn event_samples() -> Vec<(&'static str, Event)> {
                             | ReplyValue::Sent { .. }
                             | ReplyValue::Saved { .. }
                             | ReplyValue::Prefs { .. }
-                            | ReplyValue::About { .. },
+                            | ReplyValue::About { .. }
+                            | ReplyValue::Wireless { .. },
                     }
                     | ReplyResult::Err { .. },
                 ..
@@ -532,7 +610,120 @@ fn fixed_version(mut chrome: ChromeView) -> ChromeView {
 }
 
 fn overview(snapshot: &cg_ipc::Snapshot) -> views::OverviewView {
-    fixed(views::overview(snapshot, false, now(), &TimeZone::UTC))
+    overview_with(snapshot, None)
+}
+
+fn overview_with(snapshot: &cg_ipc::Snapshot, info: Option<&WirelessInfo>) -> views::OverviewView {
+    fixed(views::overview(
+        snapshot,
+        false,
+        info,
+        now(),
+        &TimeZone::UTC,
+    ))
+}
+
+/// The access point's password in the samples: plainly not a real one. Never in a state.
+pub(crate) const SAMPLE_PASSPHRASE: &str = "test-pass-0000";
+
+/// What `WirelessInfo` answers: the network, its password and two paired iPhones (one stale).
+fn wireless_info() -> WirelessInfo {
+    WirelessInfo {
+        available: Some(true),
+        unavailable: None,
+        ssid: "CellGlide-AB12".into(),
+        passphrase: SAMPLE_PASSPHRASE.into(),
+        paired: vec![
+            PairedPhone {
+                peer_id: WIRELESS_PEER.into(),
+                name: "Anna's iPhone".into(),
+                method: PairingMethod::Code,
+                stale: false,
+                created_at: 1_793_000_000,
+            },
+            PairedPhone {
+                peer_id: "0C7E5D0A-3B8F-4F4B-9E3A-6D2B1C0A9F11".into(),
+                name: "Ben's iPhone".into(),
+                method: PairingMethod::Cable,
+                stale: true,
+                created_at: 1_792_000_000,
+            },
+        ],
+    }
+}
+
+/// The pairings can't be read on this computer.
+fn wireless_unavailable() -> WirelessInfo {
+    WirelessInfo {
+        available: Some(false),
+        unavailable: Some(Reason::WirelessStoreUnavailable),
+        ssid: String::new(),
+        passphrase: String::new(),
+        paired: Vec::new(),
+    }
+}
+
+/// Not connected, the switch on: "Connect Wirelessly" is offered.
+fn wireless_offered() -> cg_ipc::Snapshot {
+    let mut s = disconnected_snapshot();
+    s.devices = Vec::new();
+    s.state = cg_ipc::ConnState::NoPhone;
+    s.settings.wireless_enabled = true;
+    s.wireless_offered = true;
+    s
+}
+
+fn pairing(confirmed: bool) -> WirelessPhaseView {
+    WirelessPhaseView::Pairing {
+        code: "384271".into(),
+        phone_name: Some("Anna's iPhone".into()),
+        confirmed,
+    }
+}
+
+/// A wireless attempt in `phase`, with the settings page's list from `info` (which the
+/// subscription is given with the password; the state never carries it).
+fn wireless_state(phase: WirelessPhaseView, info: Option<&WirelessInfo>) -> Event {
+    let mut s = wireless_offered();
+    let failed = matches!(phase, WirelessPhaseView::Failed { .. });
+    s.wireless_offered = failed;
+    s.wireless_checking = failed;
+    if !failed {
+        s.state = cg_ipc::ConnState::Connecting;
+    }
+    s.wireless = Some(WirelessStatus {
+        phase,
+        ssid: Some("CellGlide-AB12".into()),
+        weak: false,
+        name_clash: false,
+        last_error: None,
+        hint: None,
+    });
+    Event::State {
+        view: Box::new(overview_with(&s, info)),
+    }
+}
+
+/// Connected over the access point.
+fn wireless_connected() -> Event {
+    let mut s = connected_snapshot();
+    s.settings.wireless_enabled = true;
+    s.state = cg_ipc::ConnState::Connected {
+        phone_version: "2.4.0".into(),
+        dns: DnsMode::Phone,
+        wireless: true,
+    };
+    s.wireless = Some(WirelessStatus {
+        phase: WirelessPhaseView::Connected,
+        ssid: Some("CellGlide-AB12".into()),
+        weak: false,
+        name_clash: false,
+        last_error: None,
+        hint: None,
+    });
+    Event::State {
+        view: Box::new(overview_with(&s, Some(&wireless_info()))),
+    }
 }
 
 fn fixed(mut view: views::OverviewView) -> views::OverviewView {
@@ -549,7 +740,13 @@ fn apple_devices_stopped() -> views::OverviewView {
         devices: Vec::new(),
         ..disconnected_snapshot()
     };
-    let mut view = fixed(views::overview(&snapshot, true, now(), &TimeZone::UTC));
+    let mut view = fixed(views::overview(
+        &snapshot,
+        true,
+        None,
+        now(),
+        &TimeZone::UTC,
+    ));
     view.detail = tr("gui.state.waiting_usb.detail", &[]);
     view
 }
@@ -859,6 +1056,26 @@ mod tests {
             event_samples().into_iter().map(|(n, _)| n).collect();
         assert_eq!(commands.len(), command_samples().len());
         assert_eq!(events.len(), event_samples().len());
+    }
+
+    #[test]
+    fn the_password_is_only_in_the_wireless_reply() {
+        let _g = cg_i18n::lock_for_tests();
+        cg_i18n::set(cg_i18n::Lang::En);
+        let mut states = 0;
+        for (name, event) in event_samples() {
+            let json = serde_json::to_string(&event).expect("JSON");
+            if name == "reply_wireless" {
+                assert!(json.contains(SAMPLE_PASSPHRASE));
+                continue;
+            }
+            // The wireless states were made from an info that had it.
+            assert!(!json.contains(SAMPLE_PASSPHRASE), "{name}");
+            if matches!(event, Event::State { .. }) && name.starts_with("state_wireless") {
+                states += 1;
+            }
+        }
+        assert!(states >= 7);
     }
 
     #[test]

@@ -132,10 +132,20 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const SILENCE: Duration = Duration::from_secs(30);
 /// The diagnostics bundle reads the journal, which can take a while.
 pub const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(90);
+/// Turning the wireless switch on opens and closes the access point first (the service waits
+/// for a previous one to stop, and Windows can take its time), and starting a wireless attempt
+/// asks a plugged-in iPhone whether it shares: either reply can take well over [`TIMEOUT`].
+pub const WIRELESS_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub fn timeout_for(request: &Request) -> Duration {
     match request {
         Request::Diagnostics { .. } => DIAGNOSTICS_TIMEOUT,
+        Request::SetSettings {
+            wireless: Some(true),
+            ..
+        }
+        | Request::ConnectWireless
+        | Request::RepairPhone { .. } => WIRELESS_TIMEOUT,
         _ => TIMEOUT,
     }
 }
@@ -747,6 +757,28 @@ mod tests {
         };
         assert_eq!(timeout_for(&diagnostics), Duration::from_secs(90));
         assert_eq!(timeout_for(&Request::Doctor), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_wireless_switch_and_start_get_longer_to_answer() {
+        let switch = |wireless| Request::SetSettings {
+            auto_connect: None,
+            phone: None,
+            strict_dns: None,
+            wireless,
+        };
+        assert_eq!(timeout_for(&switch(Some(true))), Duration::from_secs(45));
+        assert_eq!(timeout_for(&Request::ConnectWireless), WIRELESS_TIMEOUT);
+        assert_eq!(
+            timeout_for(&Request::RepairPhone {
+                peer_id: "A1".into()
+            }),
+            WIRELESS_TIMEOUT
+        );
+        // Turning it off, and every other setting, answer at once.
+        assert_eq!(timeout_for(&switch(Some(false))), TIMEOUT);
+        assert_eq!(timeout_for(&switch(None)), TIMEOUT);
+        assert_eq!(timeout_for(&Request::CancelWireless), TIMEOUT);
     }
 
     #[tokio::test]

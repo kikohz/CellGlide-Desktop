@@ -1693,3 +1693,146 @@ async fn caps_with_nothing_to_measure_are_refused() {
     );
     rt.shutdown();
 }
+
+// ---- The wireless commands and the settings page's paired iPhones ----
+
+use cg_ipc::wireless::{PairedPhone, PairingMethod, WirelessInfo};
+
+const PASSWORD: &str = "test-pass-0000";
+
+fn paired_info() -> WirelessInfo {
+    WirelessInfo {
+        available: Some(true),
+        unavailable: None,
+        ssid: "CellGlide-AB12".into(),
+        passphrase: PASSWORD.into(),
+        paired: vec![PairedPhone {
+            peer_id: "A1".into(),
+            name: "Anna's iPhone".into(),
+            method: PairingMethod::Code,
+            stale: false,
+            created_at: 1,
+        }],
+    }
+}
+
+fn info_requests(svc: &FakeService) -> usize {
+    svc.requests()
+        .iter()
+        .filter(|r| matches!(r, Request::WirelessInfo))
+        .count()
+}
+
+#[tokio::test]
+async fn the_paired_iphones_come_with_the_state_but_never_the_password() {
+    let svc = FakeService::start(Replies {
+        wireless_info: Response::Wireless {
+            info: paired_info(),
+        },
+        wireless: Response::Ok,
+        ..Replies::default()
+    })
+    .await;
+    // The switch off: nothing is asked.
+    svc.snapshots.send_replace(disconnected_snapshot());
+    let (rt, events, _dir) = runtime_on(&svc);
+    rt.send(Command::Subscribe);
+    wait_for(&events, |e| matches!(e, Event::State { .. })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(info_requests(&svc), 0);
+    // On: asked once, and the list arrives with the next state.
+    let mut on = disconnected_snapshot();
+    on.settings.wireless_enabled = true;
+    svc.snapshots.send_replace(on.clone());
+    wait_for(
+        &events,
+        |e| matches!(e, Event::State { view } if view.settings.wireless.paired.len() == 1),
+    )
+    .await;
+    assert_eq!(info_requests(&svc), 1);
+    // Removing an iPhone asks again, after the removal.
+    let id = rt.send(Command::WirelessForget {
+        peer_id: "A1".into(),
+    });
+    assert_eq!(reply_of(&events, id).await, ReplyResult::done());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while info_requests(&svc) < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "not asked again");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let requests = svc.requests();
+    let forget = requests
+        .iter()
+        .position(|r| matches!(r, Request::ForgetPhone { peer_id } if peer_id == "A1"))
+        .expect("ForgetPhone reached the service");
+    let again = requests
+        .iter()
+        .rposition(|r| matches!(r, Request::WirelessInfo))
+        .unwrap();
+    assert!(forget < again);
+    // The steps card's command has the password; no other event ever had it.
+    let id = rt.send(Command::WirelessInfo);
+    let ReplyResult::Ok {
+        value: ReplyValue::Wireless { view },
+    } = reply_of(&events, id).await
+    else {
+        panic!("expected the wireless info");
+    };
+    assert_eq!(view.passphrase, PASSWORD);
+    assert_eq!(view.steps.len(), 3);
+    for event in events.lock().unwrap().iter() {
+        if matches!(event, Event::Reply { id: got, .. } if *got == id) {
+            continue;
+        }
+        let json = serde_json::to_string(event).unwrap();
+        assert!(!json.contains(PASSWORD), "{json}");
+    }
+    rt.shutdown();
+}
+
+#[tokio::test]
+async fn each_wireless_command_reaches_the_service() {
+    let svc = FakeService::start(Replies {
+        wireless: Response::Ok,
+        ..Replies::default()
+    })
+    .await;
+    let (rt, events, _dir) = runtime_on(&svc);
+    for command in [
+        Command::WirelessStart,
+        Command::WirelessConfirm { matches: true },
+        Command::WirelessCancel,
+        Command::WirelessRepair {
+            peer_id: "A1".into(),
+        },
+        Command::WirelessRegenerate,
+    ] {
+        let id = rt.send(command.clone());
+        assert_eq!(
+            reply_of(&events, id).await,
+            ReplyResult::done(),
+            "{command:?}"
+        );
+    }
+    assert_eq!(
+        svc.requests(),
+        vec![
+            Request::ConnectWireless,
+            Request::ConfirmCode { matches: true },
+            Request::CancelWireless,
+            Request::RepairPhone {
+                peer_id: "A1".into()
+            },
+            Request::RegenerateAccessPoint,
+        ]
+    );
+    // A refusal is its reason in words.
+    let svc = FakeService::start(Replies::default()).await;
+    let (rt2, events, _dir2) = runtime_on(&svc);
+    let id = rt2.send(Command::WirelessRegenerate);
+    assert!(
+        matches!(reply_of(&events, id).await, ReplyResult::Err { message } if !message.is_empty())
+    );
+    rt.shutdown();
+    rt2.shutdown();
+}

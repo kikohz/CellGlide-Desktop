@@ -17,3 +17,4 @@ mod subscription;
 #[doc(hidden)]
 pub mod testing;
 pub mod views;
+mod wireless;

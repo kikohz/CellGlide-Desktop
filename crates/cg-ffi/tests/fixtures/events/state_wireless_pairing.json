@@ -1,0 +1,164 @@
+{
+  "type": "state",
+  "view": {
+    "connected": false,
+    "wants_connection": false,
+    "title": "Confirm the code 384 271 on the iPhone",
+    "detail": "Compare it with the number on Anna's iPhone's screen.",
+    "status_tone": "gray",
+    "button_label": "Connect",
+    "device_subtitle": "Test iPhone · iPhone 16e",
+    "health": null,
+    "strict_dns": null,
+    "phone": null,
+    "chrome": {
+      "window_title": "CellGlide",
+      "tray": {
+        "active": false,
+        "alert": false,
+        "wants": false,
+        "title": "Checking the phone's exit"
+      },
+      "menu": [
+        {
+          "kind": "version",
+          "label": "CellGlide 1.0.0",
+          "enabled": false
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "toggle",
+          "label": "Connect",
+          "enabled": true
+        },
+        {
+          "kind": "open",
+          "label": "Open CellGlide",
+          "enabled": true
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "quit",
+          "label": "Quit",
+          "enabled": true
+        }
+      ],
+      "badges": {
+        "overview": "none",
+        "history": "none",
+        "settings": "none"
+      },
+      "sidebar": [
+        {
+          "heading": null,
+          "sections": [
+            {
+              "section": "overview",
+              "title": "Overview"
+            }
+          ]
+        },
+        {
+          "heading": "Tools",
+          "sections": [
+            {
+              "section": "speed_test",
+              "title": "Speed test"
+            },
+            {
+              "section": "dns_leak",
+              "title": "DNS Leak Test"
+            }
+          ]
+        },
+        {
+          "heading": "Activity",
+          "sections": [
+            {
+              "section": "history",
+              "title": "Connection History"
+            },
+            {
+              "section": "diagnostics",
+              "title": "Diagnostics"
+            }
+          ]
+        },
+        {
+          "heading": "App",
+          "sections": [
+            {
+              "section": "settings",
+              "title": "Settings"
+            },
+            {
+              "section": "about",
+              "title": "About"
+            }
+          ]
+        }
+      ]
+    },
+    "settings": {
+      "auto_connect": true,
+      "strict_dns": true,
+      "phones": [
+        {
+          "choice": {
+            "mode": "auto"
+          },
+          "label": "Auto discovery / waiting for selected device"
+        }
+      ],
+      "selected_phone": 0,
+      "dns": {
+        "text": "Not connected; using this computer's own DNS",
+        "tone": "gray"
+      },
+      "proxy": null,
+      "wireless": {
+        "enabled": true,
+        "checking": false,
+        "busy": true,
+        "available_text": null,
+        "paired": [
+          {
+            "peer_id": "4961212D-61DD-4BD0-9FE9-8989FB6B8952",
+            "name": "Anna's iPhone",
+            "method": "Paired with a code",
+            "stale": false
+          },
+          {
+            "peer_id": "0C7E5D0A-3B8F-4F4B-9E3A-6D2B1C0A9F11",
+            "name": "Ben's iPhone",
+            "method": "Paired over the cable",
+            "stale": true
+          }
+        ]
+      }
+    },
+    "apple_devices": null,
+    "start_apple_devices": false,
+    "wireless": {
+      "offered": false,
+      "button_label": null,
+      "phase": "pairing",
+      "title": "Confirm the code 384 271 on the iPhone",
+      "detail": "Compare it with the number on Anna's iPhone's screen.",
+      "show_steps": false,
+      "ssid": "CellGlide-AB12",
+      "code": "384 271",
+      "confirmed": false,
+      "hint": null,
+      "can_cancel": true
+    }
+  }
+}

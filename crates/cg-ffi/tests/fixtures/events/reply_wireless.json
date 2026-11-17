@@ -1,0 +1,35 @@
+{
+  "type": "reply",
+  "id": 11,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "wireless",
+      "view": {
+        "unavailable": null,
+        "ssid": "CellGlide-AB12",
+        "passphrase": "test-pass-0000",
+        "steps": [
+          "On the iPhone, go to Settings → Wi‑Fi and join CellGlide-AB12 with the password test-pass-0000.",
+          "Go back to CellGlide on the iPhone, tap Start Sharing and keep it open.",
+          "This computer connects on its own."
+        ],
+        "note": "The iPhone may say this network has no internet connection. That's expected: the internet comes over cellular.",
+        "paired": [
+          {
+            "peer_id": "4961212D-61DD-4BD0-9FE9-8989FB6B8952",
+            "name": "Anna's iPhone",
+            "method": "Paired with a code",
+            "stale": false
+          },
+          {
+            "peer_id": "0C7E5D0A-3B8F-4F4B-9E3A-6D2B1C0A9F11",
+            "name": "Ben's iPhone",
+            "method": "Paired over the cable",
+            "stale": true
+          }
+        ]
+      }
+    }
+  }
+}

@@ -54,6 +54,7 @@ public sealed record ReplyErr(string Message) : ReplyResult;
 [JsonDerivedType(typeof(SavedValue), "saved")]
 [JsonDerivedType(typeof(PrefsValue), "prefs")]
 [JsonDerivedType(typeof(AboutValue), "about")]
+[JsonDerivedType(typeof(WirelessValue), "wireless")]
 public abstract record ReplyValue;
 
 public sealed record DoneValue : ReplyValue;
@@ -73,3 +74,6 @@ public sealed record PrefsValue(Prefs Prefs) : ReplyValue;
 
 /// <summary>For the About page; <c>Licenses</c> is the Rust list then the NuGet list, each without its generator's header line.</summary>
 public sealed record AboutValue(string Version, string TelegramUrl, string TelegramLabel, string Licenses) : ReplyValue;
+
+/// <summary>The reply to <see cref="WirelessInfoCommand"/>: the only place the access point's password reaches the app.</summary>
+public sealed record WirelessValue(WirelessInfoView View) : ReplyValue;

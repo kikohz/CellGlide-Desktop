@@ -483,6 +483,13 @@ async fn handle(command: Command, context: &Context) -> ReplyResult {
             path,
             overwrite,
         } => crate::diagnostics::save(context, json, path, overwrite).await,
+        command @ (Command::WirelessStart
+        | Command::WirelessCancel
+        | Command::WirelessConfirm { .. }
+        | Command::WirelessForget { .. }
+        | Command::WirelessRepair { .. }
+        | Command::WirelessRegenerate
+        | Command::WirelessInfo) => crate::wireless::run(command, context).await,
     }
 }
 

@@ -130,9 +130,17 @@
         "text": "Not connected; using this computer's own DNS",
         "tone": "gray"
       },
-      "proxy": null
+      "proxy": null,
+      "wireless": {
+        "enabled": false,
+        "checking": false,
+        "busy": false,
+        "available_text": null,
+        "paired": []
+      }
     },
     "apple_devices": null,
-    "start_apple_devices": false
+    "start_apple_devices": false,
+    "wireless": null
   }
 }

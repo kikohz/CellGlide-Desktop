@@ -25,6 +25,7 @@ use cg_ipc::describe::{
     self,
     ui::{self, DownReason, KnownDevices, MuxLife, ServiceDown},
 };
+use cg_ipc::wireless::WirelessInfo;
 use cg_ipc::{ConnState, Endpoint, Request, Response, Snapshot};
 use futures::FutureExt;
 use jiff::Timestamp;
@@ -55,6 +56,9 @@ pub(crate) struct Shared {
     /// The snapshot, the language or the preferences changed: the speed and leak pages look
     /// again.
     pub(crate) pages: Notify,
+    /// A paired iPhone was removed or paired again, or the network got a new name: the
+    /// subscription asks for the paired iPhones again.
+    wireless: Notify,
     /// Tests only (`testing::panic_subscription`): the subscription panics on each of this many
     /// next updates, as a bug in a view would.
     #[cfg(any(test, feature = "testing"))]
@@ -78,6 +82,11 @@ impl Shared {
     /// Something the speed and leak pages show may have changed.
     pub(crate) fn pages_changed(&self) {
         self.pages.notify_one();
+    }
+
+    /// The paired iPhones may have changed: a running subscription asks for them again.
+    pub(crate) fn wireless_changed(&self) {
+        self.wireless.notify_one();
     }
 
     /// After `SetLang`: a running subscription says its last `State` or `ServiceGone` again.
@@ -146,6 +155,10 @@ async fn follow(context: &Context, follower: &mut Follower) {
     let (doctor_tx, mut doctor_rx) = mpsc::unbounded_channel::<Option<AppleWord>>();
     // A doctor asked before a panic answers to a receiver that is gone: not waited for.
     follower.doctor_out = false;
+    // The paired iPhones (`WirelessInfo`), numbered by the ask they answer; `None` when the
+    // service couldn't be asked. Asked again after a panic.
+    let (info_tx, mut info_rx) = mpsc::unbounded_channel::<(u64, Option<WirelessInfo>)>();
+    follower.info_asked = None;
     loop {
         let events = tokio::select! {
             update = updates.recv() => {
@@ -177,6 +190,13 @@ async fn follow(context: &Context, follower: &mut Follower) {
             Some(word) = doctor_rx.recv() => {
                 follower.doctor(word, Timestamp::now(), &TimeZone::system())
             }
+            Some((ask, info)) = info_rx.recv() => {
+                follower.wireless_info(ask, info, Timestamp::now(), &TimeZone::system())
+            }
+            () = context.shared.wireless.notified() => {
+                follower.wireless_changed();
+                Vec::new()
+            }
         };
         for event in events {
             context.events.emit(event);
@@ -190,6 +210,17 @@ async fn follow(context: &Context, follower: &mut Follower) {
                     _ => None,
                 };
                 let _ = answers.send(word);
+            });
+        }
+        if let Some(ask) = follower.wants_wireless_info() {
+            let endpoint = config.endpoint.clone();
+            let answers = info_tx.clone();
+            tokio::spawn(async move {
+                let info = match cg_ipc::client::call(&endpoint, Request::WirelessInfo).await {
+                    Ok(Response::Wireless { info }) => Some(info),
+                    _ => None,
+                };
+                let _ = answers.send((ask, info));
             });
         }
     }
@@ -219,7 +250,19 @@ struct Follower {
     doctor_asked: Option<Instant>,
     /// A doctor request is out.
     doctor_out: bool,
+    /// The service's last `WirelessInfo`, for the settings page's paired iPhones, with its
+    /// password dropped as it came in.
+    info: Option<WirelessInfo>,
+    /// What the paired iPhones were last asked for: the switch and the attempt's phase. Asked
+    /// again when either changes (a pairing is saved or goes stale as the phase moves), after
+    /// a command changed them, and once the service is back; `None` asks at the next chance.
+    info_asked: Option<InfoKey>,
+    /// The number of the last ask; only its answer counts.
+    info_ask: u64,
 }
+
+/// When the paired iPhones were asked for: the switch, and the attempt's phase.
+type InfoKey = (bool, Option<views::WirelessPhase>);
 
 impl Follower {
     fn new(shared: Arc<Shared>) -> Follower {
@@ -232,7 +275,69 @@ impl Follower {
             apple: AppleWord::Other,
             doctor_asked: None,
             doctor_out: false,
+            info: None,
+            info_asked: None,
+            info_ask: 0,
         }
+    }
+
+    /// The view of `snapshot` with what else the follower knows.
+    fn make_view(&self, snapshot: &Snapshot, now: Timestamp, tz: &TimeZone) -> OverviewView {
+        views::overview(
+            snapshot,
+            self.apple == AppleWord::Stopped,
+            self.info.as_ref(),
+            now,
+            tz,
+        )
+    }
+
+    /// Whether to ask for the paired iPhones now (the number of the ask), see `info_asked`.
+    /// Only while the switch is on: with it off the list isn't shown, and asking would make the
+    /// network name and password for nothing.
+    fn wants_wireless_info(&mut self) -> Option<u64> {
+        let snapshot = self.shared.snapshot()?;
+        let key = (
+            snapshot.settings.wireless_enabled,
+            views::wireless_phase(&snapshot),
+        );
+        if self.info_asked == Some(key) {
+            return None;
+        }
+        self.info_asked = Some(key);
+        if !key.0 {
+            return None;
+        }
+        self.info_ask += 1;
+        Some(self.info_ask)
+    }
+
+    /// A command changed the paired iPhones: asked for again.
+    fn wireless_changed(&mut self) {
+        self.info_asked = None;
+    }
+
+    /// The answer to ask number `ask` (`None`: the service couldn't be asked, so the last list
+    /// stands). An older ask's answer is dropped.
+    fn wireless_info(
+        &mut self,
+        ask: u64,
+        info: Option<WirelessInfo>,
+        now: Timestamp,
+        tz: &TimeZone,
+    ) -> Vec<Event> {
+        let Some(mut info) = info else {
+            return Vec::new();
+        };
+        // The settings page never shows it: it doesn't stay.
+        let mut password = std::mem::take(&mut info.passphrase).into_bytes();
+        password.fill(0);
+        std::hint::black_box(&password);
+        if ask != self.info_ask {
+            return Vec::new();
+        }
+        self.info = Some(info);
+        self.tick(now, tz)
     }
 
     fn snapshot(
@@ -248,7 +353,7 @@ impl Follower {
         if snapshot.state != ConnState::NoUsbService {
             self.forget_apple();
         }
-        let view = views::overview(&snapshot, self.apple == AppleWord::Stopped, now, tz);
+        let view = self.make_view(&snapshot, now, tz);
         // Only now that the view is made: a view that panics leaves the reason said before
         // (the panic's) in place, so the same panic again isn't said again.
         self.down = None;
@@ -261,6 +366,8 @@ impl Follower {
     fn down(&mut self, down: ServiceDown) -> Vec<Event> {
         self.shared.keep(None);
         self.view = None;
+        // Whatever the paired iPhones were, they are asked for again once the service is back.
+        self.info_asked = None;
         self.forget_apple();
         if self
             .down
@@ -299,7 +406,7 @@ impl Follower {
         let Some(snapshot) = self.shared.snapshot() else {
             return Vec::new();
         };
-        let view = views::overview(&snapshot, self.apple == AppleWord::Stopped, now, tz);
+        let view = self.make_view(&snapshot, now, tz);
         self.show(view).into_iter().collect()
     }
 
@@ -911,5 +1018,98 @@ mod tests {
                 .any(|e| matches!(e, Event::ServiceGone { text, .. } if !text.contains("panic")))
         });
         rt.shutdown();
+    }
+
+    fn wireless_on() -> Snapshot {
+        let mut s = disconnected_snapshot();
+        s.settings.wireless_enabled = true;
+        s
+    }
+
+    fn paired(password: &str) -> cg_ipc::wireless::WirelessInfo {
+        cg_ipc::wireless::WirelessInfo {
+            available: Some(true),
+            unavailable: None,
+            ssid: "CellGlide-AB12".into(),
+            passphrase: password.into(),
+            paired: vec![cg_ipc::wireless::PairedPhone {
+                peer_id: "A1".into(),
+                name: "Anna's iPhone".into(),
+                method: cg_ipc::wireless::PairingMethod::Code,
+                stale: false,
+                created_at: 1,
+            }],
+        }
+    }
+
+    fn paired_count(events: &[Event]) -> Option<usize> {
+        events.iter().find_map(|e| match e {
+            Event::State { view } => Some(view.settings.wireless.paired.len()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_paired_iphones_are_asked_for_only_while_the_switch_is_on() {
+        let _g = cg_i18n::lock_for_tests();
+        let t0 = Instant::now();
+        let mut f = Follower::new(Arc::default());
+        assert_eq!(f.wants_wireless_info(), None, "no snapshot yet");
+        f.snapshot(disconnected_snapshot(), at(0), &TimeZone::UTC, t0);
+        assert_eq!(f.wants_wireless_info(), None, "the switch is off");
+        f.snapshot(wireless_on(), at(1), &TimeZone::UTC, t0);
+        let ask = f.wants_wireless_info().expect("asked once it is on");
+        assert_eq!(
+            f.wants_wireless_info(),
+            None,
+            "not again for the same state"
+        );
+        let events = f.wireless_info(ask, Some(paired("test-pass-0000")), at(2), &TimeZone::UTC);
+        assert_eq!(paired_count(&events), Some(1));
+        // The password is not kept.
+        assert_eq!(f.info.as_ref().map(|i| i.passphrase.as_str()), Some(""));
+        // A new phase asks again (a pairing may have been saved or gone stale).
+        let mut s = wireless_on();
+        s.wireless = Some(cg_ipc::wireless::WirelessStatus {
+            phase: cg_ipc::wireless::WirelessPhaseView::Connecting,
+            ssid: None,
+            weak: false,
+            name_clash: false,
+            last_error: None,
+            hint: None,
+        });
+        f.snapshot(s.clone(), at(3), &TimeZone::UTC, t0);
+        assert!(f.wants_wireless_info().is_some());
+        // A command that changed the list asks again.
+        f.wireless_changed();
+        assert!(f.wants_wireless_info().is_some());
+        // So does the service coming back.
+        f.down(stopped());
+        f.snapshot(s, at(4), &TimeZone::UTC, t0);
+        assert!(f.wants_wireless_info().is_some());
+    }
+
+    #[test]
+    fn only_the_last_asks_answer_counts() {
+        let _g = cg_i18n::lock_for_tests();
+        let t0 = Instant::now();
+        let mut f = Follower::new(Arc::default());
+        f.snapshot(wireless_on(), at(0), &TimeZone::UTC, t0);
+        let first = f.wants_wireless_info().unwrap();
+        f.wireless_changed();
+        let second = f.wants_wireless_info().unwrap();
+        // The older answer comes late: dropped.
+        assert!(
+            f.wireless_info(first, Some(paired("x")), at(1), &TimeZone::UTC)
+                .is_empty()
+        );
+        assert_eq!(f.info, None);
+        // An ask that failed leaves the list as it was.
+        assert!(
+            f.wireless_info(second, None, at(2), &TimeZone::UTC)
+                .is_empty()
+        );
+        let events = f.wireless_info(second, Some(paired("x")), at(3), &TimeZone::UTC);
+        assert_eq!(paired_count(&events), Some(1));
     }
 }

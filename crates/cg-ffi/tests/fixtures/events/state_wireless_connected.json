@@ -1,0 +1,188 @@
+{
+  "type": "state",
+  "view": {
+    "connected": true,
+    "wants_connection": true,
+    "title": "Connected wirelessly · a cable is steadier",
+    "detail": "Web pages, apps and video calls all go through the phone's network.",
+    "status_tone": "green",
+    "button_label": "Disconnect and go back to your network",
+    "device_subtitle": "Test iPhone · iPhone 16e",
+    "health": {
+      "tone": "green",
+      "line": "Connection OK"
+    },
+    "strict_dns": null,
+    "phone": {
+      "title": "中国移动",
+      "carrier": "中国移动",
+      "radio": "5G",
+      "model": null,
+      "battery": null,
+      "speeds": "shared",
+      "download": "2.50 MB/s",
+      "upload": "400.0 KB/s",
+      "quality": "Network quality Excellent · 38 ms",
+      "battery_line": null,
+      "heat": null,
+      "dim": false,
+      "trail": []
+    },
+    "chrome": {
+      "window_title": "CellGlide · Connected",
+      "tray": {
+        "active": true,
+        "alert": false,
+        "wants": true,
+        "title": "Connected, this computer is using the phone's network"
+      },
+      "menu": [
+        {
+          "kind": "version",
+          "label": "CellGlide 1.0.0",
+          "enabled": false
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "toggle",
+          "label": "Disconnect",
+          "enabled": true
+        },
+        {
+          "kind": "open",
+          "label": "Open CellGlide",
+          "enabled": true
+        },
+        {
+          "kind": "separator",
+          "label": "",
+          "enabled": true
+        },
+        {
+          "kind": "quit",
+          "label": "Quit",
+          "enabled": true
+        }
+      ],
+      "badges": {
+        "overview": "none",
+        "history": "none",
+        "settings": "none"
+      },
+      "sidebar": [
+        {
+          "heading": null,
+          "sections": [
+            {
+              "section": "overview",
+              "title": "Overview"
+            }
+          ]
+        },
+        {
+          "heading": "Tools",
+          "sections": [
+            {
+              "section": "speed_test",
+              "title": "Speed test"
+            },
+            {
+              "section": "dns_leak",
+              "title": "DNS Leak Test"
+            }
+          ]
+        },
+        {
+          "heading": "Activity",
+          "sections": [
+            {
+              "section": "history",
+              "title": "Connection History"
+            },
+            {
+              "section": "diagnostics",
+              "title": "Diagnostics"
+            }
+          ]
+        },
+        {
+          "heading": "App",
+          "sections": [
+            {
+              "section": "settings",
+              "title": "Settings"
+            },
+            {
+              "section": "about",
+              "title": "About"
+            }
+          ]
+        }
+      ]
+    },
+    "settings": {
+      "auto_connect": true,
+      "strict_dns": true,
+      "phones": [
+        {
+          "choice": {
+            "mode": "auto"
+          },
+          "label": "Auto discovery / waiting for selected device"
+        },
+        {
+          "choice": {
+            "mode": "serial",
+            "serial": "00008140-000000000000002C"
+          },
+          "label": "Test iPhone · iPhone 16e"
+        }
+      ],
+      "selected_phone": 0,
+      "dns": {
+        "text": "Resolved by CellGlide DNS on the phone",
+        "tone": "green"
+      },
+      "proxy": "socks5h://127.0.0.1:1080",
+      "wireless": {
+        "enabled": true,
+        "checking": false,
+        "busy": true,
+        "available_text": null,
+        "paired": [
+          {
+            "peer_id": "4961212D-61DD-4BD0-9FE9-8989FB6B8952",
+            "name": "Anna's iPhone",
+            "method": "Paired with a code",
+            "stale": false
+          },
+          {
+            "peer_id": "0C7E5D0A-3B8F-4F4B-9E3A-6D2B1C0A9F11",
+            "name": "Ben's iPhone",
+            "method": "Paired over the cable",
+            "stale": true
+          }
+        ]
+      }
+    },
+    "apple_devices": null,
+    "start_apple_devices": false,
+    "wireless": {
+      "offered": false,
+      "button_label": null,
+      "phase": "connected",
+      "title": "Connected wirelessly",
+      "detail": "A cable is steadier.",
+      "show_steps": false,
+      "ssid": "CellGlide-AB12",
+      "code": null,
+      "confirmed": false,
+      "hint": null,
+      "can_cancel": true
+    }
+  }
+}

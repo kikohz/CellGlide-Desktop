@@ -471,6 +471,7 @@ wireless:
     pairing_busy: "The iPhone isn't taking pairing requests right now; asking again in a minute"
     not_sharing: "Open CellGlide on the iPhone and start sharing; if VPN mode is on, turn it off first"
     name_clash: "Another device on the network uses this iPhone's name; waiting until only one is left"
+    other_wifi: "If the iPhone switched to another Wi‑Fi it knows, join %{ssid} again in Settings → Wi‑Fi on the iPhone"
   step:
     join: "On the iPhone, go to Settings → Wi‑Fi and join %{ssid} with the password %{passphrase}."
     share: "Go back to CellGlide on the iPhone, tap Start Sharing and keep it open."

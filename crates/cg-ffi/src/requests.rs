@@ -31,9 +31,10 @@ fn reply_to(response: Response, now: Timestamp, tz: &TimeZone) -> ReplyResult {
     let ok = |value| ReplyResult::Ok { value };
     match response {
         Response::Ok | Response::Hello { .. } | Response::Status { .. } => ReplyResult::done(),
-        // The wireless info (with the passphrase) gets a view of its own with the wireless
-        // commands; until then the app is told only that the request went through.
-        Response::Wireless { .. } => ReplyResult::done(),
+        // The only reply that carries the access point's password to the app.
+        Response::Wireless { info } => ok(ReplyValue::Wireless {
+            view: views::wireless_info(&info),
+        }),
         Response::Doctor { checks } => ok(ReplyValue::Checks {
             rows: views::checks(&checks),
         }),
@@ -91,6 +92,21 @@ mod tests {
             ReplyResult::Ok {
                 value: ReplyValue::Checks {
                     rows: views::checks(&checks)
+                }
+            }
+        );
+        let info = cg_ipc::wireless::WirelessInfo {
+            available: Some(true),
+            unavailable: None,
+            ssid: "CellGlide-AB12".into(),
+            passphrase: "test-pass-0000".into(),
+            paired: Vec::new(),
+        };
+        assert_eq!(
+            reply(Response::Wireless { info: info.clone() }),
+            ReplyResult::Ok {
+                value: ReplyValue::Wireless {
+                    view: views::wireless_info(&info)
                 }
             }
         );

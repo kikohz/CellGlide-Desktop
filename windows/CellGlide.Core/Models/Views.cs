@@ -117,7 +117,8 @@ public sealed record OverviewView(
     ChromeView Chrome,
     SettingsView Settings,
     AppleDevicesView? AppleDevices,
-    bool StartAppleDevices);
+    bool StartAppleDevices,
+    WirelessView? Wireless);
 
 public sealed record HealthRowView(Tone Tone, string Line);
 
@@ -128,7 +129,8 @@ public sealed record SettingsView(
     IReadOnlyList<PhoneOption> Phones,
     int SelectedPhone,
     DnsLine Dns,
-    string? Proxy);
+    string? Proxy,
+    WirelessSettingsView Wireless);
 
 public sealed record PhoneCardView(
     string Title,
@@ -148,6 +150,64 @@ public sealed record PhoneCardView(
 public sealed record BatteryView(uint Percent, bool Charging, bool LowPower, string Label);
 
 public sealed record HeatView(string Text, bool Severe);
+
+// ---- views/wireless.rs ----
+
+[JsonConverter(typeof(SnakeCaseEnumConverter<WirelessPhase>))]
+public enum WirelessPhase
+{
+    Starting,
+    Waiting,
+    Pairing,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+}
+
+/// <summary>
+/// "Connect Wirelessly" (<c>ButtonLabel</c> while <c>Offered</c>) and the attempt: <c>Phase</c> is null without one. <c>Title</c> and
+/// <c>Detail</c> are the phase's words (the code dialog's while pairing, the failure's after one). <c>ShowSteps</c>: the steps
+/// card, filled from <see cref="WirelessInfoView"/>. <c>Code</c> ("384 271") while pairing; <c>Confirmed</c>: confirmed here,
+/// waiting for the iPhone. <c>CanCancel</c>: an attempt runs.
+/// </summary>
+public sealed record WirelessView(
+    bool Offered,
+    string? ButtonLabel,
+    WirelessPhase? Phase,
+    string Title,
+    string Detail,
+    bool ShowSteps,
+    string? Ssid,
+    string? Code,
+    bool Confirmed,
+    string? Hint,
+    bool CanCancel);
+
+/// <summary>The settings page's switch (<c>Checking</c>: turning it on is being checked), whether an attempt runs
+/// (<c>Busy</c>: Pair Again and New Network Name are off), why it can't work here, and the paired iPhones.</summary>
+public sealed record WirelessSettingsView(
+    bool Enabled,
+    bool Checking,
+    bool Busy,
+    string? AvailableText,
+    IReadOnlyList<PairedPhoneView> Paired);
+
+/// <summary>One paired iPhone: <c>Method</c> is the words for how it was paired; <c>Stale</c>: it must be paired again.</summary>
+public sealed record PairedPhoneView(string PeerId, string Name, string Method, bool Stale);
+
+/// <summary>The reply to the wireless info command: the network, its password, the three steps, the note and the paired iPhones.</summary>
+public sealed record WirelessInfoView(
+    string? Unavailable,
+    string Ssid,
+    string Passphrase,
+    IReadOnlyList<string> Steps,
+    string Note,
+    IReadOnlyList<PairedPhoneView> Paired)
+{
+    /// <summary>Never prints the password.</summary>
+    public override string ToString() => $"WirelessInfoView {{ Ssid = {Ssid}, Passphrase = <hidden> }}";
+}
 
 // ---- views/history.rs ----
 

@@ -13,6 +13,7 @@ mod history;
 mod leak;
 mod overview;
 mod speed;
+mod wireless;
 
 pub use apple::{AppleDevicesView, AppleWord, apple_devices, word as apple_word};
 pub use chrome::{
@@ -28,3 +29,7 @@ pub use overview::{
 };
 pub use speed::{SpeedDialog, SpeedLegView, SpeedRecordView, SpeedView, StageView};
 pub(crate) use speed::{SpeedLeg, SpeedPage, speed};
+pub use wireless::{
+    PairedPhoneView, WirelessInfoView, WirelessPhase, WirelessSettingsView, WirelessView,
+    wireless_info, wireless_phase,
+};

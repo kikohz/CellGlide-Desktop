@@ -2,7 +2,9 @@
 //! here (or a `cg_ipc::describe::ui` type it refers to); fields are snake_case, an `Option` is
 //! `null`, and nothing is a tuple or a fixed-size array.
 
-use crate::views::{CheckRowView, ChromeView, HistoryView, LeakView, OverviewView, SpeedView};
+use crate::views::{
+    CheckRowView, ChromeView, HistoryView, LeakView, OverviewView, SpeedView, WirelessInfoView,
+};
 use cg_i18n::tr;
 use cg_ipc::DiagRange;
 use cg_ipc::describe;
@@ -70,6 +72,29 @@ pub enum Command {
     SetPrefs {
         prefs: Prefs,
     },
+    /// "Connect Wirelessly": opens the access point and waits for the iPhone (`ConnectWireless`).
+    WirelessStart,
+    /// Ends the wireless attempt or session and closes the access point (`CancelWireless`).
+    WirelessCancel,
+    /// The user's answer to the code (`ConfirmCode`). The app sends only `true`: a cancel ends
+    /// the attempt (`WirelessCancel`).
+    WirelessConfirm {
+        matches: bool,
+    },
+    /// Removes a paired iPhone (`ForgetPhone`); a wireless session with it ends first.
+    WirelessForget {
+        peer_id: String,
+    },
+    /// Pairs a paired iPhone by code again (`RepairPhone`), replacing its pairing once saved.
+    WirelessRepair {
+        peer_id: String,
+    },
+    /// A new network name and password (`RegenerateAccessPoint`); refused while an attempt runs.
+    WirelessRegenerate,
+    /// The network name, the password and the steps for the steps card, and the paired iPhones
+    /// ([`ReplyValue::Wireless`]). The only way the password reaches the app: asked for when the
+    /// steps card is shown.
+    WirelessInfo,
 }
 
 /// Limits for a small speed test.
@@ -164,6 +189,10 @@ pub enum ReplyValue {
         telegram_url: String,
         telegram_label: String,
         licenses: String,
+    },
+    /// The reply to [`Command::WirelessInfo`], with the access point's password.
+    Wireless {
+        view: WirelessInfoView,
     },
 }
 

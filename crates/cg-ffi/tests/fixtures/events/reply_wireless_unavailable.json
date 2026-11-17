@@ -1,0 +1,18 @@
+{
+  "type": "reply",
+  "id": 12,
+  "result": {
+    "status": "ok",
+    "value": {
+      "kind": "wireless",
+      "view": {
+        "unavailable": "The wireless pairings can't be read or saved",
+        "ssid": "",
+        "passphrase": "",
+        "steps": [],
+        "note": "The iPhone may say this network has no internet connection. That's expected: the internet comes over cellular.",
+        "paired": []
+      }
+    }
+  }
+}

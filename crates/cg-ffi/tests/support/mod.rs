@@ -24,6 +24,10 @@ pub struct Replies {
     pub set_settings: Response,
     pub connect: Response,
     pub disconnect: Response,
+    /// `WirelessInfo`.
+    pub wireless_info: Response,
+    /// Every other wireless request.
+    pub wireless: Response,
 }
 
 impl Default for Replies {
@@ -35,6 +39,12 @@ impl Default for Replies {
             set_settings: Response::Ok,
             connect: Response::Ok,
             disconnect: Response::Ok,
+            wireless_info: Response::Error {
+                reason: cg_ipc::Reason::BadRequest,
+            },
+            wireless: Response::Error {
+                reason: cg_ipc::Reason::BadRequest,
+            },
         }
     }
 }
@@ -247,16 +257,13 @@ async fn serve<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, shared: Sh
             Request::SetSettings { .. } => replies.set_settings.clone(),
             Request::Connect { .. } => replies.connect.clone(),
             Request::Disconnect => replies.disconnect.clone(),
-            // Task 9 scripts these; until then the fake service has nothing wireless.
+            Request::WirelessInfo => replies.wireless_info.clone(),
             Request::ConnectWireless
             | Request::CancelWireless
             | Request::ConfirmCode { .. }
-            | Request::WirelessInfo
             | Request::ForgetPhone { .. }
             | Request::RegenerateAccessPoint
-            | Request::RepairPhone { .. } => Response::Error {
-                reason: cg_ipc::Reason::BadRequest,
-            },
+            | Request::RepairPhone { .. } => replies.wireless.clone(),
         };
         if w.write_all(&cg_ipc::to_line(&reply)).await.is_err() {
             return;
