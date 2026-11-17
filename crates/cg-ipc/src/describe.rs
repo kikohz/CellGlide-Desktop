@@ -796,6 +796,7 @@ fn check_name(id: CheckId) -> &'static str {
         CheckId::AppleService => "apple_service",
         CheckId::Wintun => "wintun",
         CheckId::Dns => "dns",
+        CheckId::WirelessAccessPoint => "wireless_access_point",
     }
 }
 
@@ -848,6 +849,20 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
         && let Some(pid) = check.args.get("pid")
     {
         args.push(("owner", tr("check.dns.owner_pid", &[("pid", pid)])));
+    }
+    // The access point's cause (`ApFailure`'s name, or `store`) as words.
+    if check.id == CheckId::WirelessAccessPoint
+        && let Some(cause) = check.args.get("cause")
+    {
+        let key = match cause.as_str() {
+            "no_adapter" => "wireless.cause.no_adapter",
+            "radio_off" => "wireless.cause.radio_off",
+            "mobile_hotspot_on" => "wireless.cause.mobile_hotspot_on",
+            "in_use" => "wireless.cause.in_use",
+            "unsupported" => "wireless.cause.unsupported",
+            _ => "check.wireless_access_point.store",
+        };
+        args.push(("reason", tr(key, &[])));
     }
     let line = tr_args(&format!("check.{name}.{state}"), &args);
     let fix = (!check.ok).then(|| tr_os(&fix_key(check), &[]));
@@ -1348,6 +1363,7 @@ mod tests {
             CheckId::AppleService,
             CheckId::Wintun,
             CheckId::Dns,
+            CheckId::WirelessAccessPoint,
         ];
         for id in all {
             // Adding a CheckId fails to compile here until the list above names it.
@@ -1363,7 +1379,8 @@ mod tests {
                 | CheckId::Tun
                 | CheckId::AppleService
                 | CheckId::Wintun
-                | CheckId::Dns => {}
+                | CheckId::Dns
+                | CheckId::WirelessAccessPoint => {}
             }
             let name = check_name(id);
             for state in ["ok", "fail", "fix"] {
@@ -1378,7 +1395,8 @@ mod tests {
                         .with("serials", "ab")
                         .with("error", "e")
                         .with("kind", "store")
-                        .with("owner", "x.exe");
+                        .with("owner", "x.exe")
+                        .with("cause", "radio_off");
                     let (line, fix) = check_lines(&check);
                     for text in std::iter::once(&line).chain(fix.as_ref()) {
                         assert!(

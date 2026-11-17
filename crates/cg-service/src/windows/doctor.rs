@@ -1,8 +1,9 @@
 //! The Windows environment checks (design §6.4), run by the service as LocalSystem; clients
 //! render them with cg-i18n. In order: Apple's device service, usbmuxd on port 27015, the
-//! phone, trust, `wintun.dll`, and the resolver's DNS port.
+//! phone, trust, `wintun.dll`, the resolver's DNS port, and (only with the wireless switch on) the access point.
 
 use super::system::{self, HKEY_LOCAL_MACHINE};
+use cg_core::controller::ApProbe;
 use cg_core::mux::{self, MuxEndpoint};
 use cg_ipc::{APPLE_DEVICES_APP, Check, CheckId};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -19,7 +20,11 @@ const STORE_PUBLISHER: &str = "_nzyj5cx40ttqa";
 /// How long usbmuxd may take to accept or answer before it counts as not running.
 const MUX_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub async fn checks(endpoint: &MuxEndpoint, install_dir: &Path) -> Vec<Check> {
+pub async fn checks(
+    endpoint: &MuxEndpoint,
+    install_dir: &Path,
+    access_point: ApProbe,
+) -> Vec<Check> {
     let packages = system::reg_subkeys(HKEY_LOCAL_MACHINE, PACKAGES);
     let classic = system::reg_key_exists(HKEY_LOCAL_MACHINE, CLASSIC_SERVICE).then(|| {
         system::reg_string(HKEY_LOCAL_MACHINE, CLASSIC_SERVICE, "ImagePath").unwrap_or_default()
@@ -48,7 +53,26 @@ pub async fn checks(endpoint: &MuxEndpoint, install_dir: &Path) -> Vec<Check> {
     result.extend(crate::doctor::phone_and_trust(endpoint, serials.as_deref()).await);
     result.push(wintun(install_dir));
     result.push(dns());
+    result.extend(access_point_check(access_point));
     result
+}
+
+/// The access point check, listed only while the wireless switch is on: whether this computer
+/// can open it, with the cause when not (an `ApFailure`'s name, or `store`).
+fn access_point_check(probe: ApProbe) -> Option<Check> {
+    let id = CheckId::WirelessAccessPoint;
+    Some(match probe {
+        ApProbe::SwitchOff => return None,
+        ApProbe::Available => Check::new(id, true),
+        ApProbe::StoreUnavailable => Check::new(id, false).with("cause", "store"),
+        ApProbe::Unavailable(cause) => Check::new(id, false).with(
+            "cause",
+            serde_json::to_value(cause)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        ),
+    })
 }
 
 /// Which Apple package provides usbmuxd: the classic service (`store` when its program
@@ -340,7 +364,7 @@ mod tests {
     async fn wintun_check_fails_without_dll() {
         let dir = tempfile::tempdir().unwrap();
         let mux = FakeMux::start().await;
-        let checks = checks(&mux.endpoint(), dir.path()).await;
+        let checks = checks(&mux.endpoint(), dir.path(), ApProbe::SwitchOff).await;
         let wintun = checks.iter().find(|c| c.id == CheckId::Wintun).unwrap();
         assert!(!wintun.ok);
         // A file that isn't signed doesn't pass either.
@@ -354,7 +378,7 @@ mod tests {
         mux.attach(device("aaaa", 1));
         mux.add_pair_record("aaaa");
         let dir = tempfile::tempdir().unwrap();
-        let checks = checks(&mux.endpoint(), dir.path()).await;
+        let checks = checks(&mux.endpoint(), dir.path(), ApProbe::SwitchOff).await;
         let ids: Vec<_> = checks.iter().map(|c| c.id).collect();
         assert_eq!(
             ids,
@@ -375,6 +399,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_access_point_check_comes_last_and_only_with_the_switch_on() {
+        let mux = FakeMux::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let checks = checks(&mux.endpoint(), dir.path(), ApProbe::Available).await;
+        let last = checks.last().unwrap();
+        assert_eq!(last.id, CheckId::WirelessAccessPoint);
+        assert!(last.ok);
+        assert_eq!(checks[checks.len() - 2].id, CheckId::Dns);
+    }
+
+    #[test]
+    fn the_access_point_check_names_its_cause() {
+        use cg_core::wireless::ports::ApFailure;
+        assert_eq!(access_point_check(ApProbe::SwitchOff), None);
+        let radio = access_point_check(ApProbe::Unavailable(ApFailure::RadioOff)).unwrap();
+        assert!(!radio.ok);
+        assert_eq!(radio.args["cause"], "radio_off");
+        let hotspot = access_point_check(ApProbe::Unavailable(ApFailure::MobileHotspotOn)).unwrap();
+        assert_eq!(hotspot.args["cause"], "mobile_hotspot_on");
+        let store = access_point_check(ApProbe::StoreUnavailable).unwrap();
+        assert_eq!(store.args["cause"], "store");
+    }
+
+    #[tokio::test]
     async fn nothing_on_the_port_is_not_running() {
         // A port nothing listens on: bind one, note it, let it go.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -384,7 +432,7 @@ mod tests {
             .port();
         let gone = MuxEndpoint::Tcp(([127, 0, 0, 1], port).into());
         let dir = tempfile::tempdir().unwrap();
-        let checks = checks(&gone, dir.path()).await;
+        let checks = checks(&gone, dir.path(), ApProbe::SwitchOff).await;
         assert_eq!(checks[0].args["running"], "false");
         // Installed or not, usbmuxd's check follows the Apple check: idle when installed.
         assert_eq!(checks[1].ok, checks[0].ok);

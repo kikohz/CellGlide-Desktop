@@ -21,6 +21,10 @@ C:\Program Files\CellGlide (and a leftover CellGlide.new, CellGlide.old or CellG
 cellglide0's Tcpip and Tcpip6 interface keys (only its fixed GUID, after the service is gone)
 and a phantom cellglide0 device node.
 
+A normal uninstall also deletes the wireless pairings in C:\ProgramData\CellGlide (wireless.json,
+wireless-keys.bin, wireless-keys.bin.bad and the .tmp files an interrupted write leaves), never
+through a link; the rest of that folder stays.
+
 With -Purge, C:\ProgramData\CellGlide and the invoking user's own %LOCALAPPDATA%\CellGlide are
 deleted too, and never through a junction or symbolic link. The two are removed by different
 processes on purpose: an elevated process must never delete inside a tree a standard user can
@@ -660,6 +664,32 @@ function Remove-DataDir([string]$Dir) {
     Remove-TreeNoFollow $Dir
 }
 
+# What the wireless pairing keeps in the data folder (the store's files, a bad key file moved
+# aside, and the temporary files an interrupted write can leave).
+$WirelessFiles = @('wireless.json', 'wireless-keys.bin', 'wireless-keys.bin.bad', 'wireless.json.tmp', 'wireless-keys.bin.tmp')
+
+function Remove-WirelessData([string]$Dir = $DataDir) {
+    # A normal uninstall deletes the pairings (they are keys to this computer's wireless network
+    # and are useless without the program); everything else in the folder stays. Only those
+    # names, only plain files: a link is refused and never followed, and a folder of that name
+    # is not touched.
+    $ErrorActionPreference = 'Stop'
+    if (-not (Test-Path -LiteralPath $Dir)) { return }
+    if (Test-ReparsePoint (Get-Item -LiteralPath $Dir -Force)) { Refuse-ReparsePoint $Dir }
+    foreach ($name in $WirelessFiles) {
+        $path = Join-Path $Dir $name
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (-not $item -or $item.PSIsContainer) { continue }
+        if (Test-ReparsePoint $item) { Refuse-ReparsePoint $path }
+        Write-Host "Removing $path"
+        if ($item.IsReadOnly) { $item.IsReadOnly = $false }
+        for ($i = 0; ; $i++) {
+            try { [IO.File]::Delete($path); break }
+            catch { if ($i -ge 19) { throw }; Start-Sleep -Milliseconds 500 }
+        }
+    }
+}
+
 function Remove-OwnUserData([string]$Dir = '', [string]$ProfilesRoot = '') {
     # The invoking user's own %LOCALAPPDATA%\CellGlide (-Purge only). This runs in the parent
     # process, as that user (unelevated when the user is), so it only ever deletes what the
@@ -786,6 +816,14 @@ function Invoke-UninstallPart([switch]$Purge, [string]$Keep = '') {
             }
             Remove-DataDir $DataDir })
     }
+    else {
+        # Pairings go on a normal uninstall too; same ACL guard as the purge.
+        $steps += , @('wireless data', {
+            if ((Test-Path -LiteralPath $DataDir) -and -not (Test-DataDirAdminOnly $DataDir)) {
+                throw "$DataDir can be written by a non-administrator; the pairings were not removed"
+            }
+            Remove-WirelessData $DataDir })
+    }
     foreach ($step in $steps) {
         try { & $step[1] }
         catch {
@@ -794,7 +832,7 @@ function Invoke-UninstallPart([switch]$Purge, [string]$Keep = '') {
         }
     }
     if (-not $Purge -and (Test-Path -LiteralPath $DataDir)) {
-        Write-Host "Kept $DataDir (settings and logs); run with -Purge to delete it."
+        Write-Host "Kept $DataDir (settings and logs; the wireless pairings were removed); run with -Purge to delete it."
     }
     if ($failures.Count -gt 0) {
         Write-Host "Uninstall finished with failures: $($failures -join ', ')"

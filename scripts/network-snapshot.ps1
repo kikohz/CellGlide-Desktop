@@ -5,7 +5,10 @@ Network snapshot / compare for CellGlide Desktop (Windows PowerShell 5.1).
   network-snapshot.ps1 -Compare <before.json> <after.json>
 
 Compare exits 0 and prints "identical" when snapshots match, otherwise exits 1 and
-prints every difference. The cellglide0 adapter (alias or GUID) is always excluded.
+prints every difference. The cellglide0 adapter (alias or GUID) is always excluded, and so are
+the Wi-Fi Direct virtual adapters ("Microsoft Wi-Fi Direct Virtual Adapter*", used by the
+wireless access point): the snapshot records their aliases and GUIDs in "excluded", and a
+compare excludes the union of both files' lists. Snapshots without "excluded" still compare.
 Volatile values (DHCP lease times, T1, T2, DHCPv6 interface options, route lifetimes)
 are never compared.
 An interface's InterfaceMetric is compared only when its AutomaticMetric is Disabled:
@@ -27,10 +30,14 @@ $CgGuid = '{E490EEF2-2CB0-4A80-B341-BF929C2E56B3}'
 # Registry values that change on their own (DHCP lease bookkeeping).
 $VolatileRegex = '^(Lease.*|T1|T2|Dhcpv6.*(Time|T1|T2|Leases).*|Dhcpv6InterfaceOptions)$'
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
+# Aliases and GUIDs read from the snapshot files being compared (never the live system).
+$script:ExtraExcluded = @()
 
 function Test-Excluded([string]$key) {
-    return ($key.IndexOf($CgAlias, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-           ($key.IndexOf($CgGuid, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    foreach ($x in (@($CgAlias, $CgGuid) + @($script:ExtraExcluded))) {
+        if ($x -and $key.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    }
+    return $false
 }
 
 function New-Entry([string]$key, [string]$value) {
@@ -71,6 +78,18 @@ function Get-NrptRules {
     }
 }
 
+function Get-WifiDirectExcluded {
+    # Alias and GUID of every Wi-Fi Direct virtual adapter (hidden ones included): they come and
+    # go with the access point, so a compare must not count them.
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { $_.InterfaceDescription -like 'Microsoft Wi-Fi Direct Virtual Adapter*' })) {
+        foreach ($v in @($a.Name, $a.InterfaceGuid)) {
+            if ($v -and -not $list.Contains([string]$v)) { $list.Add([string]$v) }
+        }
+    }
+    return @($list)
+}
+
 function New-Snapshot {
     $dns = @{}; $ipif = @{}; $routes = @{}; $reg = @{}; $nrpt = @{}; $hosts = @{}
 
@@ -107,6 +126,7 @@ function New-Snapshot {
 
     return [ordered]@{
         version  = 1
+        excluded = @(Get-WifiDirectExcluded)
         sections = [ordered]@{
             dns         = Sort-Map $dns
             hosts       = Sort-Map $hosts
@@ -144,11 +164,22 @@ function Get-DhcpOptionsStable([string]$hex) {
     return 'options:' + ($out -join ',')
 }
 
-function Read-Flat([string]$path) {
-    # Flattens a snapshot file to "section :: key" -> value, applying exclusion and
+function Read-Snapshot([string]$path) {
+    return [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $path).ProviderPath, $Utf8) | ConvertFrom-Json
+}
+
+function Get-ExcludedList($obj) {
+    # Old snapshots have no "excluded" field.
+    if ($obj.PSObject.Properties.Name -contains 'excluded') {
+        return @($obj.excluded | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    }
+    return @()
+}
+
+function Read-Flat($obj) {
+    # Flattens a snapshot to "section :: key" -> value, applying exclusion and
     # volatile filtering again so injected or older snapshot content is handled too.
     $flat = @{}
-    $obj = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $path).ProviderPath, $Utf8) | ConvertFrom-Json
     foreach ($s in $obj.sections.PSObject.Properties) {
         foreach ($e in $s.Value.PSObject.Properties) {
             if (Test-Excluded $e.Name) { continue }
@@ -175,8 +206,11 @@ if ($PSCmdlet.ParameterSetName -eq 'Out') {
     exit 0
 }
 
-$before = Read-Flat $Compare
-$afterMap = Read-Flat $After
+$beforeObj = Read-Snapshot $Compare
+$afterObj = Read-Snapshot $After
+$script:ExtraExcluded = @(Get-ExcludedList $beforeObj) + @(Get-ExcludedList $afterObj)
+$before = Read-Flat $beforeObj
+$afterMap = Read-Flat $afterObj
 $diffs = @()
 foreach ($k in (@($before.Keys) + @($afterMap.Keys) | Sort-Object -Unique)) {
     $inB = $before.ContainsKey($k); $inA = $afterMap.ContainsKey($k)

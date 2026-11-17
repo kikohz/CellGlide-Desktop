@@ -68,6 +68,42 @@ Describe 'uninstall.ps1' {
         Test-Path (Join-Path $TestDrive 'plain') | Should -BeTrue
         { Remove-DataDir (Join-Path $TestDrive 'no-such\CellGlide') } | Should -Not -Throw
     }
+    It 'Remove-WirelessData deletes the five pairing files, read-only ones included, and nothing else' {
+        Mock Write-Host {}
+        $dir = Join-Path $TestDrive 'wl\CellGlide'; New-Item -ItemType Directory (Join-Path $dir 'logs') | Out-Null
+        $names = 'wireless.json', 'wireless-keys.bin', 'wireless-keys.bin.bad', 'wireless.json.tmp', 'wireless-keys.bin.tmp'
+        foreach ($n in $names) { Set-Content (Join-Path $dir $n) 'x' }
+        (Get-Item (Join-Path $dir 'wireless-keys.bin')).IsReadOnly = $true
+        foreach ($n in 'settings.json', 'logs\a.log', 'wireless.json.bak', 'other-wireless.json') { Set-Content (Join-Path $dir $n) 'x' }
+        Remove-WirelessData $dir
+        foreach ($n in $names) { Test-Path (Join-Path $dir $n) | Should -BeFalse }
+        foreach ($n in 'settings.json', 'logs\a.log', 'wireless.json.bak', 'other-wireless.json') { Test-Path (Join-Path $dir $n) | Should -BeTrue }
+        # Some of the files missing, or the folder itself: fine.
+        { Remove-WirelessData $dir } | Should -Not -Throw
+        { Remove-WirelessData (Join-Path $TestDrive 'no-such\CellGlide') } | Should -Not -Throw
+    }
+    It 'Remove-WirelessData does not touch a folder of that name' {
+        Mock Write-Host {}
+        $dir = Join-Path $TestDrive 'wl2\CellGlide'; New-Item -ItemType Directory (Join-Path $dir 'wireless.json') | Out-Null
+        Set-Content (Join-Path $dir 'wireless.json\keep.txt') 'x'
+        Remove-WirelessData $dir
+        Test-Path (Join-Path $dir 'wireless.json\keep.txt') | Should -BeTrue
+    }
+    It 'Remove-WirelessData refuses a file symbolic link and a data folder that is a junction' -Tag 'Elevated' {
+        Mock Write-Host {}
+        $dir = Join-Path $TestDrive 'wl3\CellGlide'; New-Item -ItemType Directory $dir | Out-Null
+        $target = Join-Path $TestDrive 'wl3\target.txt'; Set-Content $target 'x'
+        New-Item -ItemType SymbolicLink -Path (Join-Path $dir 'wireless.json') -Target $target | Out-Null
+        { Remove-WirelessData $dir } | Should -Throw '*junction or symbolic link*'
+        Test-Path $target | Should -BeTrue
+        $real = Join-Path $TestDrive 'wl3\real'; New-Item -ItemType Directory $real | Out-Null
+        Set-Content (Join-Path $real 'wireless.json') 'x'
+        $junction = Join-Path $TestDrive 'wl3\junction'
+        New-Item -ItemType Junction -Path $junction -Target $real | Out-Null
+        try { { Remove-WirelessData $junction } | Should -Throw '*junction or symbolic link*' }
+        finally { [IO.Directory]::Delete($junction) }
+        Test-Path (Join-Path $real 'wireless.json') | Should -BeTrue
+    }
     It 'Only profile folders under the profiles root are purged' {
         Test-ProfileDataPath 'C:\Users\alice\AppData\Local\CellGlide' 'C:\Users' | Should -BeTrue
         Test-ProfileDataPath 'c:\users\BOB\AppData\Local\CellGlide' 'C:\Users' | Should -BeTrue
@@ -259,6 +295,7 @@ Describe 'uninstall.ps1' {
             Mock Remove-RunValues { $script:calls.Add("Remove-RunValues $ExePath") }
             Mock Remove-ProgramDirs { $script:calls.Add("Remove-ProgramDirs $Keep") }
             Mock Remove-DataDir { $script:calls.Add("Remove-DataDir $Dir") }
+            Mock Remove-WirelessData { $script:calls.Add("Remove-WirelessData $Dir") }
             Mock Test-DataDirAdminOnly { $true }
             Mock Remove-OwnUserData { $script:calls.Add('Remove-OwnUserData') }   # never called from the elevated part
         }
@@ -281,7 +318,22 @@ Describe 'uninstall.ps1' {
             Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq "$env:ProgramData\CellGlide" }
             Invoke-UninstallPart | Should -Be 0
             ($script:calls | Where-Object { $_ -like 'Remove-DataDir*' }) | Should -BeNullOrEmpty
+            $script:calls | Should -Contain "Remove-WirelessData $env:ProgramData\CellGlide"
             Should -Invoke Write-Host -ParameterFilter { "$Object" -like "Kept $env:ProgramData\CellGlide*-Purge*" }
+        }
+        It 'a normal uninstall removes the wireless pairings and a purge leaves that to the purge' {
+            Invoke-UninstallPart | Should -Be 0
+            $script:calls[-1] | Should -Be "Remove-WirelessData $env:ProgramData\CellGlide"
+            $script:calls = New-Object System.Collections.Generic.List[string]
+            Invoke-UninstallPart -Purge | Should -Be 0
+            ($script:calls | Where-Object { $_ -like 'Remove-WirelessData*' }) | Should -BeNullOrEmpty
+        }
+        It 'the pairings are not removed when the data folder lets a non-administrator write' {
+            Mock Test-DataDirAdminOnly { $false }
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq "$env:ProgramData\CellGlide" }
+            Invoke-UninstallPart | Should -Be 1
+            ($script:calls | Where-Object { $_ -like 'Remove-WirelessData*' }) | Should -BeNullOrEmpty
+            Should -Invoke Write-Host -ParameterFilter { "$Object" -like 'wireless data failed:*non-administrator*' }
         }
         It 'a failed step is reported, the rest still runs, and the result is 1' {
             Mock Remove-ProgramDirs { $script:calls.Add('Remove-ProgramDirs'); throw 'locked' }

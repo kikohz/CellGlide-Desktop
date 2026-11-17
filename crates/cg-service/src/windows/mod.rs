@@ -61,11 +61,15 @@ fn install_dir() -> PathBuf {
 struct SystemDoctor {
     endpoint: MuxEndpoint,
     install_dir: PathBuf,
+    controller: Controller,
 }
 
 impl server::DoctorApi for SystemDoctor {
     fn run(&self) -> server::BoxFuture<'_, Vec<cg_ipc::Check>> {
-        Box::pin(doctor::checks(&self.endpoint, &self.install_dir))
+        Box::pin(async {
+            let access_point = self.controller.probe_access_point().await;
+            doctor::checks(&self.endpoint, &self.install_dir, access_point).await
+        })
     }
 }
 
@@ -118,6 +122,7 @@ pub async fn run(
         Arc::new(SystemDoctor {
             endpoint: MuxEndpoint::system(),
             install_dir: install_dir(),
+            controller: controller.clone(),
         }),
         Arc::new(sources),
     );
@@ -220,6 +225,7 @@ mod tests {
             Arc::new(SystemDoctor {
                 endpoint: mux.endpoint(),
                 install_dir: install.path().to_path_buf(),
+                controller: controller.clone(),
             }),
             Arc::new(test_sources(dir.path())),
         ));

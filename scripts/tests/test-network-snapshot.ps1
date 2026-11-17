@@ -127,6 +127,58 @@ try {
     foreach ($k in $routeKeys) {
         Assert (($k -replace '#\d+$', '').Split('|').Count -eq 4) "case 10: route key without a metric: $k"
     }
+    # Case 11: a snapshot records the Wi-Fi Direct virtual adapters in "excluded" (an array).
+    $snap = [System.IO.File]::ReadAllText($a, $utf8) | ConvertFrom-Json
+    Assert ($snap.PSObject.Properties.Name -contains 'excluded') 'case 11: snapshot lacks the excluded field'
+
+    # Cases 12-14: entries of an adapter named in "excluded" (by alias or GUID, in either file)
+    # are not compared; another adapter's entries still are; a snapshot without "excluded"
+    # still compares.
+    $wfdAlias = 'Local Area Connection* 99'
+    $wfdGuid = '{AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB}'
+    function Write-WithWfd([string]$name, [string]$dnsValue, [bool]$declare, [string]$other) {
+        $s = [System.IO.File]::ReadAllText($a, $utf8) | ConvertFrom-Json
+        $s.sections.dns | Add-Member -NotePropertyName "$wfdAlias|IPv4" -NotePropertyValue $dnsValue -Force
+        $s.sections.ipinterface | Add-Member -NotePropertyName "$wfdAlias|IPv4" -NotePropertyValue "$dnsValue|Disabled|1500" -Force
+        $s.sections.routes | Add-Member -NotePropertyName "$wfdAlias|192.168.137.0/24|0.0.0.0|$dnsValue" -NotePropertyValue $dnsValue -Force
+        $s.sections.registry | Add-Member -NotePropertyName "Tcpip\$wfdGuid\NameServer" -NotePropertyValue $dnsValue -Force
+        $s.sections.registry | Add-Member -NotePropertyName "Tcpip6\$wfdGuid\EnableDHCP" -NotePropertyValue $dnsValue -Force
+        if ($other) { $s.sections.dns | Add-Member -NotePropertyName 'Other adapter|IPv4' -NotePropertyValue $other -Force }
+        $list = @($wfdAlias, $wfdGuid)
+        if ($declare) { $s | Add-Member -NotePropertyName 'excluded' -NotePropertyValue $list -Force }
+        $p = Join-Path $tmp $name
+        [System.IO.File]::WriteAllText($p, ($s | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+        return $p
+    }
+    $w1 = Write-WithWfd 'w1.json' '1' $true ''
+    $w2 = Write-WithWfd 'w2.json' '2' $true ''
+    $r = Run-Script @('-Compare', $w1, $w2)
+    Assert ($r.Code -eq 0) "case 12: excluded adapter changes should be ignored, got $($r.Code): $($r.Output)"
+    # Declared in only one of the two files: the union applies.
+    $w3 = Write-WithWfd 'w3.json' '3' $false ''
+    $r = Run-Script @('-Compare', $w3, $w2)
+    Assert ($r.Code -eq 0) "case 12: the union of both excluded lists should apply, got $($r.Code): $($r.Output)"
+    # Declared in neither: reported (the old behaviour).
+    $w4 = Write-WithWfd 'w4.json' '4' $false ''
+    $r = Run-Script @('-Compare', $w3, $w4)
+    Assert ($r.Code -eq 1) "case 13: an undeclared adapter should be reported, got $($r.Code): $($r.Output)"
+    # Another adapter is still reported next to an excluded one.
+    $x1 = Write-WithWfd 'x1.json' '1' $true 'one'
+    $x2 = Write-WithWfd 'x2.json' '2' $true 'two'
+    $r = Run-Script @('-Compare', $x1, $x2)
+    Assert ($r.Code -eq 1) "case 13: another adapter should still be reported, got $($r.Code): $($r.Output)"
+    Assert ($r.Output.Contains('Other adapter')) "case 13: output lacks the other adapter: $($r.Output)"
+    Assert (-not $r.Output.Contains('Connection* 99')) "case 13: the excluded adapter was reported: $($r.Output)"
+    # Old snapshots (no "excluded" at all) compare as before.
+    $o = [System.IO.File]::ReadAllText($a, $utf8) | ConvertFrom-Json
+    $o.PSObject.Properties.Remove('excluded')
+    $op = Join-Path $tmp 'old.json'
+    [System.IO.File]::WriteAllText($op, ($o | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+    $r = Run-Script @('-Compare', $op, $op)
+    Assert ($r.Code -eq 0) "case 14: an old snapshot should compare, got $($r.Code): $($r.Output)"
+    $r = Run-Script @('-Compare', $op, $a)
+    Assert ($r.Code -eq 0) "case 14: old against new should compare, got $($r.Code): $($r.Output)"
+
     Write-Host 'all passed'
 }
 finally {

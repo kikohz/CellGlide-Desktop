@@ -468,6 +468,9 @@ pub enum CheckId {
     Wintun,
     /// Windows: nothing else holds the resolver's port 53.
     Dns,
+    /// Windows: this computer can open the wireless access point (only listed while the
+    /// wireless switch is on).
+    WirelessAccessPoint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,6 +986,7 @@ mod tests {
             (CheckId::AppleService, "apple_service"),
             (CheckId::Wintun, "wintun"),
             (CheckId::Dns, "dns"),
+            (CheckId::WirelessAccessPoint, "wireless_access_point"),
         ] {
             assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{name}\""));
         }

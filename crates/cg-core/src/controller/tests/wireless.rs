@@ -2577,3 +2577,68 @@ async fn a_probe_dropped_before_its_answer_is_asked_again() {
     .await;
     assert_eq!(probes(&count), 2);
 }
+
+/// The doctor's question: nothing while the switch is off, one check when asked (a failure is
+/// asked again, a success is kept for a while), no probing while an attempt owns the adapter.
+#[tokio::test]
+async fn the_doctor_probe_asks_once_and_leaves_a_session_alone() {
+    use crate::controller::ApProbe;
+    let w = connected_rig(|_| {}).await;
+    // A session owns the adapter: available, nothing opened.
+    let before = w.fake.start_attempts();
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Available
+    );
+    assert_eq!(w.fake.start_attempts(), before);
+
+    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: false,
+            wireless_enabled: false,
+            ..Stored::default()
+        });
+    })
+    .await;
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::SwitchOff
+    );
+    assert_eq!(w.fake.start_attempts(), 0);
+
+    w.r.controller
+        .send(Command::SetWireless { enabled: true })
+        .await
+        .unwrap();
+    assert_eq!(w.fake.start_attempts(), 1);
+    // The switch check just succeeded: kept.
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Available
+    );
+    assert_eq!(w.fake.start_attempts(), 1);
+}
+
+#[tokio::test]
+async fn the_doctor_probe_checks_a_failure_again() {
+    use crate::controller::ApProbe;
+    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: false,
+            wireless_enabled: true,
+            ..Stored::default()
+        });
+    })
+    .await;
+    w.fake.fail_starts(Some(ApFailure::RadioOff));
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Unavailable(ApFailure::RadioOff)
+    );
+    w.fake.fail_starts(None);
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Available
+    );
+    assert!(!w.fake.is_up());
+}

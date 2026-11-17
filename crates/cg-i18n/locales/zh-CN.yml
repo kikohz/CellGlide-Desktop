@@ -129,6 +129,11 @@ check:
     unknown: "无法检查 DNS 端口 53 是否被其他程序占用（%{error}）"
     fix_unreadable: "再检查一次；如果仍然无法检查，请重启电脑"
     owner_pid: "进程 %{pid}"
+  wireless_access_point:
+    ok: "这台电脑能开启 iPhone 要加入的无线网络"
+    fail: "这台电脑无法开启 iPhone 要加入的无线网络：%{reason}"
+    fix: "按上面的原因处理（打开 Wi‑Fi、关闭移动热点）；如果这块 Wi‑Fi 网卡做不到，请改用 USB 线"
+    store: "CellGlide 的无线数据无法打开"
 cli:
   disconnected: "已断开，电脑回到原来的网络"
   still_connecting: "仍在连接，可运行 cellglide watch 查看进度"
