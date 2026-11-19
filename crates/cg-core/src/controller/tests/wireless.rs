@@ -462,7 +462,7 @@ async fn an_iphone_on_usb_takes_over_even_with_auto_connect_off() {
 }
 
 #[tokio::test]
-async fn suspend_ends_it_and_resume_does_not_start_it_again() {
+async fn suspend_ends_it_and_resume_starts_it_again() {
     let w = connected_rig(|_| {}).await;
     w.r.controller
         .send(Command::Sleep { sleeping: true })
@@ -475,11 +475,58 @@ async fn suspend_ends_it_and_resume_does_not_start_it_again() {
         .send(Command::Sleep { sleeping: false })
         .await
         .unwrap();
-    // Nothing to wait on for "nothing starts": let a few ticks (250 ms each) pass.
+    // Not at once: the adapter gets a moment (3 s) first.
     tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(w.fake.start_attempts(), 1);
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 2);
+    assert_eq!(w.r.backend.started(), 2);
+}
+
+#[tokio::test]
+async fn cancel_after_resume_keeps_it_ended() {
+    let w = connected_rig(|_| {}).await;
+    for sleeping in [true, false] {
+        w.r.controller
+            .send(Command::Sleep { sleeping })
+            .await
+            .unwrap();
+    }
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    // Past the 3 s delay.
+    tokio::time::sleep(Duration::from_millis(3800)).await;
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.fake.start_attempts(), 1);
+}
+
+#[tokio::test]
+async fn resume_with_an_iphone_on_usb_stays_on_usb() {
+    // Plugged in while asleep: with auto connect on (the default) USB connects on resume.
+    let w = connected_rig(|config| {
+        config.settings = SettingsSource::Memory(Stored {
+            auto_connect: true,
+            wireless_enabled: true,
+            ..Stored::default()
+        });
+    })
+    .await;
+    w.r.controller
+        .send(Command::Sleep { sleeping: true })
+        .await
+        .unwrap();
+    w.r.mux.attach(device("aaaa", 1));
+    w.r.controller
+        .send(Command::Sleep { sleeping: false })
+        .await
+        .unwrap();
+    wait_for(&w.r.controller, "on usb", |s| {
+        connected(s) && s.selected.as_deref() == Some("aaaa")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(3800)).await;
     let snap = w.r.controller.snapshot();
     assert_eq!(snap.wireless, None);
-    assert!(!connected(&snap));
+    assert_eq!(snap.selected.as_deref(), Some("aaaa"));
     assert_eq!(w.fake.start_attempts(), 1);
 }
 
@@ -1319,7 +1366,10 @@ async fn suspend_while_the_code_is_shown_saves_nothing() {
         .await
         .unwrap();
     w.nothing_left_of_the_pairing().await;
+    // Past the 3 s resume delay: a pairing is not started again by itself.
+    tokio::time::sleep(Duration::from_millis(3800)).await;
     assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.fake.start_attempts(), 1);
 }
 
 #[tokio::test]

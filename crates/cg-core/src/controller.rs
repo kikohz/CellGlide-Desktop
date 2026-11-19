@@ -578,7 +578,15 @@ struct Wireless {
     /// The phone this attempt is about, by id: the one being paired again (`RepairPhone`), or
     /// the one a session was built with. Forgetting it ends the attempt.
     peer: Option<String>,
+    /// A suspend ended an attempt the user had started (not one showing a code): resuming
+    /// starts it again. Cleared by anything that ends the attempt on the user's behalf.
+    resume_after_sleep: bool,
+    /// After a resume: when to start it again (the Wi-Fi adapter needs a moment).
+    resume_at: Option<Instant>,
 }
+
+/// How long after a resume a wireless attempt ended by the suspend is started again.
+const WIRELESS_RESUME_DELAY: Duration = Duration::from_secs(3);
 
 /// What the doctor learns about the access point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -768,6 +776,8 @@ impl Actor {
                 probing: None,
                 confirm: None,
                 peer: None,
+                resume_after_sleep: false,
+                resume_at: None,
             },
             switch_check: None,
             switch_checks: 0,
@@ -889,10 +899,20 @@ impl Actor {
                     if sleeping { "suspend" } else { "resume" }
                 );
                 self.monitor.sleep_changed(Timestamp::now());
-                // Suspending ends a wireless attempt; resuming does not start it again.
-                if sleeping && self.wireless.phase.owns() {
-                    tracing::info!("wireless: ending for suspend");
-                    self.end_wireless(WirelessPhase::Off).await;
+                // Suspending ends a wireless attempt (the access point goes with it); resuming
+                // starts it again, unless a code was on screen (that pairing starts over only
+                // when the user asks).
+                if sleeping {
+                    self.wireless.resume_at = None;
+                    if self.wireless.phase.owns() {
+                        self.wireless.resume_after_sleep =
+                            !matches!(self.wireless.phase, WirelessPhase::Pairing { .. });
+                        tracing::info!("wireless: ending for suspend");
+                        self.end_wireless(WirelessPhase::Off).await;
+                    }
+                }
+                if !sleeping && std::mem::take(&mut self.wireless.resume_after_sleep) {
+                    self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
                 }
                 if !sleeping {
                     self.next_listen = Instant::now();
@@ -910,6 +930,7 @@ impl Actor {
                 self.manual = false;
                 self.retry_at = None;
                 self.last_error = None;
+                self.wireless.resume_at = None;
                 self.end_wireless(WirelessPhase::Off).await;
                 self.teardown().await;
             }
@@ -921,7 +942,10 @@ impl Actor {
                 }
                 return self.connect_wireless(events, Some(peer_id)).await;
             }
-            Command::CancelWireless => self.end_wireless(WirelessPhase::Off).await,
+            Command::CancelWireless => {
+                self.wireless.resume_at = None;
+                self.end_wireless(WirelessPhase::Off).await
+            }
             Command::ConfirmCode { matches } => return self.confirm_code(matches).await,
             Command::ForgetPhone { peer_id } => return self.forget_phone(peer_id).await,
             Command::RegenerateAccessPoint => return self.regenerate_access_point().await,
@@ -929,6 +953,7 @@ impl Actor {
             Command::SetWireless { enabled } => {
                 if !enabled {
                     self.last_probe = None;
+                    self.wireless.resume_at = None;
                     self.cancel_switch_check(|| CoreError::WirelessSwitchedOff)
                         .await;
                 }
@@ -1163,6 +1188,7 @@ impl Actor {
         events: &mpsc::Sender<Event>,
         repair: Option<String>,
     ) -> Result<()> {
+        self.wireless.resume_at = None;
         if self.wireless.phase.owns() {
             return Ok(());
         }
@@ -1786,6 +1812,13 @@ impl Actor {
         }
         self.take_notices();
         self.health_checks(events);
+        if self.wireless.resume_at.is_some_and(|at| now >= at) {
+            self.wireless.resume_at = None;
+            tracing::info!("wireless: starting again after resume");
+            // Refused (and logged) when a USB session runs, an iPhone shares over USB, or the
+            // switch is off: then the wireless attempt simply stays ended.
+            let _ = self.connect_wireless(events, None).await;
+        }
         if let Some(task) = self.wireless.task.as_mut()
             && task.panicked().await
         {
