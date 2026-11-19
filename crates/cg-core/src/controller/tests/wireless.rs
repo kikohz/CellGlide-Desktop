@@ -520,6 +520,34 @@ async fn disconnect_on_usb_then_unplugging_stays_off() {
     assert_eq!(w.fake.start_attempts(), 1);
 }
 
+/// Sleeping while on USB stops the held access point; waking with that iPhone still plugged in
+/// starts it again, held (so the phone can join meanwhile), and unplugging then reconnects.
+#[tokio::test]
+async fn waking_on_usb_starts_the_held_access_point_again() {
+    let w = on_usb_rig().await;
+    w.r.controller
+        .send(Command::Sleep { sleeping: true })
+        .await
+        .unwrap();
+    assert!(!w.fake.is_up());
+    w.r.controller
+        .send(Command::Sleep { sleeping: false })
+        .await
+        .unwrap();
+    // Not at once: the adapter gets a moment (3 s) first.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(w.fake.start_attempts(), 1);
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    assert_eq!(w.fake.start_attempts(), 2);
+    assert!(w.fake.is_up());
+    let snap = w.r.controller.snapshot();
+    assert!(connected(&snap) && snap.selected.as_deref() == Some("aaaa"));
+    assert_eq!(snap.wireless, None, "held: still on USB");
+    w.r.mux.detach(1);
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 2, "the same access point");
+}
+
 #[tokio::test]
 async fn suspend_ends_it_and_resume_starts_it_again() {
     let w = connected_rig(|_| {}).await;

@@ -340,6 +340,16 @@ async fn drive(
         }
     };
     tracing::info!("wireless: access point {ssid} started");
+    // Started held (after a wake with the iPhone still on USB): the phone can join meanwhile;
+    // connecting waits until it is unplugged.
+    let mut hold = context.hold.clone();
+    if *hold.borrow_and_update() {
+        tracing::info!("wireless: on USB; the access point stays up until the iPhone is unplugged");
+        if let Err(failure) = wait_while_held(&mut hold, access_point.as_mut()).await {
+            return failure;
+        }
+        tracing::info!("wireless: back from USB; connecting");
+    }
     let mut attempt = Attempt::new(context, computer_name, repair);
     let mut window = Window {
         kind: WindowKind::Waiting { ssid },
@@ -358,11 +368,8 @@ async fn drive(
         let mut hold = context.hold.clone();
         if *hold.borrow_and_update() {
             tracing::info!("wireless: on USB meanwhile; the access point stays up");
-            while *hold.borrow_and_update() {
-                tokio::select! {
-                    changed = hold.changed() => if changed.is_err() { break },
-                    () = access_point.lost() => return lost(),
-                }
+            if let Err(failure) = wait_while_held(&mut hold, access_point.as_mut()).await {
+                return failure;
             }
             tracing::info!("wireless: back from USB; reconnecting");
         } else {
@@ -379,6 +386,20 @@ async fn drive(
             deadline: since + timing.retry_for,
         };
     }
+}
+
+/// Waits, access point up, until the hold is released (or its sender is gone).
+async fn wait_while_held(
+    hold: &mut watch::Receiver<bool>,
+    access_point: &mut dyn RunningAccessPoint,
+) -> Result<(), WirelessFailure> {
+    while *hold.borrow_and_update() {
+        tokio::select! {
+            changed = hold.changed() => if changed.is_err() { break },
+            () = access_point.lost() => return Err(lost()),
+        }
+    }
+    Ok(())
 }
 
 fn lost() -> WirelessFailure {

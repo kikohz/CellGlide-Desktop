@@ -601,6 +601,8 @@ struct Standby {
     attempt: u64,
     ssid: Option<String>,
     peer: Option<String>,
+    /// Started held after a wake (no session yet): unplugging connects from the start.
+    fresh: bool,
 }
 
 /// How long after a resume a wireless attempt ended by the suspend is started again.
@@ -928,7 +930,11 @@ impl Actor {
                 if sleeping {
                     self.wireless.resume_at = None;
                     // Unplugging later still goes back to wireless (`back_after_usb`), by a
-                    // fresh start.
+                    // fresh start; waking with that iPhone still plugged in starts the access
+                    // point again, held (`tick`).
+                    if self.wireless.standby.is_some() {
+                        self.wireless.resume_after_sleep = true;
+                    }
                     self.drop_standby().await;
                     if self.wireless.phase.owns() {
                         self.wireless.resume_after_sleep =
@@ -1647,6 +1653,7 @@ impl Actor {
                 attempt: self.wireless.attempt,
                 ssid: self.wireless.ssid.take(),
                 peer: self.wireless.peer.take(),
+                fresh: false,
             };
             self.wireless.standby = Some(standby);
             // Anything else the held task says until it is resumed is not for the actor.
@@ -1663,6 +1670,55 @@ impl Actor {
         self.failures = 0;
         self.last_error = None;
         self.retry_at = Some(Instant::now());
+    }
+
+    /// After a wake, with the iPhone that took a wireless session over still on USB: starts the
+    /// access point again, held, so the phone can join it meanwhile and unplugging reconnects
+    /// at once (`Standby`, `fresh`).
+    async fn hold_wireless(&mut self, events: &mpsc::Sender<Event>, mux_id: u32) {
+        let refused = if self.wireless.phase.owns() || self.wireless.standby.is_some() {
+            Some("an attempt runs")
+        } else if !self.wireless_enabled() {
+            Some("the switch is off")
+        } else if !self.devices.iter().any(|d| d.mux_id == mux_id) {
+            Some("the iPhone is no longer on USB")
+        } else {
+            None
+        };
+        let (Some(ports), Some(store)) = (
+            self.config.wireless_ports.clone(),
+            self.config.wireless.clone(),
+        ) else {
+            return;
+        };
+        if let Some(why) = refused {
+            tracing::info!("wireless: not starting the access point again: {why}");
+            return;
+        }
+        self.cancel_switch_check(|| CoreError::BadRequest).await;
+        self.wireless.attempt += 1;
+        let attempt = self.wireless.attempt;
+        let (hold, held) = watch::channel(true);
+        let context = wireless_session::Context {
+            attempt,
+            ports,
+            store,
+            timing: self.config.wireless_timing,
+            events: events.clone(),
+            hold: held,
+        };
+        tracing::info!("wireless: the iPhone is still on USB; starting the access point again");
+        let task = wireless_session::Task::spawn(context, self.config.computer_name.clone(), None);
+        self.wireless.standby = Some(Standby {
+            task,
+            hold,
+            attempt,
+            ssid: None,
+            peer: None,
+            fresh: true,
+        });
+        // What the held task says until it is resumed is not for the actor.
+        self.wireless.attempt += 1;
     }
 
     /// Reads the name and model of each attached phone that has not been asked yet. These
@@ -1739,9 +1795,13 @@ impl Actor {
                         self.wireless.hold = Some(standby.hold);
                         self.wireless.ssid = standby.ssid;
                         self.wireless.peer = standby.peer;
-                        self.wireless.phase = WirelessPhase::Reconnecting {
-                            since: Instant::now(),
-                            name_clash: false,
+                        self.wireless.phase = if standby.fresh {
+                            WirelessPhase::Starting
+                        } else {
+                            WirelessPhase::Reconnecting {
+                                since: Instant::now(),
+                                name_clash: false,
+                            }
                         };
                     } else {
                         self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
@@ -1930,10 +1990,14 @@ impl Actor {
         self.health_checks(events);
         if self.wireless.resume_at.is_some_and(|at| now >= at) {
             self.wireless.resume_at = None;
-            tracing::info!("wireless: starting again after resume");
-            // Refused (and logged) when a USB session runs, an iPhone shares over USB, or the
-            // switch is off: then the wireless attempt simply stays ended.
-            let _ = self.connect_wireless(events, None).await;
+            if let Some(mux_id) = self.wireless.back_after_usb {
+                self.hold_wireless(events, mux_id).await;
+            } else {
+                tracing::info!("wireless: starting again after resume");
+                // Refused (and logged) when a USB session runs, an iPhone shares over USB, or
+                // the switch is off: then the wireless attempt simply stays ended.
+                let _ = self.connect_wireless(events, None).await;
+            }
         }
         if let Some(task) = self.wireless.task.as_mut()
             && task.panicked().await
