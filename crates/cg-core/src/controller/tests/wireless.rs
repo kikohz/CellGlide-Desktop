@@ -462,6 +462,35 @@ async fn an_iphone_on_usb_takes_over_even_with_auto_connect_off() {
 }
 
 #[tokio::test]
+async fn unplugging_the_iphone_that_took_over_goes_back_to_wireless() {
+    let w = connected_rig(|_| {}).await;
+    w.r.mux.attach(device("aaaa", 1));
+    wait_for(&w.r.controller, "on usb", |s| {
+        connected(s) && s.selected.as_deref() == Some("aaaa")
+    })
+    .await;
+    w.r.mux.detach(1);
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 2);
+}
+
+#[tokio::test]
+async fn disconnect_on_usb_then_unplugging_stays_off() {
+    let w = connected_rig(|_| {}).await;
+    w.r.mux.attach(device("aaaa", 1));
+    wait_for(&w.r.controller, "on usb", |s| {
+        connected(s) && s.selected.as_deref() == Some("aaaa")
+    })
+    .await;
+    w.r.controller.send(Command::Disconnect).await.unwrap();
+    w.r.mux.detach(1);
+    // Past the 3 s delay.
+    tokio::time::sleep(Duration::from_millis(3800)).await;
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.fake.start_attempts(), 1);
+}
+
+#[tokio::test]
 async fn suspend_ends_it_and_resume_starts_it_again() {
     let w = connected_rig(|_| {}).await;
     w.r.controller

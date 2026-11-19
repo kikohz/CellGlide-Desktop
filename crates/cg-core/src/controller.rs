@@ -581,8 +581,12 @@ struct Wireless {
     /// A suspend ended an attempt the user had started (not one showing a code): resuming
     /// starts it again. Cleared by anything that ends the attempt on the user's behalf.
     resume_after_sleep: bool,
-    /// After a resume: when to start it again (the Wi-Fi adapter needs a moment).
+    /// After a resume, or after the iPhone that took a wireless session over on USB was
+    /// unplugged: when to start the wireless attempt again (the Wi-Fi adapter needs a moment).
     resume_at: Option<Instant>,
+    /// The USB device (mux id) that took a wireless session over: unplugging it goes back to
+    /// wireless. Cleared when the user picks a connection, disconnects or switches it off.
+    back_after_usb: Option<u32>,
 }
 
 /// How long after a resume a wireless attempt ended by the suspend is started again.
@@ -778,6 +782,7 @@ impl Actor {
                 peer: None,
                 resume_after_sleep: false,
                 resume_at: None,
+                back_after_usb: None,
             },
             switch_check: None,
             switch_checks: 0,
@@ -892,6 +897,7 @@ impl Actor {
                 self.failures = 0;
                 self.last_error = None;
                 self.retry_at = Some(Instant::now());
+                self.wireless.back_after_usb = None;
             }
             Command::Sleep { sleeping } => {
                 tracing::info!(
@@ -931,6 +937,7 @@ impl Actor {
                 self.retry_at = None;
                 self.last_error = None;
                 self.wireless.resume_at = None;
+                self.wireless.back_after_usb = None;
                 self.end_wireless(WirelessPhase::Off).await;
                 self.teardown().await;
             }
@@ -954,6 +961,7 @@ impl Actor {
                 if !enabled {
                     self.last_probe = None;
                     self.wireless.resume_at = None;
+                    self.wireless.back_after_usb = None;
                     self.cancel_switch_check(|| CoreError::WirelessSwitchedOff)
                         .await;
                 }
@@ -1189,6 +1197,7 @@ impl Actor {
         repair: Option<String>,
     ) -> Result<()> {
         self.wireless.resume_at = None;
+        self.wireless.back_after_usb = None;
         if self.wireless.phase.owns() {
             return Ok(());
         }
@@ -1276,6 +1285,11 @@ impl Actor {
             return;
         }
         self.wireless.attempt += 1;
+        // The session goes first, while the access point is still up: the phone then hears
+        // its connections close at once instead of timing them out.
+        if self.active_is_wireless() {
+            self.teardown().await;
+        }
         if let Some(task) = self.wireless.task.take() {
             task.stop().await;
         }
@@ -1287,9 +1301,6 @@ impl Actor {
         self.wireless.confirm = None;
         self.wireless.last_error = None;
         self.wireless.peer = None;
-        if self.active_is_wireless() {
-            self.teardown().await;
-        }
         self.wireless.phase = then;
         self.wireless.ssid = None;
     }
@@ -1520,7 +1531,7 @@ impl Actor {
                 .selected_usb()
                 .is_some_and(|d| d.serial == serial && d.mux_id == mux_id)
         {
-            self.switch_to_usb().await;
+            self.switch_to_usb(mux_id).await;
         } else if !answers && self.wireless.phase.owns() {
             tracing::info!("wireless: the device on USB does not share; staying wireless");
         }
@@ -1566,13 +1577,15 @@ impl Actor {
     }
 
     /// An iPhone that shares over USB ends the wireless attempt and connects over USB, even
-    /// with auto connect off: the user asked for a connection.
-    async fn switch_to_usb(&mut self) {
+    /// with auto connect off: the user asked for a connection. Unplugging that iPhone later
+    /// goes back to wireless.
+    async fn switch_to_usb(&mut self, mux_id: u32) {
         if !self.wireless.phase.owns() {
             return;
         }
         tracing::info!("wireless: an iPhone is on USB; switching to it");
         self.end_wireless(WirelessPhase::Off).await;
+        self.wireless.back_after_usb = Some(mux_id);
         self.settings.update(|s| s.user_disconnected = false);
         self.manual = true;
         self.failures = 0;
@@ -1642,6 +1655,11 @@ impl Actor {
                     self.monitor.usb(false, Timestamp::now());
                 }
                 self.devices.retain(|d| d.mux_id != id);
+                if self.wireless.back_after_usb == Some(id) {
+                    self.wireless.back_after_usb = None;
+                    tracing::info!("wireless: the iPhone was unplugged; going back to wireless");
+                    self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
+                }
                 if self
                     .active
                     .as_ref()
