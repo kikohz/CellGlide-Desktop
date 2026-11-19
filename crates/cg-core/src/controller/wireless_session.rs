@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -281,6 +281,9 @@ pub(super) struct Context {
     pub store: Arc<WirelessStore>,
     pub timing: WirelessTiming,
     pub events: mpsc::Sender<Event>,
+    /// While true, a session that ends is not reconnected: an iPhone on USB took over, and the
+    /// access point stays up (the phone stays joined) until it is unplugged.
+    pub hold: watch::Receiver<bool>,
 }
 
 impl Context {
@@ -349,8 +352,21 @@ async fn drive(
             Err(failure) => return failure,
         };
         tokio::select! {
-            _ = ended => tracing::info!("wireless: session ended; reconnecting"),
+            _ = ended => {}
             () = access_point.lost() => return lost(),
+        }
+        let mut hold = context.hold.clone();
+        if *hold.borrow_and_update() {
+            tracing::info!("wireless: on USB meanwhile; the access point stays up");
+            while *hold.borrow_and_update() {
+                tokio::select! {
+                    changed = hold.changed() => if changed.is_err() { break },
+                    () = access_point.lost() => return lost(),
+                }
+            }
+            tracing::info!("wireless: back from USB; reconnecting");
+        } else {
+            tracing::info!("wireless: session ended; reconnecting");
         }
         let since = Instant::now();
         tokio::select! {

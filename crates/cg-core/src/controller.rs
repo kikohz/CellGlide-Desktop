@@ -587,6 +587,20 @@ struct Wireless {
     /// The USB device (mux id) that took a wireless session over: unplugging it goes back to
     /// wireless. Cleared when the user picks a connection, disconnects or switches it off.
     back_after_usb: Option<u32>,
+    /// The running attempt's hold switch (`wireless_session::Context::hold`).
+    hold: Option<watch::Sender<bool>>,
+    /// A connected wireless session that an iPhone on USB took over: its task, held, keeps the
+    /// access point up so the phone stays joined; unplugging that iPhone resumes it.
+    standby: Option<Standby>,
+}
+
+/// A wireless attempt held while USB carries the traffic.
+struct Standby {
+    task: wireless_session::Task,
+    hold: watch::Sender<bool>,
+    attempt: u64,
+    ssid: Option<String>,
+    peer: Option<String>,
 }
 
 /// How long after a resume a wireless attempt ended by the suspend is started again.
@@ -783,6 +797,8 @@ impl Actor {
                 resume_after_sleep: false,
                 resume_at: None,
                 back_after_usb: None,
+                hold: None,
+                standby: None,
             },
             switch_check: None,
             switch_checks: 0,
@@ -898,6 +914,7 @@ impl Actor {
                 self.last_error = None;
                 self.retry_at = Some(Instant::now());
                 self.wireless.back_after_usb = None;
+                self.drop_standby().await;
             }
             Command::Sleep { sleeping } => {
                 tracing::info!(
@@ -910,6 +927,9 @@ impl Actor {
                 // when the user asks).
                 if sleeping {
                     self.wireless.resume_at = None;
+                    // Unplugging later still goes back to wireless (`back_after_usb`), by a
+                    // fresh start.
+                    self.drop_standby().await;
                     if self.wireless.phase.owns() {
                         self.wireless.resume_after_sleep =
                             !matches!(self.wireless.phase, WirelessPhase::Pairing { .. });
@@ -962,6 +982,7 @@ impl Actor {
                     self.last_probe = None;
                     self.wireless.resume_at = None;
                     self.wireless.back_after_usb = None;
+                    self.drop_standby().await;
                     self.cancel_switch_check(|| CoreError::WirelessSwitchedOff)
                         .await;
                 }
@@ -1072,7 +1093,7 @@ impl Actor {
     ) {
         if !self.wireless_enabled() {
             let _ = done.send(ApProbe::SwitchOff);
-        } else if self.wireless.phase.owns() {
+        } else if self.wireless.phase.owns() || self.wireless.standby.is_some() {
             let _ = done.send(ApProbe::Available);
         } else if let Some((at, Ok(()))) = self.last_probe
             && at.elapsed() < PROBE_FRESH
@@ -1141,6 +1162,15 @@ impl Actor {
         if !self.is_paired(&peer_id) {
             return Err(CoreError::BadRequest);
         }
+        if self
+            .wireless
+            .standby
+            .as_ref()
+            .is_some_and(|s| s.peer.as_deref() == Some(peer_id.as_str()))
+        {
+            self.wireless.back_after_usb = None;
+            self.drop_standby().await;
+        }
         // Only an attempt that is about this phone (its session, a reconnect to it, or pairing
         // it again) is ended. One still waiting or dialling without having picked it is left
         // alone: every round reads the records again, and a dial takes the key from the store
@@ -1170,7 +1200,8 @@ impl Actor {
         let Some(store) = self.config.wireless.clone() else {
             return Err(CoreError::WirelessStore);
         };
-        if self.wireless.phase.owns() {
+        // A held access point (`Standby`) uses the old name too.
+        if self.wireless.phase.owns() || self.wireless.standby.is_some() {
             return Err(CoreError::BadRequest);
         }
         match tokio::task::spawn_blocking(move || store.regenerate_access_point()).await {
@@ -1233,6 +1264,11 @@ impl Actor {
             store,
             timing: self.config.wireless_timing,
             events: events.clone(),
+            hold: {
+                let (hold, held) = watch::channel(false);
+                self.wireless.hold = Some(hold);
+                held
+            },
         };
         let computer_name = self.config.computer_name.clone();
         self.wireless.peer = repair.clone();
@@ -1280,7 +1316,17 @@ impl Actor {
     /// before its session's tunnel is stopped and this returns. The access point it held has
     /// been dropped by then, which hands its stop to the platform; the stop may still be under
     /// way, and the platform does not start another access point until it has finished.
+    /// Stops a wireless attempt held for USB (`Standby`), and with it the access point.
+    async fn drop_standby(&mut self) {
+        if let Some(standby) = self.wireless.standby.take() {
+            standby.task.stop().await;
+            tracing::info!("wireless: the access point kept while on USB is stopped");
+        }
+    }
+
     async fn end_wireless(&mut self, then: WirelessPhase) {
+        self.drop_standby().await;
+        self.wireless.hold = None;
         if self.wireless.phase == WirelessPhase::Off && self.wireless.task.is_none() {
             return;
         }
@@ -1584,7 +1630,33 @@ impl Actor {
             return;
         }
         tracing::info!("wireless: an iPhone is on USB; switching to it");
-        self.end_wireless(WirelessPhase::Off).await;
+        let held = self.wireless.phase == WirelessPhase::Connected
+            && self.active_is_wireless()
+            && self.wireless.task.is_some()
+            && self
+                .wireless
+                .hold
+                .as_ref()
+                .is_some_and(|h| h.send(true).is_ok());
+        if held {
+            // The task sees its session end with the hold on: it waits, access point up.
+            self.teardown().await;
+            let standby = Standby {
+                task: self.wireless.task.take().expect("checked above"),
+                hold: self.wireless.hold.take().expect("checked above"),
+                attempt: self.wireless.attempt,
+                ssid: self.wireless.ssid.take(),
+                peer: self.wireless.peer.take(),
+            };
+            self.wireless.standby = Some(standby);
+            // Anything else the held task says until it is resumed is not for the actor.
+            self.wireless.attempt += 1;
+            self.wireless.confirm = None;
+            self.wireless.last_error = None;
+            self.wireless.phase = WirelessPhase::Off;
+        } else {
+            self.end_wireless(WirelessPhase::Off).await;
+        }
         self.wireless.back_after_usb = Some(mux_id);
         self.settings.update(|s| s.user_disconnected = false);
         self.manual = true;
@@ -1658,7 +1730,22 @@ impl Actor {
                 if self.wireless.back_after_usb == Some(id) {
                     self.wireless.back_after_usb = None;
                     tracing::info!("wireless: the iPhone was unplugged; going back to wireless");
-                    self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
+                    if let Some(standby) = self.wireless.standby.take() {
+                        // The access point never went down: reconnect at once. The USB
+                        // session is torn down below, before the task asks to build one.
+                        let _ = standby.hold.send(false);
+                        self.wireless.attempt = standby.attempt;
+                        self.wireless.task = Some(standby.task);
+                        self.wireless.hold = Some(standby.hold);
+                        self.wireless.ssid = standby.ssid;
+                        self.wireless.peer = standby.peer;
+                        self.wireless.phase = WirelessPhase::Reconnecting {
+                            since: Instant::now(),
+                            name_clash: false,
+                        };
+                    } else {
+                        self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
+                    }
                 }
                 if self
                     .active
@@ -1787,6 +1874,17 @@ impl Actor {
                 if current && self.devices.iter().any(|d| d.serial == serial) {
                     self.labels.insert(serial, label);
                 }
+            }
+            Event::Wireless(attempt, WirelessEvent::Done(failure))
+                if self
+                    .wireless
+                    .standby
+                    .as_ref()
+                    .is_some_and(|s| s.attempt == attempt) =>
+            {
+                // The access point kept while on USB went away (the system stopped it).
+                tracing::info!("wireless: the access point kept while on USB ended: {failure:?}");
+                self.wireless.standby = None;
             }
             Event::Wireless(attempt, event) if attempt == self.wireless.attempt => {
                 self.wireless_event(event, events).await;

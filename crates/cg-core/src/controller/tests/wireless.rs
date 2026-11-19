@@ -455,34 +455,64 @@ async fn an_iphone_on_usb_takes_over_even_with_auto_connect_off() {
     })
     .await;
     assert_eq!(snap.wireless, None);
-    assert!(!w.fake.is_up());
+    // The access point stays up meanwhile, so the phone stays joined.
+    assert!(w.fake.is_up());
     assert_eq!(w.r.backend.started(), 2);
     assert_eq!(w.r.backend.stopped(), 1);
     assert!(!snap.settings.auto_connect);
 }
 
-#[tokio::test]
-async fn unplugging_the_iphone_that_took_over_goes_back_to_wireless() {
+async fn on_usb_rig() -> W {
     let w = connected_rig(|_| {}).await;
     w.r.mux.attach(device("aaaa", 1));
     wait_for(&w.r.controller, "on usb", |s| {
         connected(s) && s.selected.as_deref() == Some("aaaa")
     })
     .await;
+    w
+}
+
+#[tokio::test]
+async fn unplugging_the_iphone_that_took_over_goes_back_to_wireless() {
+    let w = on_usb_rig().await;
+    w.r.mux.detach(1);
+    w.connected().await;
+    // The same access point all along: no second start.
+    assert_eq!(w.fake.start_attempts(), 1);
+    assert!(w.fake.is_up());
+}
+
+#[tokio::test]
+async fn the_access_point_lost_while_on_usb_starts_it_afresh_on_unplug() {
+    let w = on_usb_rig().await;
+    w.fake.lose_access_point();
+    wait_for(&w.r.controller, "still on usb", connected).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!w.fake.is_up(), "the held task dropped it");
     w.r.mux.detach(1);
     w.connected().await;
     assert_eq!(w.fake.start_attempts(), 2);
 }
 
 #[tokio::test]
+async fn switching_wireless_off_while_on_usb_stops_the_access_point() {
+    let w = on_usb_rig().await;
+    w.r.controller
+        .send(Command::SetWireless { enabled: false })
+        .await
+        .unwrap();
+    assert!(!w.fake.is_up());
+    w.r.mux.detach(1);
+    tokio::time::sleep(Duration::from_millis(3800)).await;
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    assert_eq!(w.fake.start_attempts(), 1);
+}
+
+#[tokio::test]
 async fn disconnect_on_usb_then_unplugging_stays_off() {
-    let w = connected_rig(|_| {}).await;
-    w.r.mux.attach(device("aaaa", 1));
-    wait_for(&w.r.controller, "on usb", |s| {
-        connected(s) && s.selected.as_deref() == Some("aaaa")
-    })
-    .await;
+    let w = on_usb_rig().await;
     w.r.controller.send(Command::Disconnect).await.unwrap();
+    assert!(!w.fake.is_up());
     w.r.mux.detach(1);
     // Past the 3 s delay.
     tokio::time::sleep(Duration::from_millis(3800)).await;
@@ -704,6 +734,7 @@ async fn the_attempt_aborted_drops_the_access_point() {
             store: open_store(dir.path()),
             timing: timing(),
             events,
+            hold: tokio::sync::watch::channel(false).1,
         },
     ));
     loop {
@@ -1559,6 +1590,7 @@ async fn the_attempt_aborted_while_the_code_is_shown_saves_nothing() {
             store: store.clone(),
             timing: timing(),
             events,
+            hold: tokio::sync::watch::channel(false).1,
         },
     ));
     let reply = loop {
@@ -2363,9 +2395,9 @@ async fn wireless_info_reads_the_store() {
     assert_eq!(info.unavailable, None);
 }
 
-/// Design §4.4: something joined the access point but no iPhone advertised CellGlide for a
+/// Design Â§4.4: something joined the access point but no iPhone advertised CellGlide for a
 /// minute: the hint to open CellGlide and start sharing (VPN mode off). The window then ends with
-/// it; with nothing joined it ends as no phone (`no_phone_for_300_seconds…`).
+/// it; with nothing joined it ends as no phone (`no_phone_for_300_secondsâ€¦`).
 #[tokio::test(start_paused = true)]
 async fn something_joined_but_nothing_shares_is_hinted_after_a_minute() {
     let p = paused_rig();
