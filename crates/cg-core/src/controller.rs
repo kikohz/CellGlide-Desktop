@@ -1213,6 +1213,7 @@ impl Actor {
         match tokio::task::spawn_blocking(move || store.regenerate_access_point()).await {
             Ok(Ok(())) => {
                 tracing::info!("wireless: new access point name and passphrase");
+                self.hand_over_access_point_again();
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -2480,12 +2481,40 @@ impl Actor {
                         "wireless: the phone has a pairing this computer lacks; remove it on \
                          the phone to pair again"
                     );
+                    return;
                 }
                 Ok(cable_pairing::Outcome::Skipped) => {
                     tracing::info!("wireless: cable pairing skipped");
+                    return;
                 }
-                Err(error) => tracing::warn!("wireless: cable pairing failed: {error}"),
+                Err(error) => {
+                    tracing::warn!("wireless: cable pairing failed: {error}");
+                    return;
+                }
             }
+            hand_over_access_point(&phone, &hello, &serial, enabled, &name, &store).await;
+        });
+    }
+
+    /// The access point's name and passphrase changed while an iPhone is on USB: it is told the
+    /// new ones at once (otherwise at its next USB session).
+    fn hand_over_access_point_again(&mut self) {
+        let Some(store) = self.config.wireless.clone() else {
+            return;
+        };
+        let enabled = self.settings.get().wireless_enabled;
+        let name = crate::wireless::computer_name(self.config.computer_name.as_deref());
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(device) = active.phone.usb_device() else {
+            return;
+        };
+        let serial = device.serial.clone();
+        let phone = active.phone.clone();
+        let hello = active.hello.clone();
+        active.tasks.spawn(async move {
+            hand_over_access_point(&phone, &hello, &serial, enabled, &name, &store).await;
         });
     }
 
@@ -2730,6 +2759,29 @@ fn history_day(
         days: last_seven(today).iter().map(Date::to_string).collect(),
         begin,
         end: next.min(now).max(begin),
+    }
+}
+
+/// Tells the iPhone on USB the access point's name and passphrase (`hotspot-v1`). Only the
+/// outcome is logged, never the name, the passphrase or the line.
+async fn hand_over_access_point(
+    phone: &Phone,
+    hello: &Hello,
+    serial: &str,
+    enabled: bool,
+    name: &str,
+    store: &crate::wireless::store::WirelessStore,
+) {
+    match cable_pairing::hand_over_access_point(phone, hello, serial, enabled, name, store).await {
+        Ok(cable_pairing::HandOver::Saved) => {
+            tracing::info!("wireless: the iPhone has the access point");
+        }
+        Ok(cable_pairing::HandOver::Unknown) => tracing::warn!(
+            "wireless: the iPhone does not know this computer even after pairing again; \
+             trying at the next USB session"
+        ),
+        Ok(cable_pairing::HandOver::Skipped) => {}
+        Err(error) => tracing::warn!("wireless: handing the access point over failed: {error}"),
     }
 }
 
@@ -5021,6 +5073,53 @@ mod tests {
             // The second session's attempt has decided.
             logged(&log, "INFO", "wireless: already paired", 1).await;
             assert_eq!(w.r.phone.cable_connections(), 1);
+        }
+
+        /// `hotspot-v1`: every USB session tells the phone the access point, and a new name
+        /// while on USB is told at once.
+        #[tokio::test]
+        async fn the_access_point_is_handed_over_each_session_and_when_it_changes() {
+            let (log, _guard) = capture();
+            let caps: Vec<&str> = WIRELESS_CAPS
+                .iter()
+                .copied()
+                .chain(["hotspot-v1"])
+                .collect();
+            let w = wireless_rig(
+                options(
+                    CableBehaviour::Replies {
+                        cable: new_line(),
+                        hotspot: "CG1 HOTSPOT OK".into(),
+                    },
+                    &caps,
+                ),
+                true,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            logged(&log, "INFO", "the iPhone has the access point", 1).await;
+            let hotspot = |n: usize| -> Vec<u8> { w.r.phone.cable_requests()[n].clone() };
+            assert_eq!(w.r.phone.cable_connections(), 2);
+            assert!(hotspot(1).starts_with(b"CG1 HOTSPOT "));
+            let first = hotspot(1);
+            w.r.controller
+                .send(Command::RegenerateAccessPoint)
+                .await
+                .unwrap();
+            logged(&log, "INFO", "the iPhone has the access point", 2).await;
+            assert_ne!(hotspot(2), first, "the new name and passphrase");
+            let (ssid, _) = w.store.access_point().unwrap();
+            let ssid64 = crate::wireless::encoding::base64url(ssid.as_bytes());
+            assert!(String::from_utf8(hotspot(2)).unwrap().contains(&ssid64));
+            // The next session tells it again, without pairing again.
+            w.r.controller.send(Command::Disconnect).await.unwrap();
+            w.r.controller
+                .send(Command::Connect { serial: None })
+                .await
+                .unwrap();
+            logged(&log, "INFO", "the iPhone has the access point", 3).await;
+            assert_eq!(w.r.phone.cable_connections(), 4);
         }
 
         #[tokio::test]

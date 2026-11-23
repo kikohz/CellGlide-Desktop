@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 use super::cable::{self, MAX_REPLY, REPLY_TIMEOUT, Reply};
 use super::encoding::display_name;
+use super::hotspot;
 use super::store::{Method, Record, WirelessStore};
 use super::{CABLE_PAIRING_PORT, CAPABILITY};
 use crate::phone::Phone;
@@ -127,6 +128,92 @@ pub async fn pair_if_needed(
     }
 }
 
+/// What handing the access point over (`hotspot-v1`) came to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HandOver {
+    /// The phone saved the access point's name and passphrase.
+    Saved,
+    /// The phone did not know this computer (or its key), even after pairing over the cable
+    /// again.
+    Unknown,
+    /// The switch is off, the phone does not take it, or there is no usable pairing.
+    Skipped,
+}
+
+/// Tells the phone on this USB device the access point's name and passphrase, once per USB
+/// session (and again when they change). A phone that answers `UNKNOWN` has its pairing marked
+/// stale and is paired over the cable again, then told once more. Call after `pair_if_needed`.
+pub async fn hand_over_access_point(
+    phone: &Phone,
+    hello: &Hello,
+    usb_serial: &str,
+    enabled: bool,
+    computer_name: &str,
+    store: &WirelessStore,
+) -> Result<HandOver> {
+    if !enabled || !hello.has(CAPABILITY) || !hello.has(hotspot::CAPABILITY) {
+        return Ok(HandOver::Skipped);
+    }
+    match send_access_point(phone, usb_serial, store).await? {
+        None => return Ok(HandOver::Skipped),
+        Some(hotspot::Reply::Saved) => return Ok(HandOver::Saved),
+        Some(hotspot::Reply::Unknown) => {}
+    }
+    let Some(phone_id) = store.phone_id(usb_serial) else {
+        return Ok(HandOver::Skipped);
+    };
+    tracing::info!("wireless: the phone does not know this computer; pairing over the cable again");
+    store.set_stale(&phone_id, true)?;
+    match pair_if_needed(phone, hello, usb_serial, enabled, computer_name, store).await? {
+        Outcome::Paired(_) | Outcome::AlreadyPaired => {}
+        Outcome::KnownButNoKey | Outcome::Skipped => return Ok(HandOver::Unknown),
+    }
+    Ok(match send_access_point(phone, usb_serial, store).await? {
+        None => HandOver::Skipped,
+        Some(hotspot::Reply::Saved) => HandOver::Saved,
+        Some(hotspot::Reply::Unknown) => HandOver::Unknown,
+    })
+}
+
+/// One `CG1 HOTSPOT` exchange; `None` when this USB device has no usable pairing.
+async fn send_access_point(
+    phone: &Phone,
+    usb_serial: &str,
+    store: &WirelessStore,
+) -> Result<Option<hotspot::Reply>> {
+    let Some(phone_id) = store.phone_id(usb_serial) else {
+        return Ok(None);
+    };
+    let Some(key) = store
+        .records()
+        .iter()
+        .find(|r| r.peer_id == phone_id && !r.stale)
+        .and_then(|r| store.key(&r.identity))
+    else {
+        return Ok(None);
+    };
+    let (ssid, passphrase) = store.access_point()?;
+    let passphrase = Zeroizing::new(passphrase);
+    let line = hotspot::request(&store.local_id(), &ssid, &passphrase, &key).ok_or_else(|| {
+        CoreError::Pairing(
+            "the access point's name or passphrase is not one the phone takes".into(),
+        )
+    })?;
+    let mut stream = phone.open(CABLE_PAIRING_PORT).await?;
+    stream.write_all(line.as_bytes()).await?;
+    let reply = timeout(hotspot::REPLY_TIMEOUT, read_line(&mut stream))
+        .await
+        .map_err(|_| CoreError::Timeout)??;
+    drop(stream);
+    std::str::from_utf8(&reply)
+        .ok()
+        .and_then(hotspot::parse_reply)
+        .map(Some)
+        .ok_or_else(|| {
+            CoreError::Pairing("the phone's reply to the access point was malformed".into())
+        })
+}
+
 /// A pairing with `phone_id` that is not stale and whose key is present.
 fn has_good_record(store: &WirelessStore, phone_id: &str) -> bool {
     store
@@ -164,6 +251,7 @@ mod tests {
     use super::*;
     use crate::testing::{CableBehaviour, FakeMux, FakePhone, FakePhoneOptions, SESSION_A, device};
     use crate::wireless::encoding::encode_name;
+    use crate::wireless::pairing::Key;
     use crate::wireless::store::PlainSecrets;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
@@ -502,5 +590,122 @@ mod tests {
         closed(&r).await;
         let expected = cable::request(&r.store.local_id(), "Windows PC").into_bytes();
         assert_eq!(r.phone.cable_requests(), vec![expected]);
+    }
+
+    // --- Handing the access point over (`hotspot-v1`).
+
+    fn hotspot_hello() -> Hello {
+        hello(&["socks5-tcp", CAPABILITY, hotspot::CAPABILITY])
+    }
+
+    fn replies(cable: String, hotspot: &str) -> CableBehaviour {
+        CableBehaviour::Replies {
+            cable,
+            hotspot: hotspot.to_string(),
+        }
+    }
+
+    async fn hand_over(r: &Rig, enabled: bool, hello: &Hello) -> Result<HandOver> {
+        hand_over_access_point(&r.handle, hello, SERIAL, enabled, "Desk PC", &r.store).await
+    }
+
+    fn hotspot_request(r: &Rig, key: u8) -> Vec<u8> {
+        let (ssid, passphrase) = r.store.access_point().unwrap();
+        hotspot::request(
+            &r.store.local_id(),
+            &ssid,
+            &passphrase,
+            &Key::from_bytes([key; 32]),
+        )
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn the_access_point_is_handed_over_after_pairing() {
+        let r = rig(replies(new_line(IDENTITY, 7, "iPhone"), "CG1 HOTSPOT OK")).await;
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        let outcome = hand_over(&r, true, &hotspot_hello()).await.unwrap();
+        assert_eq!(outcome, HandOver::Saved);
+        closed(&r).await;
+        let requests = r.phone.cable_requests();
+        assert_eq!(requests.len(), 2, "its own connection");
+        assert_eq!(requests[1], hotspot_request(&r, 7));
+    }
+
+    #[tokio::test]
+    async fn it_is_handed_over_every_session() {
+        let r = rig(replies(new_line(IDENTITY, 7, "iPhone"), "CG1 HOTSPOT OK")).await;
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                hand_over(&r, true, &hotspot_hello()).await.unwrap(),
+                HandOver::Saved
+            );
+        }
+        assert_eq!(r.phone.cable_connections(), 3);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_handed_over_without_the_capability_the_switch_or_a_pairing() {
+        let r = rig(replies(new_line(IDENTITY, 7, "iPhone"), "CG1 HOTSPOT OK")).await;
+        // No pairing yet.
+        assert_eq!(
+            hand_over(&r, true, &hotspot_hello()).await.unwrap(),
+            HandOver::Skipped
+        );
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        assert_eq!(
+            hand_over(&r, true, &wireless_hello()).await.unwrap(),
+            HandOver::Skipped
+        );
+        assert_eq!(
+            hand_over(&r, false, &hotspot_hello()).await.unwrap(),
+            HandOver::Skipped
+        );
+        assert_eq!(r.phone.cable_connections(), 1, "only the pairing");
+    }
+
+    #[tokio::test]
+    async fn unknown_pairs_over_the_cable_again_and_sends_once_more() {
+        let r = rig(replies(
+            new_line(IDENTITY, 7, "iPhone"),
+            "CG1 HOTSPOT UNKNOWN",
+        ))
+        .await;
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        r.phone.set_cable(replies(
+            new_line(IDENTITY2, 9, "iPhone"),
+            "CG1 HOTSPOT UNKNOWN",
+        ));
+        let outcome = hand_over(&r, true, &hotspot_hello()).await.unwrap();
+        // Still unknown after pairing again: given up until the next session.
+        assert_eq!(outcome, HandOver::Unknown);
+        closed(&r).await;
+        let requests = r.phone.cable_requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[1], hotspot_request(&r, 7));
+        assert_eq!(
+            requests[2],
+            cable::request(&r.store.local_id(), "Desk PC").into_bytes()
+        );
+        // The new key signs the second try.
+        assert_eq!(requests[3], hotspot_request(&r, 9));
+        assert_eq!(r.store.key(IDENTITY2).unwrap().as_bytes(), &[9u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn a_phone_that_closes_without_a_reply_is_a_failure() {
+        let r = rig(replies(new_line(IDENTITY, 7, "iPhone"), "CG1 HOTSPOT ?")).await;
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        assert!(hand_over(&r, true, &hotspot_hello()).await.is_err());
+        r.phone.set_cable(CableBehaviour::Silent);
+        // A silent phone times out (10 s) rather than holding the session's task forever.
+        tokio::time::pause();
+        assert!(matches!(
+            hand_over(&r, true, &hotspot_hello()).await,
+            Err(CoreError::Timeout)
+        ));
     }
 }

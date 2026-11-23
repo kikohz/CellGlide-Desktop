@@ -7,6 +7,7 @@ pub mod cable_pairing;
 pub mod code_message;
 pub mod code_pairing;
 pub mod encoding;
+pub mod hotspot;
 pub mod pairing;
 pub mod policy;
 pub mod ports;

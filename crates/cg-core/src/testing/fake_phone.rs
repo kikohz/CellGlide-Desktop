@@ -30,6 +30,8 @@ pub enum CableBehaviour {
     Reply(String),
     /// Reads the request line and never answers.
     Silent,
+    /// Like `Reply`, by request: `hotspot` for a `CG1 HOTSPOT` line, `cable` for any other.
+    Replies { cable: String, hotspot: String },
 }
 
 pub struct FakePhoneOptions {
@@ -481,7 +483,15 @@ fn cable_pairing(stream: TcpStream, shared: Arc<Shared>) -> tokio::task::JoinHan
                 shared.cable_received.lock().unwrap()[index].extend_from_slice(&buffer[..n]);
                 if !answered && buffer[..n].contains(&b'\n') {
                     answered = true;
-                    if let CableBehaviour::Reply(line) = &behaviour {
+                    let hotspot =
+                        shared.cable_received.lock().unwrap()[index].starts_with(b"CG1 HOTSPOT ");
+                    let reply = match &behaviour {
+                        CableBehaviour::Reply(line) => Some(line),
+                        CableBehaviour::Replies { hotspot: line, .. } if hotspot => Some(line),
+                        CableBehaviour::Replies { cable: line, .. } => Some(line),
+                        _ => None,
+                    };
+                    if let Some(line) = reply {
                         let _ = w.write_all(format!("{line}\n").as_bytes()).await;
                         let _ = w.shutdown().await;
                     }

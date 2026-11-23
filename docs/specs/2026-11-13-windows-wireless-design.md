@@ -201,6 +201,7 @@ cellglide-service.exe
 - USB 会话中，开关打开、且 iPhone 的 hello 能力里有 `wireless-v2` 时，经 usbmux 连手机的 8092 端口问一次。iPhone 只在有电脑经 USB 连着共享时才理会新电脑，所以只在 USB 会话已经建立之后问；USB 会话进行中打开开关时立刻问一次，没有会话时等下一次会话。每个 USB 会话一次；已配对且没过期的跳过。
 - 电脑 → `CG1 CABLE <本机标识> <本机名字>\n`（整行不超过 256 字节，后面不再发任何东西）；iPhone → `<phoneID> <identity> <base64 的 32 字节密钥> <手机名字>\n`（新配对，iPhone 上会问用户一次，电脑最多等 70 秒）或 `CG1 KNOWN <phoneID>\n`（已配对，清掉过期标记）。回复最长 512 字节。
 - 失败不影响 USB 会话，只记日志。
+- 接入点交接（`hotspot-v1`，iOS 定义，见 `2026-11-19-ios-auto-join-request.md` 和 iOS 的 `WirelessHotspotMessage.swift`）：iPhone 的 hello 里同时有 `wireless-v2` 和 `hotspot-v1`、开关打开、这台 USB 设备有可用配对时，每次 USB 会话在插线配对之后，经 8092 另开一条连接发 `CG1 HOTSPOT <computerID> <ssid64> <pass64> <tag64>`（tag 是用长期密钥对前面部分做的 HMAC-SHA256）。回 `UNKNOWN`：配对标为过期、重新插线配对，再发一次，仍是 `UNKNOWN` 就等下次 USB 会话。插线期间更换接入点名字和密码，立刻再发一次。日志里只记结果，不记名字、密码和请求行。（2026-11-23 加。）
 
 ### 8.4 存储
 
