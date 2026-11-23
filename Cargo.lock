@@ -550,7 +550,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cg-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cg-diag",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "cg-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64",
  "bytes",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "cg-diag"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "cg-i18n",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "cg-ffi"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cg-diag",
  "cg-ffi",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "cg-gui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cg-diag",
  "cg-i18n",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "cg-i18n"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rust-i18n",
  "windows 0.62.2",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "cg-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cg-i18n",
  "jiff",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "cg-netstack"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cg-netstack",
  "cg-protocol",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "cg-platform"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cg-core",
  "cg-ipc",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "cg-protocol"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "plist",
  "serde",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "cg-service"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cg-core",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "cg-tools"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "cg-i18n",
@@ -1864,7 +1864,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hev-sys"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cc",
 ]
