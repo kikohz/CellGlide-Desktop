@@ -2852,6 +2852,34 @@ async fn an_attempt_that_opened_the_access_point_answers_the_doctor() {
     assert_eq!(w.fake.start_attempts(), starts);
 }
 
+/// An attempt whose access point would not open answers the doctor with that cause, replacing
+/// an earlier good answer (rereview m-1).
+#[tokio::test]
+async fn an_attempt_whose_access_point_failed_answers_the_doctor() {
+    use crate::controller::ApProbe;
+    let w = wireless_rig().await;
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Available
+    );
+    w.fake.fail_starts(Some(ApFailure::MobileHotspotOn));
+    w.start().await;
+    wait_for(&w.r.controller, "failed", |s| {
+        matches!(phase(s), Some(WirelessPhaseView::Failed { .. }))
+    })
+    .await;
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Unavailable(ApFailure::MobileHotspotOn)
+    );
+}
+
 /// A failing access point is not tried again by the doctor either: the switch check failed, so
 /// the switch stayed off and the doctor says so.
 #[tokio::test]

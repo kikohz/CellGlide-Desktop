@@ -1238,8 +1238,8 @@ impl Actor {
         events: &mpsc::Sender<Event>,
         repair: Option<String>,
     ) -> Result<()> {
-        self.wireless.resume_at = None;
         if self.wireless.phase.owns() {
+            self.wireless.resume_at = None;
             self.wireless.back_after_usb = None;
             return Ok(());
         }
@@ -1264,6 +1264,7 @@ impl Actor {
         ) else {
             return Err(CoreError::BadRequest);
         };
+        self.wireless.resume_at = None;
         self.wireless.back_after_usb = None;
         self.drop_standby().await;
         // A switch check still running gives the adapter up to the attempt.
@@ -1436,6 +1437,10 @@ impl Actor {
             }
             WirelessEvent::Done(failure) => {
                 // The task has dropped the access point and is ending on its own.
+                if let WirelessFailure::AccessPoint { cause } = &failure {
+                    // The access point would not open: that, too, answers the doctor.
+                    self.last_probe = Some(Err(SwitchFailure::AccessPoint(*cause)));
+                }
                 self.wireless.task = None;
                 self.end_wireless(WirelessPhase::Failed(failure)).await;
             }

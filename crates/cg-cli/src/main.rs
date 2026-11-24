@@ -694,7 +694,7 @@ mod cli {
                     Err(error) => vec![describe::service_check(&error)],
                 };
                 out!("{}", describe::checks(&checks));
-                if checks.iter().any(|c| !c.ok) {
+                if checks.iter().any(describe::check_failed) {
                     std::process::exit(1);
                 }
             }

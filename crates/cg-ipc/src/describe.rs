@@ -803,6 +803,12 @@ fn check_name(id: CheckId) -> &'static str {
 /// The check couldn't be made, so it neither passed nor is known to fail: the DNS check when
 /// the service couldn't read its port tables (port 53 not known to be free), and the access
 /// point check before anything tried the access point (the doctor never opens it).
+/// A check that found a problem: not ok, and not merely unchecked ([`check_unchecked`]).
+/// `cellglide doctor` fails (exit 1) only on these.
+pub fn check_failed(check: &Check) -> bool {
+    !check.ok && !check_unchecked(check)
+}
+
 pub fn check_unchecked(check: &Check) -> bool {
     let cause = check.args.get("cause").map(String::as_str);
     !check.ok
@@ -892,7 +898,14 @@ pub fn checks(checks: &[Check]) -> String {
     let mut out = String::new();
     for check in checks {
         let (line, fix) = check_lines(check);
-        let _ = writeln!(out, "{} {line}", if check.ok { "✓" } else { "✗" });
+        let mark = if check.ok {
+            "✓"
+        } else if check_unchecked(check) {
+            "?"
+        } else {
+            "✗"
+        };
+        let _ = writeln!(out, "{mark} {line}");
         if let Some(fix) = fix {
             let _ = writeln!(out, "  {}", tr("check.fix", &[("fix", &fix)]));
         }
@@ -1097,6 +1110,11 @@ mod tests {
         // A real failure is still one.
         let radio = Check::new(CheckId::WirelessAccessPoint, false).with("cause", "radio_off");
         assert!(!check_unchecked(&radio));
+        // `cellglide doctor` marks it "?" and does not fail on it; a real failure is "✗".
+        assert!(checks(std::slice::from_ref(&check)).starts_with("? "));
+        assert!(!check_failed(&check));
+        assert!(checks(std::slice::from_ref(&radio)).starts_with("✗ "));
+        assert!(check_failed(&radio));
     }
 
     fn snap(state: ConnState) -> Snapshot {
