@@ -34,8 +34,19 @@ $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:ExtraExcluded = @()
 
 function Test-Excluded([string]$key) {
+    # An alias is the key's first "|" field, matched whole ("Local Area Connection* 1" must not
+    # exclude "Local Area Connection* 10"); a GUID ("{...}") is a whole "\" or "|" segment.
+    $alias = ($key -split '\|')[0]
+    $segments = $key -split '[\\|]'
     foreach ($x in (@($CgAlias, $CgGuid) + @($script:ExtraExcluded))) {
-        if ($x -and $key.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+        if (-not $x) { continue }
+        if ($x -match '^\{[0-9A-Fa-f-]+\}$') {
+            foreach ($s in $segments) {
+                if ([string]::Equals($s, $x, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            }
+        } elseif ([string]::Equals($alias, $x, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
     }
     return $false
 }

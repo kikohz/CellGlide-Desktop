@@ -179,6 +179,29 @@ try {
     $r = Run-Script @('-Compare', $op, $a)
     Assert ($r.Code -eq 0) "case 14: old against new should compare, got $($r.Code): $($r.Output)"
 
+    # Case 15: an excluded alias matches the whole alias, not the start of another one
+    # ("Local Area Connection* 1" is not "Local Area Connection* 10", often a WAN Miniport),
+    # and an excluded GUID only a whole path segment.
+    function Write-WithNear([string]$name, [string]$value) {
+        $s = [System.IO.File]::ReadAllText($a, $utf8) | ConvertFrom-Json
+        $s.sections.dns | Add-Member -NotePropertyName 'Local Area Connection* 1|IPv4' -NotePropertyValue "near-$value" -Force
+        $s.sections.dns | Add-Member -NotePropertyName 'Local Area Connection* 10|IPv4' -NotePropertyValue $value -Force
+        $s.sections.registry | Add-Member -NotePropertyName "Tcpip\$wfdGuid\NameServer" -NotePropertyValue "near-$value" -Force
+        $s.sections.registry | Add-Member -NotePropertyName "Tcpip\$($wfdGuid)x\NameServer" -NotePropertyValue $value -Force
+        $s | Add-Member -NotePropertyName 'excluded' -NotePropertyValue @('Local Area Connection* 1', $wfdGuid) -Force
+        $p = Join-Path $tmp $name
+        [System.IO.File]::WriteAllText($p, ($s | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+        return $p
+    }
+    $y1 = Write-WithNear 'y1.json' '1'
+    $y2 = Write-WithNear 'y2.json' '2'
+    $r = Run-Script @('-Compare', $y1, $y2)
+    Assert ($r.Code -eq 1) "case 15: a near-named adapter should be reported, got $($r.Code): $($r.Output)"
+    Assert ($r.Output.Contains('Local Area Connection* 10|IPv4')) "case 15: output lacks 'Local Area Connection* 10': $($r.Output)"
+    Assert ($r.Output.Contains("$($wfdGuid)x\NameServer")) "case 15: output lacks the longer GUID segment: $($r.Output)"
+    Assert (-not $r.Output.Contains('Local Area Connection* 1|')) "case 15: the excluded alias was reported: $($r.Output)"
+    Assert (-not $r.Output.Contains("$wfdGuid\NameServer")) "case 15: the excluded GUID was reported: $($r.Output)"
+
     Write-Host 'all passed'
 }
 finally {
