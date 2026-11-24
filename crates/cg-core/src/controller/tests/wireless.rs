@@ -2828,6 +2828,30 @@ async fn the_doctor_probe_never_opens_the_access_point() {
     assert_eq!(w.fake.start_attempts(), 1);
 }
 
+/// An attempt that opened the access point counts as a check: after a restart with the switch
+/// already on, the doctor says "not checked yet" only until the first attempt gets that far.
+#[tokio::test]
+async fn an_attempt_that_opened_the_access_point_answers_the_doctor() {
+    use crate::controller::ApProbe;
+    let w = wireless_rig().await;
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::NotChecked
+    );
+    w.start().await;
+    wait_for(&w.r.controller, "waiting", |s| {
+        phase(s) == Some(WirelessPhaseView::Waiting)
+    })
+    .await;
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    let starts = w.fake.start_attempts();
+    assert_eq!(
+        w.r.controller.probe_access_point().await,
+        ApProbe::Available
+    );
+    assert_eq!(w.fake.start_attempts(), starts);
+}
+
 /// A failing access point is not tried again by the doctor either: the switch check failed, so
 /// the switch stayed off and the doctor says so.
 #[tokio::test]

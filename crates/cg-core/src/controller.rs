@@ -432,8 +432,8 @@ impl Controller {
     /// what the controller knows, never by opening it (only the user's own actions do: turning
     /// the switch on, connecting wirelessly): `SwitchOff` while the switch is off, `Available`
     /// while a wireless attempt (or one held for USB) owns the adapter, else the last switch
-    /// check's outcome, of any age, or `NotChecked` when there was none since the service
-    /// started.
+    /// check's outcome (or `Available` once an attempt opened the access point), of any age, or
+    /// `NotChecked` when there was neither since the service started.
     pub async fn probe_access_point(&self) -> ApProbe {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
@@ -746,7 +746,8 @@ struct Actor {
     switch_check: Option<SwitchCheck>,
     /// Switch checks started, for their generations.
     switch_checks: u64,
-    /// The last switch check's outcome: the doctor's answer.
+    /// The last switch check's outcome, or `Ok` once an attempt opened the access point: the
+    /// doctor's answer.
     last_probe: Option<std::result::Result<(), SwitchFailure>>,
     /// Between `Sleep { sleeping: true }` and the wake (Modern Standby keeps the service
     /// running): nothing wireless is started meanwhile, only wished for the wake.
@@ -1370,6 +1371,9 @@ impl Actor {
                 if self.wireless.phase.owns() {
                     if let WirelessPhase::Waiting { ssid, .. } = &phase {
                         self.wireless.ssid = Some(ssid.clone());
+                        // The access point opened: that answers the doctor as a switch
+                        // check would.
+                        self.last_probe = Some(Ok(()));
                     }
                     // The task has moved on from any question it asked.
                     self.wireless.confirm = None;
