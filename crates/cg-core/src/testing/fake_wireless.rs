@@ -284,6 +284,8 @@ struct State {
     started_with: Vec<(String, String)>,
     starts: usize,
     stops: usize,
+    /// The most access points up at the same time.
+    most_up: usize,
     lost: Vec<watch::Sender<bool>>,
     // Discovery.
     adverts: Vec<Advert>,
@@ -377,6 +379,11 @@ impl FakeWireless {
     /// Running access points dropped (stopped).
     pub fn stops(&self) -> usize {
         self.lock().stops
+    }
+
+    /// The most access points that were up at the same time.
+    pub fn most_up(&self) -> usize {
+        self.lock().most_up
     }
 
     /// Whether an access point is running (started and not dropped; a lost one still counts
@@ -633,6 +640,7 @@ impl AccessPoint for FakeWireless {
                 return Err(failure);
             }
             s.starts += 1;
+            s.most_up = s.most_up.max(s.starts - s.stops);
             let (lost, watching) = watch::channel(false);
             s.lost.push(lost);
             let local = s.local_address.unwrap_or(Some(ACCESS_POINT_ADDRESS));

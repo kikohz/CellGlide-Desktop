@@ -1228,15 +1228,17 @@ impl Actor {
     }
 
     /// Starts a wireless attempt; with `repair`, for that paired phone only, paired by code
-    /// again.
+    /// again. The user picked this connection: a wireless session held for USB (`Standby`)
+    /// ends first, its access point stopped before the new attempt starts one. A refused
+    /// request leaves the held one as it was.
     async fn connect_wireless(
         &mut self,
         events: &mpsc::Sender<Event>,
         repair: Option<String>,
     ) -> Result<()> {
         self.wireless.resume_at = None;
-        self.wireless.back_after_usb = None;
         if self.wireless.phase.owns() {
+            self.wireless.back_after_usb = None;
             return Ok(());
         }
         let refused = if !self.wireless_enabled() {
@@ -1260,7 +1262,9 @@ impl Actor {
         ) else {
             return Err(CoreError::BadRequest);
         };
-        // A doctor probe still running gives the adapter up to the attempt.
+        self.wireless.back_after_usb = None;
+        self.drop_standby().await;
+        // A switch check still running gives the adapter up to the attempt.
         self.cancel_switch_check(|| CoreError::BadRequest).await;
         self.wireless.attempt += 1;
         self.wireless.phase = WirelessPhase::Starting;

@@ -520,6 +520,48 @@ async fn disconnect_on_usb_then_unplugging_stays_off() {
     assert_eq!(w.fake.start_attempts(), 1);
 }
 
+/// Final review I-1: the iPhone that took over stops sharing over USB and the user picks
+/// "Connect wirelessly": the held access point is stopped before the new attempt starts its
+/// own (only one is ever up), and the new attempt ends on cancel; unplugging then starts
+/// nothing.
+#[tokio::test]
+async fn connect_wireless_after_the_usb_session_ended_replaces_the_held_access_point() {
+    let w = on_usb_rig().await;
+    // The USB device stops answering; the wireless phone keeps the routes it was given.
+    let (addr, _count) = not_sharing().await;
+    w.r.mux.route(cg_protocol::phone::port::CONTROL, addr);
+    w.r.phone.end_session();
+    wait_for(&w.r.controller, "usb session over", |s| !connected(s)).await;
+    assert!(w.fake.is_up(), "still held");
+    w.start().await;
+    assert_eq!(w.fake.stops(), 1, "the held access point is stopped first");
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 2);
+    assert_eq!(w.fake.most_up(), 1, "never two at once");
+    w.r.controller.send(Command::CancelWireless).await.unwrap();
+    assert!(!w.fake.is_up());
+    assert_eq!(w.r.controller.snapshot().wireless, None);
+    w.r.mux.detach(1);
+    // Past the 3 s delay.
+    tokio::time::sleep(Duration::from_millis(3800)).await;
+    assert_eq!(w.fake.start_attempts(), 2);
+    assert!(!w.fake.is_up());
+}
+
+/// A refused "Connect wirelessly" (a USB session runs) changes nothing: the held access point
+/// stays up, and unplugging still goes back to wireless on it.
+#[tokio::test]
+async fn a_refused_connect_wireless_on_usb_keeps_the_held_access_point() {
+    let w = on_usb_rig().await;
+    assert!(bad_request(
+        w.r.controller.send(Command::ConnectWireless).await
+    ));
+    assert!(w.fake.is_up());
+    w.r.mux.detach(1);
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 1, "the same access point");
+}
+
 /// Sleeping while on USB stops the held access point; waking with that iPhone still plugged in
 /// starts it again, held (so the phone can join meanwhile), and unplugging then reconnects.
 #[tokio::test]
