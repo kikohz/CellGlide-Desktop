@@ -2809,7 +2809,7 @@ async fn hand_over_access_point(
     serial: &str,
     enabled: bool,
     name: &str,
-    store: &crate::wireless::store::WirelessStore,
+    store: &Arc<crate::wireless::store::WirelessStore>,
 ) {
     match cable_pairing::hand_over_access_point(phone, hello, serial, enabled, name, store).await {
         Ok(cable_pairing::HandOver::Saved) => {

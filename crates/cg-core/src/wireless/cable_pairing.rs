@@ -7,6 +7,7 @@
 //! failure here is only reported to the caller. Nothing is saved unless the whole exchange
 //! succeeded.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -45,7 +46,7 @@ pub async fn pair_if_needed(
     usb_serial: &str,
     enabled: bool,
     computer_name: &str,
-    store: &WirelessStore,
+    store: &Arc<WirelessStore>,
 ) -> Result<Outcome> {
     if !enabled || !hello.has(CAPABILITY) {
         return Ok(Outcome::Skipped);
@@ -92,7 +93,7 @@ pub async fn pair_if_needed(
     match reply {
         // The phone doesn't send the key twice: remember which phone this is.
         Reply::Known { phone_id } => {
-            store.remember_phone(usb_serial, &phone_id)?;
+            remember_phone(store, usb_serial, &phone_id).await?;
             let has_key = store
                 .records()
                 .iter()
@@ -100,7 +101,8 @@ pub async fn pair_if_needed(
             if !has_key {
                 return Ok(Outcome::KnownButNoKey);
             }
-            store.set_stale(&phone_id, false)?;
+            let peer = phone_id.clone();
+            blocking(store, move |store| store.set_stale(&peer, false)).await?;
             Ok(Outcome::AlreadyPaired)
         }
         Reply::New {
@@ -121,8 +123,9 @@ pub async fn pair_if_needed(
                 method: Method::Cable,
                 stale: false,
             };
-            store.save(record.clone(), key)?;
-            store.remember_phone(usb_serial, &phone_id)?;
+            let saved = record.clone();
+            blocking(store, move |store| store.save(saved, key)).await?;
+            remember_phone(store, usb_serial, &phone_id).await?;
             Ok(Outcome::Paired(record))
         }
     }
@@ -149,7 +152,7 @@ pub async fn hand_over_access_point(
     usb_serial: &str,
     enabled: bool,
     computer_name: &str,
-    store: &WirelessStore,
+    store: &Arc<WirelessStore>,
 ) -> Result<HandOver> {
     if !enabled || !hello.has(CAPABILITY) || !hello.has(hotspot::CAPABILITY) {
         return Ok(HandOver::Skipped);
@@ -163,7 +166,7 @@ pub async fn hand_over_access_point(
         return Ok(HandOver::Skipped);
     };
     tracing::info!("wireless: the phone does not know this computer; pairing over the cable again");
-    store.set_stale(&phone_id, true)?;
+    blocking(store, move |store| store.set_stale(&phone_id, true)).await?;
     match pair_if_needed(phone, hello, usb_serial, enabled, computer_name, store).await? {
         Outcome::Paired(_) | Outcome::AlreadyPaired => {}
         Outcome::KnownButNoKey | Outcome::Skipped => return Ok(HandOver::Unknown),
@@ -179,7 +182,7 @@ pub async fn hand_over_access_point(
 async fn send_access_point(
     phone: &Phone,
     usb_serial: &str,
-    store: &WirelessStore,
+    store: &Arc<WirelessStore>,
 ) -> Result<Option<hotspot::Reply>> {
     let Some(phone_id) = store.phone_id(usb_serial) else {
         return Ok(None);
@@ -192,7 +195,7 @@ async fn send_access_point(
     else {
         return Ok(None);
     };
-    let (ssid, passphrase) = store.access_point()?;
+    let (ssid, passphrase) = blocking(store, WirelessStore::access_point).await?;
     let passphrase = Zeroizing::new(passphrase);
     let line = hotspot::request(&store.local_id(), &ssid, &passphrase, &key).ok_or_else(|| {
         CoreError::Pairing(
@@ -215,6 +218,27 @@ async fn send_access_point(
         .ok_or_else(|| {
             CoreError::Pairing("the phone's reply to the access point was malformed".into())
         })
+}
+
+/// Runs a store call that writes (DPAPI, `fsync`, rename) on a blocking thread, as the
+/// controller does, so it never holds an async worker up.
+async fn blocking<T: Send + 'static>(
+    store: &Arc<WirelessStore>,
+    call: impl FnOnce(&WirelessStore) -> std::io::Result<T> + Send + 'static,
+) -> Result<T> {
+    let store = store.clone();
+    Ok(tokio::task::spawn_blocking(move || call(&store))
+        .await
+        .map_err(std::io::Error::other)??)
+}
+
+async fn remember_phone(
+    store: &Arc<WirelessStore>,
+    usb_serial: &str,
+    phone_id: &str,
+) -> Result<()> {
+    let (serial, phone) = (usb_serial.to_string(), phone_id.to_string());
+    blocking(store, move |store| store.remember_phone(&serial, &phone)).await
 }
 
 /// A pairing with `phone_id` that is not stale and whose key is present.
@@ -274,7 +298,7 @@ mod tests {
         phone: FakePhone,
         handle: Phone,
         _dir: tempfile::TempDir,
-        store: WirelessStore,
+        store: Arc<WirelessStore>,
     }
 
     fn new_line(identity: &str, key: u8, name: &str) -> String {
@@ -297,7 +321,7 @@ mod tests {
         .await;
         mux.attach(device(SERIAL, 1));
         let dir = tempfile::tempdir().unwrap();
-        let store = WirelessStore::open(dir.path(), Arc::new(PlainSecrets)).unwrap();
+        let store = Arc::new(WirelessStore::open(dir.path(), Arc::new(PlainSecrets)).unwrap());
         Rig {
             handle: Phone::usb(mux.endpoint(), device(SERIAL, 1)),
             _mux: mux,
@@ -502,7 +526,7 @@ mod tests {
         pair(&r, true, &wireless_hello()).await.unwrap();
         // The key file can't be opened any more (another machine's, say): the record stays,
         // its key is gone.
-        r.store = WirelessStore::open(r._dir.path(), Arc::new(Refuses)).unwrap();
+        r.store = Arc::new(WirelessStore::open(r._dir.path(), Arc::new(Refuses)).unwrap());
         assert!(r.store.records()[0].stale);
         r.phone
             .set_cable(CableBehaviour::Reply(format!("CG1 KNOWN {PHONE_ID}")));
@@ -699,6 +723,44 @@ mod tests {
         // The new key signs the second try.
         assert_eq!(requests[3], hotspot_request(&r, 9));
         assert_eq!(r.store.key(IDENTITY2).unwrap().as_bytes(), &[9u8; 32]);
+    }
+
+    /// Final review M-4: the store's writes (DPAPI, fsync, rename) run on a blocking thread,
+    /// never on an async worker. `Handle::block_on` panics on a worker and works on a
+    /// blocking thread, so the seal counts the calls made from a worker.
+    #[tokio::test]
+    async fn the_store_is_written_off_the_async_workers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct OffWorker {
+            seals: AtomicUsize,
+            on_worker: AtomicUsize,
+        }
+        impl crate::wireless::store::SecretStore for OffWorker {
+            fn protect(&self, plain: &[u8]) -> std::io::Result<Vec<u8>> {
+                self.seals.fetch_add(1, Ordering::SeqCst);
+                let handle = tokio::runtime::Handle::current();
+                let blocking = std::panic::catch_unwind(|| handle.block_on(async {})).is_ok();
+                if !blocking {
+                    self.on_worker.fetch_add(1, Ordering::SeqCst);
+                }
+                PlainSecrets.protect(plain)
+            }
+            fn unprotect(&self, sealed: &[u8]) -> std::io::Result<Vec<u8>> {
+                PlainSecrets.unprotect(sealed)
+            }
+        }
+        let mut r = rig(replies(new_line(IDENTITY, 7, "iPhone"), "CG1 HOTSPOT OK")).await;
+        let secrets = Arc::new(OffWorker::default());
+        r.store = Arc::new(WirelessStore::open(r._dir.path(), secrets.clone()).unwrap());
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        // The access point's passphrase is made (and sealed) on first use.
+        assert_eq!(
+            hand_over(&r, true, &hotspot_hello()).await.unwrap(),
+            HandOver::Saved
+        );
+        assert!(secrets.seals.load(Ordering::SeqCst) >= 2);
+        assert_eq!(secrets.on_worker.load(Ordering::SeqCst), 0);
     }
 
     /// Final review M-8: the hand-over reply is read with its own limit (`hotspot::MAX_REPLY`),
