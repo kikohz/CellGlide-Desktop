@@ -543,6 +543,9 @@ struct Active {
     /// A wireless session's task waits on the other end: dropping this (with the session,
     /// after the tunnel is stopped) tells it the session is over.
     ended: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Taken by each cable task (pairing, handing the access point over) for its whole run,
+    /// so one started later waits for the one before rather than opening 8092 beside it.
+    cable_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Active {
@@ -1124,6 +1127,10 @@ impl Actor {
             Ok(()) => {
                 tracing::info!("wireless: the access point can be opened; switched on");
                 self.settings.update(|s| s.wireless_enabled = true);
+                // An iPhone on USB is asked at once (design §8.3), not at its next session.
+                if self.active.as_ref().is_some_and(|a| !a.is_wireless()) {
+                    self.start_cable_pairing();
+                }
             }
             Err(failure) => tracing::warn!("wireless: {failure:?}; the switch stays off"),
         }
@@ -2225,9 +2232,9 @@ impl Actor {
         let result = self.establish(phone, events).await;
         self.connecting = false;
         match result {
-            Ok(mut active) => {
-                self.start_cable_pairing(&mut active);
+            Ok(active) => {
                 self.begin_session(active);
+                self.start_cable_pairing();
                 // A wireless failure shown until now is old news once USB is up.
                 if matches!(self.wireless.phase, WirelessPhase::Failed(_)) {
                     self.wireless.phase = WirelessPhase::Off;
@@ -2439,18 +2446,25 @@ impl Actor {
             watch,
             handshakes: Handshakes::new(),
             ended: None,
+            cable_turn: Arc::default(),
         })
     }
 
-    /// Wireless pairing over the cable, once for this session, in a task of its own that
-    /// belongs to the session (it ends with it, so a phone that never answers is not left
-    /// holding a connection). Nothing here can delay or fail the session: the result is only
-    /// logged, and never the key or the reply.
-    fn start_cable_pairing(&self, active: &mut Active) {
+    /// Wireless pairing over the cable for the USB session in `active`, in a task of its own
+    /// that belongs to the session (it ends with it, so a phone that never answers is not left
+    /// holding a connection): once when the session starts, and again when the switch is
+    /// turned on during it. It runs after any earlier cable task of the session. Nothing here
+    /// can delay or fail the session: the result is only logged, and never the key or the
+    /// reply.
+    fn start_cable_pairing(&mut self) {
         let Some(store) = self.config.wireless.clone() else {
             return;
         };
         let enabled = self.settings.get().wireless_enabled;
+        let name = crate::wireless::computer_name(self.config.computer_name.as_deref());
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         // Cable pairing is for the USB link only.
         let Some(device) = active.phone.usb_device() else {
             return;
@@ -2458,8 +2472,9 @@ impl Actor {
         let serial = device.serial.clone();
         let phone = active.phone.clone();
         let hello = active.hello.clone();
-        let name = crate::wireless::computer_name(self.config.computer_name.as_deref());
+        let turn = cable_turn(&active.cable_turn);
         active.tasks.spawn(async move {
+            let _turn = turn.await;
             match cable_pairing::pair_if_needed(&phone, &hello, &serial, enabled, &name, &store)
                 .await
             {
@@ -2506,7 +2521,10 @@ impl Actor {
         let serial = device.serial.clone();
         let phone = active.phone.clone();
         let hello = active.hello.clone();
+        // After the session's earlier cable task (it may still wait on the phone's user).
+        let turn = cable_turn(&active.cable_turn);
         active.tasks.spawn(async move {
+            let _turn = turn.await;
             hand_over_access_point(&phone, &hello, &serial, enabled, &name, &store).await;
         });
     }
@@ -2752,6 +2770,21 @@ fn history_day(
         days: last_seven(today).iter().map(Date::to_string).collect(),
         begin,
         end: next.min(now).max(begin),
+    }
+}
+
+/// The session's cable turn (`Active::cable_turn`), for a task about to be spawned: taken at
+/// once when it is free, so tasks get it in the order they were started.
+fn cable_turn(
+    turn: &Arc<tokio::sync::Mutex<()>>,
+) -> impl Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send + use<> {
+    let free = turn.clone().try_lock_owned().ok();
+    let turn = turn.clone();
+    async move {
+        match free {
+            Some(guard) => guard,
+            None => turn.lock_owned().await,
+        }
     }
 }
 
@@ -4990,6 +5023,17 @@ mod tests {
             setting: bool,
             with_store: bool,
         ) -> Wireless {
+            wireless_rig_ports(options, setting, with_store, false).await
+        }
+
+        /// `wireless_rig`, with `FakeWireless` as the platform when `with_ports` (so the
+        /// switch can be turned on).
+        async fn wireless_rig_ports(
+            options: FakePhoneOptions,
+            setting: bool,
+            with_store: bool,
+            with_ports: bool,
+        ) -> Wireless {
             let dir = tempfile::tempdir().unwrap();
             let store = Arc::new(WirelessStore::open(dir.path(), Arc::new(PlainSecrets)).unwrap());
             let shared = store.clone();
@@ -5000,6 +5044,7 @@ mod tests {
                     ..Stored::default()
                 });
                 config.wireless = with_store.then_some(shared);
+                config.wireless_ports = with_ports.then(|| crate::testing::FakeWireless::new().ports());
                 config.computer_name = Some("Desk PC".into());
             })
             .await;
@@ -5185,6 +5230,80 @@ mod tests {
             })
             .await;
             assert!(w.store.records().is_empty());
+        }
+
+        /// Final review M-1 (design §8.3): turning the switch on while an iPhone is on USB
+        /// pairs over the cable at once, not at the next USB session.
+        #[tokio::test]
+        async fn turning_the_switch_on_during_a_usb_session_pairs_at_once() {
+            let (log, _guard) = capture();
+            let w = wireless_rig_ports(
+                options(CableBehaviour::Reply(new_line()), WIRELESS_CAPS),
+                false,
+                true,
+                true,
+            )
+            .await;
+            connect_and_wait(&w.r, "connected", connected).await;
+            logged(&log, "INFO", "wireless: cable pairing skipped", 1).await;
+            assert_eq!(w.r.phone.cable_connections(), 0);
+            w.r.controller
+                .send(Command::SetWireless { enabled: true })
+                .await
+                .unwrap();
+            until("the pairing", || w.store.records().len() == 1).await;
+            assert_eq!(w.store.phone_id("aaaa"), Some(PHONE_ID.to_string()));
+            assert_eq!(w.r.phone.cable_connections(), 1);
+            assert!(connected(&w.r.controller.snapshot()));
+            assert_eq!(w.r.backend.started(), 1, "the session was not rebuilt");
+        }
+
+        /// Final review M-5: a new access point name while the session's first cable task
+        /// still waits on the phone is sent after that task, not beside it on a second
+        /// connection.
+        #[tokio::test]
+        async fn a_new_name_waits_for_the_sessions_first_cable_task() {
+            let caps: Vec<&str> = WIRELESS_CAPS
+                .iter()
+                .copied()
+                .chain(["hotspot-v1"])
+                .collect();
+            let w = wireless_rig(options(CableBehaviour::Silent, &caps), true, true).await;
+            // Paired already: the first task goes straight to handing the access point over,
+            // and the silent phone keeps it waiting.
+            w.store
+                .save(
+                    crate::wireless::store::Record {
+                        peer_id: PHONE_ID.into(),
+                        name: "Eve iPhone".into(),
+                        identity: IDENTITY.into(),
+                        created_at: 1,
+                        method: crate::wireless::store::Method::Cable,
+                        stale: false,
+                    },
+                    crate::wireless::pairing::Key::from_bytes([7; 32]),
+                )
+                .unwrap();
+            w.store.remember_phone("aaaa", PHONE_ID).unwrap();
+            connect_and_wait(&w.r, "connected", connected).await;
+            until("the first hand-over", || {
+                w.r.phone.open_cable_connections() == 1
+            })
+            .await;
+            w.r.controller
+                .send(Command::RegenerateAccessPoint)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert_eq!(w.r.phone.cable_connections(), 1, "no second connection beside it");
+            // Both end with the session.
+            w.r.controller.send(Command::Disconnect).await.unwrap();
+            until("the connection to close", || {
+                w.r.phone.open_cable_connections() == 0
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(w.r.phone.cable_connections(), 1);
         }
 
         #[tokio::test]
