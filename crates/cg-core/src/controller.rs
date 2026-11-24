@@ -5112,7 +5112,10 @@ mod tests {
             )
             .await;
             connect_and_wait(&w.r, "connected", connected).await;
-            until("the pairing", || w.store.records().len() == 1).await;
+            until("the pairing and its USB device", || {
+                w.store.records().len() == 1 && w.store.phone_id("aaaa").is_some()
+            })
+            .await;
             let record = &w.store.records()[0];
             assert_eq!(record.method, crate::wireless::store::Method::Cable);
             assert_eq!(w.store.phone_id("aaaa"), Some(PHONE_ID.to_string()));
@@ -5274,7 +5277,10 @@ mod tests {
                 .send(Command::SetWireless { enabled: true })
                 .await
                 .unwrap();
-            until("the pairing", || w.store.records().len() == 1).await;
+            until("the pairing and its USB device", || {
+                w.store.records().len() == 1 && w.store.phone_id("aaaa").is_some()
+            })
+            .await;
             assert_eq!(w.store.phone_id("aaaa"), Some(PHONE_ID.to_string()));
             assert_eq!(w.r.phone.cable_connections(), 1);
             assert!(connected(&w.r.controller.snapshot()));
