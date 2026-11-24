@@ -5057,7 +5057,8 @@ mod tests {
                     ..Stored::default()
                 });
                 config.wireless = with_store.then_some(shared);
-                config.wireless_ports = with_ports.then(|| crate::testing::FakeWireless::new().ports());
+                config.wireless_ports =
+                    with_ports.then(|| crate::testing::FakeWireless::new().ports());
                 config.computer_name = Some("Desk PC".into());
             })
             .await;
@@ -5308,7 +5309,11 @@ mod tests {
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(500)).await;
-            assert_eq!(w.r.phone.cable_connections(), 1, "no second connection beside it");
+            assert_eq!(
+                w.r.phone.cable_connections(),
+                1,
+                "no second connection beside it"
+            );
             // Both end with the session.
             w.r.controller.send(Command::Disconnect).await.unwrap();
             until("the connection to close", || {
