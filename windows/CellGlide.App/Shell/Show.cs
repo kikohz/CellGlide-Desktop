@@ -177,15 +177,31 @@ public static partial class Show
 
     /// <summary>
     /// Puts <paramref name="text"/> on the clipboard; false when another program holds it right now (then
-    /// nothing was copied, and nothing should claim it was).
+    /// nothing was copied, and nothing should claim it was). A <paramref name="secret"/> (the access point's
+    /// passphrase) is kept out of clipboard history and is not synced to other devices.
     /// </summary>
-    public static bool Copy(string text)
+    public static bool Copy(string text, bool secret = false)
     {
         var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
         package.SetText(text);
         try
         {
-            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+            if (secret)
+            {
+                var options = new Windows.ApplicationModel.DataTransfer.ClipboardContentOptions
+                {
+                    IsAllowedInHistory = false,
+                    IsRoamable = false,
+                };
+                if (!Windows.ApplicationModel.DataTransfer.Clipboard.SetContentWithOptions(package, options))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+            }
             Windows.ApplicationModel.DataTransfer.Clipboard.Flush();
             return true;
         }

@@ -33,10 +33,13 @@ public sealed class CopyFeedback(Action changed)
         AutomationProperties.SetName(button, label);
     }
 
-    /// <summary>Copies <paramref name="text"/>; when the clipboard took it, says so on <paramref name="announce"/> for 2 seconds.</summary>
-    public async void Copy(string text, UIElement announce)
+    /// <summary>
+    /// Copies <paramref name="text"/> (a <paramref name="secret"/> one kept out of clipboard history and sync,
+    /// <see cref="Show.Copy"/>); when the clipboard took it, says so on <paramref name="announce"/> for 2 seconds.
+    /// </summary>
+    public async void Copy(string text, UIElement announce, bool secret = false)
     {
-        if (!Show.Copy(text))
+        if (!Show.Copy(text, secret))
         {
             // The clipboard is held by another program right now: nothing copied, nothing claimed.
             return;

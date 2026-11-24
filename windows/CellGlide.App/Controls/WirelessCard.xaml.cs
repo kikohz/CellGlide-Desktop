@@ -213,7 +213,8 @@ public sealed partial class WirelessCard : UserControl
     {
         if (_wireless?.Info is { } info)
         {
-            _copy.Copy(info.Passphrase, CopyButton);
+            // The passphrase stays out of clipboard history and cloud sync.
+            _copy.Copy(info.Passphrase, CopyButton, secret: true);
         }
     }
 }
