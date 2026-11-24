@@ -2759,10 +2759,12 @@ async fn a_probe_dropped_before_its_answer_is_asked_again() {
     assert_eq!(probes(&count), 2);
 }
 
-/// The doctor's question: nothing while the switch is off, one check when asked (a failure is
-/// asked again, a success is kept for a while), no probing while an attempt owns the adapter.
+/// The doctor's question is answered from what the controller knows, and never opens the
+/// access point (final review I-2): nothing while the switch is off, "not checked yet" before
+/// any switch check, the last switch check's outcome after one (of any age), and available
+/// while an attempt owns the adapter.
 #[tokio::test]
-async fn the_doctor_probe_asks_once_and_leaves_a_session_alone() {
+async fn the_doctor_probe_never_opens_the_access_point() {
     use crate::controller::ApProbe;
     let w = connected_rig(|_| {}).await;
     // A session owns the adapter: available, nothing opened.
@@ -2773,26 +2775,28 @@ async fn the_doctor_probe_asks_once_and_leaves_a_session_alone() {
     );
     assert_eq!(w.fake.start_attempts(), before);
 
-    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
-        config.settings = SettingsSource::Memory(Stored {
-            auto_connect: false,
-            wireless_enabled: false,
-            ..Stored::default()
-        });
-    })
-    .await;
+    // On from the start (a saved setting): never checked since the service started.
+    let w = wireless_rig().await;
+    for _ in 0..2 {
+        assert_eq!(
+            w.r.controller.probe_access_point().await,
+            ApProbe::NotChecked
+        );
+    }
+    assert_eq!(w.fake.start_attempts(), 0);
+
+    let w = wireless_rig_with(FakePhoneOptions::default(), switch_off_config).await;
     assert_eq!(
         w.r.controller.probe_access_point().await,
         ApProbe::SwitchOff
     );
     assert_eq!(w.fake.start_attempts(), 0);
-
     w.r.controller
         .send(Command::SetWireless { enabled: true })
         .await
         .unwrap();
     assert_eq!(w.fake.start_attempts(), 1);
-    // The switch check just succeeded: kept.
+    // The switch check succeeded: that is the answer (however old; nothing expires it).
     assert_eq!(
         w.r.controller.probe_access_point().await,
         ApProbe::Available
@@ -2800,26 +2804,22 @@ async fn the_doctor_probe_asks_once_and_leaves_a_session_alone() {
     assert_eq!(w.fake.start_attempts(), 1);
 }
 
+/// A failing access point is not tried again by the doctor either: the switch check failed, so
+/// the switch stayed off and the doctor says so.
 #[tokio::test]
-async fn the_doctor_probe_checks_a_failure_again() {
+async fn the_doctor_probe_does_not_retry_a_failed_switch_check() {
     use crate::controller::ApProbe;
-    let w = wireless_rig_with(FakePhoneOptions::default(), |config| {
-        config.settings = SettingsSource::Memory(Stored {
-            auto_connect: false,
-            wireless_enabled: true,
-            ..Stored::default()
-        });
-    })
-    .await;
+    let w = wireless_rig_with(FakePhoneOptions::default(), switch_off_config).await;
     w.fake.fail_starts(Some(ApFailure::RadioOff));
+    assert!(matches!(
+        w.r.controller
+            .send(Command::SetWireless { enabled: true })
+            .await,
+        Err(CoreError::WirelessUnavailable(ApFailure::RadioOff))
+    ));
     assert_eq!(
         w.r.controller.probe_access_point().await,
-        ApProbe::Unavailable(ApFailure::RadioOff)
+        ApProbe::SwitchOff
     );
-    w.fake.fail_starts(None);
-    assert_eq!(
-        w.r.controller.probe_access_point().await,
-        ApProbe::Available
-    );
-    assert!(!w.fake.is_up());
+    assert_eq!(w.fake.start_attempts(), 1);
 }

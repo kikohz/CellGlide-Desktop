@@ -134,6 +134,8 @@ check:
     fail: "这台电脑无法开启 iPhone 要加入的无线网络：%{reason}"
     fix: "按上面的原因处理（打开 Wi‑Fi、关闭移动热点）；如果这块 Wi‑Fi 网卡做不到，请改用 USB 线"
     store: "CellGlide 的无线数据无法打开"
+    unknown: "还没检查这台电脑能否开启 iPhone 要加入的无线网络"
+    fix_unchecked: "把「无线连接」关掉再打开即可检查；直接无线连接也能看出是否可用"
 cli:
   disconnected: "已断开，电脑回到原来的网络"
   still_connecting: "仍在连接，可运行 cellglide watch 查看进度"

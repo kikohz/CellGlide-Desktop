@@ -134,6 +134,8 @@ check:
     fail: "This computer can't open the wireless network the iPhone joins: %{reason}"
     fix: "fix what the reason above says (Wi‑Fi on, Mobile Hotspot off); if this Wi‑Fi adapter can't do it, use the USB cable"
     store: "CellGlide's wireless data can't be opened"
+    unknown: "Not checked yet whether this computer can open the wireless network the iPhone joins"
+    fix_unchecked: "to check, turn Wireless connection off and on again; connecting wirelessly also shows whether it works"
 cli:
   disconnected: "Disconnected. This computer is back on its own network"
   still_connecting: "Still connecting. Run cellglide watch to follow progress"

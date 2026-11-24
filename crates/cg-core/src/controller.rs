@@ -428,11 +428,12 @@ impl Controller {
         self.snapshot.clone()
     }
 
-    /// The doctor's read-only question: can this computer open the access point. Answered
-    /// without probing while the switch is off or a wireless attempt owns the adapter; else
-    /// from the last successful check if it is under [`PROBE_FRESH`] old (a failure is checked again, so a fix shows
-    /// at once), else by one check (the same one that turning the switch on runs, on the actor's task for it, so a
-    /// wireless attempt starting meanwhile ends it first). `Available` when it was cut short.
+    /// The doctor's read-only question: can this computer open the access point. Answered from
+    /// what the controller knows, never by opening it (only the user's own actions do: turning
+    /// the switch on, connecting wirelessly): `SwitchOff` while the switch is off, `Available`
+    /// while a wireless attempt (or one held for USB) owns the adapter, else the last switch
+    /// check's outcome, of any age, or `NotChecked` when there was none since the service
+    /// started.
     pub async fn probe_access_point(&self) -> ApProbe {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
@@ -618,10 +619,10 @@ pub enum ApProbe {
     Unavailable(ApFailure),
     /// The pairing store can't be opened.
     StoreUnavailable,
+    /// No switch check since the service started (the switch was already on), and no attempt
+    /// owns the adapter: the doctor doesn't open it to find out.
+    NotChecked,
 }
-
-/// How long a successful switch check answers the doctor without a new one.
-const PROBE_FRESH: Duration = Duration::from_secs(300);
 
 /// Why turning the wireless switch on did not work.
 #[derive(Clone, Copy, Debug)]
@@ -742,8 +743,8 @@ struct Actor {
     switch_check: Option<SwitchCheck>,
     /// Switch checks started, for their generations.
     switch_checks: u64,
-    /// The last switch check's outcome and when it finished.
-    last_probe: Option<(Instant, std::result::Result<(), SwitchFailure>)>,
+    /// The last switch check's outcome: the doctor's answer.
+    last_probe: Option<std::result::Result<(), SwitchFailure>>,
 }
 
 impl Actor {
@@ -824,7 +825,9 @@ impl Actor {
                     {
                         self.check_switch(done, &events_tx);
                     }
-                    Some(Message::ProbeAccessPoint(done)) => self.probe_access_point(done, &events_tx),
+                    Some(Message::ProbeAccessPoint(done)) => {
+                        let _ = done.send(self.probe_access_point());
+                    }
                     Some(Message::Command(command, done)) => {
                         let result = self.command(command, &events_tx).await;
                         self.publish();
@@ -1091,33 +1094,19 @@ impl Actor {
         });
     }
 
-    /// Answers the doctor (`Controller::probe_access_point`).
-    fn probe_access_point(
-        &mut self,
-        done: tokio::sync::oneshot::Sender<ApProbe>,
-        events: &mpsc::Sender<Event>,
-    ) {
+    /// Answers the doctor (`Controller::probe_access_point`) from state only.
+    fn probe_access_point(&self) -> ApProbe {
         if !self.wireless_enabled() {
-            let _ = done.send(ApProbe::SwitchOff);
+            ApProbe::SwitchOff
         } else if self.wireless.phase.owns() || self.wireless.standby.is_some() {
-            let _ = done.send(ApProbe::Available);
-        } else if let Some((at, Ok(()))) = self.last_probe
-            && at.elapsed() < PROBE_FRESH
-        {
-            let _ = done.send(ApProbe::Available);
+            ApProbe::Available
         } else {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.check_switch(tx, events);
-            tokio::spawn(async move {
-                let probe = match rx.await {
-                    Ok(Ok(())) => ApProbe::Available,
-                    Ok(Err(CoreError::WirelessUnavailable(cause))) => ApProbe::Unavailable(cause),
-                    Ok(Err(CoreError::WirelessStore)) => ApProbe::StoreUnavailable,
-                    // Cut short by an attempt starting (or the service stopping).
-                    _ => ApProbe::Available,
-                };
-                let _ = done.send(probe);
-            });
+            match self.last_probe {
+                None => ApProbe::NotChecked,
+                Some(Ok(())) => ApProbe::Available,
+                Some(Err(SwitchFailure::AccessPoint(cause))) => ApProbe::Unavailable(cause),
+                Some(Err(SwitchFailure::Store)) => ApProbe::StoreUnavailable,
+            }
         }
     }
 
@@ -1130,7 +1119,7 @@ impl Actor {
         else {
             return;
         };
-        self.last_probe = Some((Instant::now(), outcome));
+        self.last_probe = Some(outcome);
         match outcome {
             Ok(()) => {
                 tracing::info!("wireless: the access point can be opened; switched on");

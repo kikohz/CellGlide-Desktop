@@ -800,12 +800,17 @@ fn check_name(id: CheckId) -> &'static str {
     }
 }
 
-/// The check couldn't be made, so it neither passed nor is known to fail: today only the DNS
-/// check when the service couldn't read its port tables (port 53 not known to be free).
+/// The check couldn't be made, so it neither passed nor is known to fail: the DNS check when
+/// the service couldn't read its port tables (port 53 not known to be free), and the access
+/// point check before anything tried the access point (the doctor never opens it).
 pub fn check_unchecked(check: &Check) -> bool {
+    let cause = check.args.get("cause").map(String::as_str);
     !check.ok
-        && check.id == CheckId::Dns
-        && check.args.get("cause").map(String::as_str) == Some("unreadable")
+        && match check.id {
+            CheckId::Dns => cause == Some("unreadable"),
+            CheckId::WirelessAccessPoint => cause == Some("unchecked"),
+            _ => false,
+        }
 }
 
 /// The check's sentence and, when it failed, the fix to show.
@@ -853,6 +858,7 @@ pub fn check_lines(check: &Check) -> (String, Option<String>) {
     // The access point's cause (`ApFailure`'s name, or `store`) as words.
     if check.id == CheckId::WirelessAccessPoint
         && let Some(cause) = check.args.get("cause")
+        && cause != "unchecked"
     {
         let key = match cause.as_str() {
             "no_adapter" => "wireless.cause.no_adapter",
@@ -1070,6 +1076,27 @@ mod tests {
         let (line, fix) = check_lines(&check);
         assert!(line.starts_with("无法检查 DNS 端口 53"), "{line}");
         assert!(fix.unwrap().contains("重启电脑"));
+    }
+
+    #[test]
+    fn an_access_point_not_checked_yet_reads_as_unchecked() {
+        let _lang = language();
+        let check = Check::new(CheckId::WirelessAccessPoint, false).with("cause", "unchecked");
+        assert!(check_unchecked(&check));
+        cg_i18n::set(Lang::En);
+        let (line, fix) = check_lines(&check);
+        assert_eq!(
+            line,
+            "Not checked yet whether this computer can open the wireless network the iPhone joins"
+        );
+        assert!(fix.unwrap().contains("off and on again"));
+        cg_i18n::set(Lang::ZhCn);
+        let (line, fix) = check_lines(&check);
+        assert!(line.starts_with("还没检查"), "{line}");
+        assert!(fix.unwrap().contains("关掉再打开"));
+        // A real failure is still one.
+        let radio = Check::new(CheckId::WirelessAccessPoint, false).with("cause", "radio_off");
+        assert!(!check_unchecked(&radio));
     }
 
     fn snap(state: ConnState) -> Snapshot {

@@ -302,6 +302,8 @@ pub const KEYS: &[&str] = &[
     "check.wireless_access_point.fail",
     "check.wireless_access_point.fix",
     "check.wireless_access_point.store",
+    "check.wireless_access_point.unknown",
+    "check.wireless_access_point.fix_unchecked",
     "cli.disconnected",
     "cli.still_connecting",
     "cli.service_stopped",

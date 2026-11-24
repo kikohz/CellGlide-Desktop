@@ -58,13 +58,15 @@ pub async fn checks(
 }
 
 /// The access point check, listed only while the wireless switch is on: whether this computer
-/// can open it, with the cause when not (an `ApFailure`'s name, or `store`).
+/// can open it, with the cause when not (an `ApFailure`'s name, or `store`), or `unchecked`
+/// when it was not checked since the service started (the doctor never opens it).
 fn access_point_check(probe: ApProbe) -> Option<Check> {
     let id = CheckId::WirelessAccessPoint;
     Some(match probe {
         ApProbe::SwitchOff => return None,
         ApProbe::Available => Check::new(id, true),
         ApProbe::StoreUnavailable => Check::new(id, false).with("cause", "store"),
+        ApProbe::NotChecked => Check::new(id, false).with("cause", "unchecked"),
         ApProbe::Unavailable(cause) => Check::new(id, false).with(
             "cause",
             serde_json::to_value(cause)
@@ -420,6 +422,10 @@ mod tests {
         assert_eq!(hotspot.args["cause"], "mobile_hotspot_on");
         let store = access_point_check(ApProbe::StoreUnavailable).unwrap();
         assert_eq!(store.args["cause"], "store");
+        let unchecked = access_point_check(ApProbe::NotChecked).unwrap();
+        assert!(!unchecked.ok);
+        assert_eq!(unchecked.args["cause"], "unchecked");
+        assert!(cg_ipc::describe::check_unchecked(&unchecked));
     }
 
     #[tokio::test]
