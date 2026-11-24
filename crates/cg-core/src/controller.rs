@@ -1324,10 +1324,6 @@ impl Actor {
         Ok(())
     }
 
-    /// Ends the wireless attempt, if one runs or failed, and leaves `then`: the task is gone
-    /// before its session's tunnel is stopped and this returns. The access point it held has
-    /// been dropped by then, which hands its stop to the platform; the stop may still be under
-    /// way, and the platform does not start another access point until it has finished.
     /// Stops a wireless attempt held for USB (`Standby`), and with it the access point.
     async fn drop_standby(&mut self) {
         if let Some(standby) = self.wireless.standby.take() {
@@ -1336,6 +1332,10 @@ impl Actor {
         }
     }
 
+    /// Ends the wireless attempt, if one runs or failed, and leaves `then`: the task is gone
+    /// before its session's tunnel is stopped and this returns. The access point it held has
+    /// been dropped by then, which hands its stop to the platform; the stop may still be under
+    /// way, and the platform does not start another access point until it has finished.
     async fn end_wireless(&mut self, then: WirelessPhase) {
         self.drop_standby().await;
         self.wireless.hold = None;
