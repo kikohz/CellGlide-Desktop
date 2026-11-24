@@ -64,7 +64,7 @@ pub async fn pair_if_needed(
     let mut stream = phone.open(CABLE_PAIRING_PORT).await?;
     stream.write_all(request.as_bytes()).await?;
     // The phone may be asking its user: wait for the answer, but not forever.
-    let line = timeout(REPLY_TIMEOUT, read_line(&mut stream))
+    let line = timeout(REPLY_TIMEOUT, read_line(&mut stream, MAX_REPLY))
         .await
         .map_err(|_| CoreError::Timeout)??;
     // Nothing more is sent; the connection closes when `stream` is dropped.
@@ -201,9 +201,12 @@ async fn send_access_point(
     })?;
     let mut stream = phone.open(CABLE_PAIRING_PORT).await?;
     stream.write_all(line.as_bytes()).await?;
-    let reply = timeout(hotspot::REPLY_TIMEOUT, read_line(&mut stream))
-        .await
-        .map_err(|_| CoreError::Timeout)??;
+    let reply = timeout(
+        hotspot::REPLY_TIMEOUT,
+        read_line(&mut stream, hotspot::MAX_REPLY),
+    )
+    .await
+    .map_err(|_| CoreError::Timeout)??;
     drop(stream);
     std::str::from_utf8(&reply)
         .ok()
@@ -229,18 +232,21 @@ fn unix_now() -> u64 {
 }
 
 /// One line without its newline, read a byte at a time so nothing beyond it is consumed.
-/// A line that reaches `MAX_REPLY` bytes is an error. The line can carry the key, so it is
-/// wiped when dropped, and allocated once at full size so no partial copy is left behind by a
-/// reallocation.
-async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Zeroizing<Vec<u8>>> {
-    let mut line = Zeroizing::new(Vec::with_capacity(MAX_REPLY));
+/// A line that reaches `limit` bytes (the reply's longest, newline included) is an error. The
+/// line can carry the key, so it is wiped when dropped, and allocated once at full size so no
+/// partial copy is left behind by a reallocation.
+async fn read_line<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    limit: usize,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let mut line = Zeroizing::new(Vec::with_capacity(limit));
     loop {
         let byte = stream.read_u8().await?;
         if byte == b'\n' {
             return Ok(line);
         }
         line.push(byte);
-        if line.len() >= MAX_REPLY {
+        if line.len() >= limit {
             return Err(CoreError::Pairing("the phone's reply was too long".into()));
         }
     }
@@ -693,6 +699,20 @@ mod tests {
         // The new key signs the second try.
         assert_eq!(requests[3], hotspot_request(&r, 9));
         assert_eq!(r.store.key(IDENTITY2).unwrap().as_bytes(), &[9u8; 32]);
+    }
+
+    /// Final review M-8: the hand-over reply is read with its own limit (`hotspot::MAX_REPLY`),
+    /// not the cable pairing's.
+    #[tokio::test]
+    async fn a_hand_over_reply_over_its_limit_is_too_long() {
+        let long = format!("CG1 HOTSPOT {}", "A".repeat(hotspot::MAX_REPLY));
+        let r = rig(replies(new_line(IDENTITY, 7, "iPhone"), &long)).await;
+        pair(&r, true, &hotspot_hello()).await.unwrap();
+        let error = hand_over(&r, true, &hotspot_hello()).await.unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Pairing(m) if m.contains("too long")),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
