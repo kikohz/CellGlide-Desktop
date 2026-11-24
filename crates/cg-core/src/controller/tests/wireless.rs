@@ -590,6 +590,30 @@ async fn waking_on_usb_starts_the_held_access_point_again() {
     assert_eq!(w.fake.start_attempts(), 2, "the same access point");
 }
 
+/// Final review M-6: the iPhone that took over is unplugged while the computer sleeps (Modern
+/// Standby keeps the service running): nothing starts until the wake, which then goes back to
+/// wireless.
+#[tokio::test]
+async fn unplugging_while_asleep_goes_back_to_wireless_only_on_wake() {
+    let w = on_usb_rig().await;
+    w.r.controller
+        .send(Command::Sleep { sleeping: true })
+        .await
+        .unwrap();
+    assert!(!w.fake.is_up());
+    w.r.mux.detach(1);
+    // Past the 3 s delay: still asleep, so no access point.
+    tokio::time::sleep(Duration::from_millis(3800)).await;
+    assert_eq!(w.fake.start_attempts(), 1);
+    assert!(!w.fake.is_up());
+    w.r.controller
+        .send(Command::Sleep { sleeping: false })
+        .await
+        .unwrap();
+    w.connected().await;
+    assert_eq!(w.fake.start_attempts(), 2);
+}
+
 #[tokio::test]
 async fn suspend_ends_it_and_resume_starts_it_again() {
     let w = connected_rig(|_| {}).await;

@@ -748,6 +748,9 @@ struct Actor {
     switch_checks: u64,
     /// The last switch check's outcome: the doctor's answer.
     last_probe: Option<std::result::Result<(), SwitchFailure>>,
+    /// Between `Sleep { sleeping: true }` and the wake (Modern Standby keeps the service
+    /// running): nothing wireless is started meanwhile, only wished for the wake.
+    sleeping: bool,
 }
 
 impl Actor {
@@ -809,6 +812,7 @@ impl Actor {
             switch_check: None,
             switch_checks: 0,
             last_probe: None,
+            sleeping: false,
         }
     }
 
@@ -930,6 +934,7 @@ impl Actor {
                     if sleeping { "suspend" } else { "resume" }
                 );
                 self.monitor.sleep_changed(Timestamp::now());
+                self.sleeping = sleeping;
                 // Suspending ends a wireless attempt (the access point goes with it); resuming
                 // starts it again, unless a code was on screen (that pairing starts over only
                 // when the user asks).
@@ -1804,6 +1809,9 @@ impl Actor {
                                 name_clash: false,
                             }
                         };
+                    } else if self.sleeping {
+                        // No access point while the computer sleeps: the wake starts it.
+                        self.wireless.resume_after_sleep = true;
                     } else {
                         self.wireless.resume_at = Some(Instant::now() + WIRELESS_RESUME_DELAY);
                     }
@@ -1989,6 +1997,11 @@ impl Actor {
         }
         self.take_notices();
         self.health_checks(events);
+        if self.wireless.resume_at.is_some_and(|at| now >= at) && self.sleeping {
+            // Never while the computer sleeps: kept for the wake instead.
+            self.wireless.resume_at = None;
+            self.wireless.resume_after_sleep = true;
+        }
         if self.wireless.resume_at.is_some_and(|at| now >= at) {
             self.wireless.resume_at = None;
             if let Some(mux_id) = self.wireless.back_after_usb {
